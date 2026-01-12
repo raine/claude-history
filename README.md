@@ -60,6 +60,20 @@ This opens an `fzf` session listing all conversations, newest first. The search
 matches against the entire transcript; the preview shows the first three
 messages by default.
 
+### search syntax
+
+The fuzzy finder supports fzf's extended search syntax:
+
+| Token    | Match type  | Example                                   |
+|----------|-------------|-------------------------------------------|
+| `'word`  | Exact match | `'error` matches "error" exactly          |
+| `!word`  | Exclude     | `!test` excludes results containing "test"|
+| `a \| b` | OR          | `'error \| 'warning` matches either term  |
+| `a b`    | AND         | `'error 'api` matches both terms          |
+
+Combine these for precise searches: `'deploy 'production !staging` finds
+conversations mentioning both "deploy" and "production" but not "staging".
+
 ```
 View Claude conversation history with fuzzy search
 
