@@ -13,6 +13,7 @@ mod tool_format;
 mod tui;
 
 use clap::Parser;
+use claude_history::path_filter::PathFilter;
 use claude_history::time_filter::TimeFilter;
 use cli::Args;
 use error::{AppError, Result};
@@ -105,8 +106,9 @@ fn run() -> Result<()> {
         std::io::stdout().is_terminal(),
     );
 
-    // Build time filter from CLI args
+    // Build filters from CLI args
     let time_filter = build_time_filter(&args)?;
+    let path_filter = build_path_filter(&args)?;
 
     // Handle --render flag: render a JSONL file in ledger format and exit
     if let Some(ref render_path) = args.render {
@@ -146,7 +148,12 @@ fn run() -> Result<()> {
     // Determine how to load conversations based on mode
     let (conversations, selected_path) = if args.global {
         // Global Search (-g) - use streaming loader for instant startup
-        let rx = history::load_all_conversations_streaming(show_last, args.debug, time_filter.clone());
+        let rx = history::load_all_conversations_streaming(
+            show_last,
+            args.debug,
+            time_filter.clone(),
+            path_filter.clone(),
+        );
 
         match tui::run_with_loader(rx, use_relative_time, tool_display, show_thinking)? {
             (tui::Action::Select(path), convs) => (convs, path),
@@ -182,7 +189,13 @@ fn run() -> Result<()> {
             ));
         }
 
-        let conversations = history::load_conversations(&projects_dir, show_last, args.debug, time_filter.as_ref())?;
+        let conversations = history::load_conversations(
+            &projects_dir,
+            show_last,
+            args.debug,
+            time_filter.as_ref(),
+            path_filter.as_ref(),
+        )?;
 
         if conversations.is_empty() {
             return Err(AppError::NoHistoryFound("selected scope".to_string()));
@@ -314,6 +327,20 @@ fn build_time_filter(args: &Args) -> Result<Option<TimeFilter>> {
     }
 
     Ok(Some(filter))
+}
+
+/// Build a PathFilter from CLI arguments.
+///
+/// Returns None if no path filtering options are specified.
+fn build_path_filter(args: &Args) -> Result<Option<PathFilter>> {
+    // If no path args specified, return None
+    if args.include_path.is_empty() && args.exclude_path.is_empty() {
+        return Ok(None);
+    }
+
+    PathFilter::from_patterns(&args.include_path, &args.exclude_path)
+        .map(Some)
+        .map_err(|e| AppError::InvalidArgs(format!("Invalid path filter pattern: {}", e)))
 }
 
 fn resume_with_claude(
