@@ -189,6 +189,25 @@ pub struct Args {
     )]
     pub exclude_path: Vec<String>,
 
+    // ==================== Content Filtering ====================
+    /// Boolean search query to filter conversations by content
+    ///
+    /// Searches the full conversation text using boolean expressions:
+    /// - Terms: `rust`, `"exact phrase"`
+    /// - AND: `rust && api`
+    /// - OR: `rust || python`
+    /// - NOT: `!deprecated`
+    /// - Grouping: `(rust || go) && !java`
+    ///
+    /// Matching is case-insensitive.
+    #[arg(
+        long,
+        short = 'q',
+        value_name = "QUERY",
+        help = "Boolean search query (e.g., 'rust && !deprecated')"
+    )]
+    pub query: Option<String>,
+
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
     pub pager: bool,
