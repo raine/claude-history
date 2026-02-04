@@ -122,6 +122,38 @@ pub struct Args {
     )]
     pub global: bool,
 
+    // ==================== Time Filtering ====================
+    /// Show conversations since a duration ago (e.g., 2d, 1w, 3h)
+    ///
+    /// Duration format: <number><unit> where unit is:
+    /// - h: hours (e.g., 3h = 3 hours ago)
+    /// - d: days (e.g., 2d = 2 days ago)
+    /// - w: weeks (e.g., 1w = 1 week ago)
+    /// - m: months, ~30 days (e.g., 1m = ~30 days ago)
+    #[arg(
+        long,
+        short = 's',
+        value_name = "DURATION",
+        help = "Show conversations since duration (e.g., 2d, 1w, 3h)"
+    )]
+    pub since: Option<String>,
+
+    /// Show conversations after a specific date (YYYY-MM-DD)
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "Show conversations after date (YYYY-MM-DD)"
+    )]
+    pub after: Option<String>,
+
+    /// Show conversations before a specific date (YYYY-MM-DD)
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "Show conversations before date (YYYY-MM-DD)"
+    )]
+    pub before: Option<String>,
+
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
     pub pager: bool,
