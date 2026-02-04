@@ -11,12 +11,14 @@
 //!
 //! - [`time_filter`] - Time-based filtering with duration and date range support
 //! - [`path_filter`] - Path-based filtering with regex include/exclude patterns
+//! - [`query`] - Boolean query parsing and evaluation for content search
 //!
 //! ## Example
 //!
 //! ```rust,no_run
 //! use claude_history::time_filter::TimeFilter;
 //! use claude_history::path_filter::PathFilter;
+//! use claude_history::query::{parse_query, evaluate};
 //! use chrono::{Duration, Local};
 //! use std::path::Path;
 //!
@@ -35,7 +37,13 @@
 //!     .unwrap();
 //!
 //! assert!(path_filter.matches(Path::new("/home/user/work/myapp")));
+//!
+//! // Create a boolean query for content search
+//! let query = parse_query("rust && !deprecated").unwrap();
+//! assert!(evaluate(&query, "new rust api"));
+//! assert!(!evaluate(&query, "deprecated rust code"));
 //! ```
 
 pub mod path_filter;
+pub mod query;
 pub mod time_filter;
