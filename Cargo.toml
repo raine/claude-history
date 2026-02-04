@@ -36,3 +36,4 @@ pulldown-cmark = "0.13"
 unicode-width = "0.2"
 arboard = "3.4"
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+regex = "1"
