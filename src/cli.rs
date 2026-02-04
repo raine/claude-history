@@ -150,6 +150,41 @@ pub struct Args {
     )]
     pub before: Option<String>,
 
+    // ==================== Path Filtering ====================
+    /// Include only paths matching regex pattern
+    ///
+    /// Can be specified multiple times; paths matching ANY pattern are included.
+    /// If no include patterns are specified, all paths are included by default.
+    ///
+    /// Examples:
+    /// - --include-path "/work/" (paths containing /work/)
+    /// - --include-path "^/home/user/projects" (paths starting with...)
+    /// - --include-path "(?i)rust" (case-insensitive match)
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        value_name = "PATTERN",
+        help = "Include paths matching regex (can be repeated)"
+    )]
+    pub include_path: Vec<String>,
+
+    /// Exclude paths matching regex pattern
+    ///
+    /// Can be specified multiple times; paths matching ANY pattern are excluded.
+    /// Exclusions take precedence over inclusions.
+    ///
+    /// Examples:
+    /// - --exclude-path "test" (exclude paths containing 'test')
+    /// - --exclude-path "node_modules" (exclude node_modules)
+    /// - --exclude-path "\\.git" (exclude .git directories)
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        value_name = "PATTERN",
+        help = "Exclude paths matching regex (can be repeated)"
+    )]
+    pub exclude_path: Vec<String>,
+
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
     pub pager: bool,
