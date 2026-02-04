@@ -13,6 +13,7 @@ mod tool_format;
 mod tui;
 
 use clap::Parser;
+use claude_history::time_filter::TimeFilter;
 use cli::Args;
 use error::{AppError, Result};
 use std::io::IsTerminal;
@@ -91,6 +92,9 @@ fn run() -> Result<()> {
         std::io::stdout().is_terminal(),
     );
 
+    // Build time filter from CLI args
+    let time_filter = build_time_filter(&args)?;
+
     // Handle --render flag: render a JSONL file in ledger format and exit
     if let Some(ref render_path) = args.render {
         let display_options = display::DisplayOptions {
@@ -129,7 +133,7 @@ fn run() -> Result<()> {
     // Determine how to load conversations based on mode
     let (conversations, selected_path) = if args.global {
         // Global Search (-g) - use streaming loader for instant startup
-        let rx = history::load_all_conversations_streaming(show_last, args.debug);
+        let rx = history::load_all_conversations_streaming(show_last, args.debug, time_filter.clone());
 
         match tui::run_with_loader(rx, use_relative_time, show_tools, show_thinking)? {
             (tui::Action::Select(path), convs) => (convs, path),
@@ -165,7 +169,7 @@ fn run() -> Result<()> {
             ));
         }
 
-        let conversations = history::load_conversations(&projects_dir, show_last, args.debug)?;
+        let conversations = history::load_conversations(&projects_dir, show_last, args.debug, time_filter.as_ref())?;
 
         if conversations.is_empty() {
             return Err(AppError::NoHistoryFound("selected scope".to_string()));
@@ -252,6 +256,38 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build a TimeFilter from CLI arguments.
+///
+/// Returns None if no time filtering options are specified.
+fn build_time_filter(args: &Args) -> Result<Option<TimeFilter>> {
+    // If no time args specified, return None
+    if args.since.is_none() && args.after.is_none() && args.before.is_none() {
+        return Ok(None);
+    }
+
+    let mut filter = TimeFilter::new();
+
+    if let Some(ref since) = args.since {
+        filter = filter
+            .with_since(since)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --since value: {}", e)))?;
+    }
+
+    if let Some(ref after) = args.after {
+        filter = filter
+            .with_after(after)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --after value: {}", e)))?;
+    }
+
+    if let Some(ref before) = args.before {
+        filter = filter
+            .with_before(before)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --before value: {}", e)))?;
+    }
+
+    Ok(Some(filter))
 }
 
 fn resume_with_claude(
