@@ -24,6 +24,9 @@ use claude_history::time_filter::TimeFilter;
 use error::{AppError, Result};
 use history::Conversation;
 use serde::Serialize;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 /// Exit code when no results are found
@@ -203,16 +206,7 @@ fn run() -> Result<()> {
 
     match cli.command {
         Commands::List(args) => run_list(args, format, cli.quiet),
-        Commands::Show(args) => {
-            if !cli.quiet {
-                eprintln!(
-                    "show command: identifier={}, tools={}, thinking={}",
-                    args.identifier, args.tools, args.thinking
-                );
-            }
-            // TODO: Implement show command
-            Ok(())
-        }
+        Commands::Show(args) => run_show(args, format),
         Commands::Usage => {
             if !cli.quiet {
                 eprintln!("usage command");
@@ -459,5 +453,205 @@ fn get_field(out: &ConversationOutput, field: &str) -> String {
         "preview" => out.preview.clone(),
         "project" => out.project.clone().unwrap_or_default(),
         _ => String::new(),
+    }
+}
+
+/// Find a conversation file by its UUID across all projects.
+///
+/// Searches all project directories for a file matching the given UUID.
+/// Matches if the file stem equals the uuid or starts with `{uuid}-`.
+fn find_conversation_by_id(uuid: &str) -> Result<PathBuf> {
+    let projects_root = history::get_claude_projects_root()?;
+
+    if !projects_root.exists() {
+        return Err(AppError::NoHistoryFound(format!(
+            "Projects directory does not exist: {}",
+            projects_root.display()
+        )));
+    }
+
+    // Iterate through all project directories
+    for entry in std::fs::read_dir(&projects_root)? {
+        let entry = entry?;
+        let project_path = entry.path();
+
+        if !project_path.is_dir() {
+            continue;
+        }
+
+        // Search for JSONL files in this project
+        for file_entry in std::fs::read_dir(&project_path)? {
+            let file_entry = file_entry?;
+            let file_path = file_entry.path();
+
+            if file_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+
+            if let Some(stem) = file_path.file_stem().and_then(|s| s.to_str()) {
+                // Match exact UUID or UUID prefix (for files like uuid-timestamp.jsonl)
+                if stem == uuid || stem.starts_with(&format!("{}-", uuid)) {
+                    return Ok(file_path);
+                }
+            }
+        }
+    }
+
+    Err(AppError::NoHistoryFound(format!(
+        "No conversation found with UUID: {}",
+        uuid
+    )))
+}
+
+/// Run the show command to display conversation content
+fn run_show(args: ShowArgs, format: OutputFormat) -> Result<()> {
+    // Resolve the conversation path
+    let path = if args.identifier.contains('/') || args.identifier.contains('.') {
+        // Treat as a file path
+        PathBuf::from(&args.identifier)
+    } else {
+        // Treat as a UUID and search for it
+        find_conversation_by_id(&args.identifier)?
+    };
+
+    // Check if file exists
+    if !path.exists() {
+        return Err(AppError::NoHistoryFound(format!(
+            "Conversation file not found: {}",
+            path.display()
+        )));
+    }
+
+    // Open and read the file
+    let file = File::open(&path)?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse the JSON line
+        let entry: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue, // Skip malformed lines
+        };
+
+        // Get message type
+        let msg_type = entry.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        // Skip non-message types
+        if msg_type != "user" && msg_type != "assistant" {
+            continue;
+        }
+
+        // Get message content
+        let message = match entry.get("message") {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("");
+        let content = match message.get("content") {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Filter tool_use and tool_result unless --tools is specified
+        if !args.tools {
+            if let Some(blocks) = content.as_array() {
+                // Check if content is only tool_use/tool_result
+                let has_text = blocks.iter().any(|block| {
+                    block
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .map(|t| t == "text" || (args.thinking && t == "thinking"))
+                        .unwrap_or(false)
+                });
+                if !has_text && !blocks.is_empty() {
+                    continue;
+                }
+            }
+        }
+
+        match format {
+            OutputFormat::Jsonl => {
+                // Print the raw line
+                println!("{}", line);
+            }
+            OutputFormat::Human => {
+                // Print role header and content
+                let header = match role {
+                    "user" => "## User",
+                    "assistant" => "## Assistant",
+                    _ => "## Unknown",
+                };
+                println!("\n{}\n", header);
+                print_content(content, args.tools, args.thinking);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Print content from a message, handling both string and array formats
+fn print_content(content: &serde_json::Value, include_tools: bool, include_thinking: bool) {
+    match content {
+        serde_json::Value::String(s) => {
+            println!("{}", s);
+        }
+        serde_json::Value::Array(blocks) => {
+            for block in blocks {
+                let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+                match block_type {
+                    "text" => {
+                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                            println!("{}", text);
+                        }
+                    }
+                    "thinking" if include_thinking => {
+                        if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
+                            println!("<thinking>\n{}\n</thinking>", thinking);
+                        }
+                    }
+                    "tool_use" if include_tools => {
+                        if let Some(name) = block.get("name").and_then(|n| n.as_str()) {
+                            println!("<tool_use name=\"{}\">", name);
+                            if let Some(input) = block.get("input") {
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(input).unwrap_or_default()
+                                );
+                            }
+                            println!("</tool_use>");
+                        }
+                    }
+                    "tool_result" if include_tools => {
+                        println!("<tool_result>");
+                        if let Some(result_content) = block.get("content") {
+                            match result_content {
+                                serde_json::Value::String(s) => println!("{}", s),
+                                serde_json::Value::Array(items) => {
+                                    for item in items {
+                                        if let Some(text) =
+                                            item.get("text").and_then(|t| t.as_str())
+                                        {
+                                            println!("{}", text);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        println!("</tool_result>");
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
     }
 }
