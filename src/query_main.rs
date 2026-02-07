@@ -29,8 +29,13 @@ use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-/// Exit code when no results are found
-const EXIT_NO_RESULTS: u8 = 3;
+/// Exit codes for the CLI application
+mod exit_codes {
+    pub const SUCCESS: u8 = 0;
+    pub const ERROR: u8 = 1;
+    pub const INVALID_ARGS: u8 = 2;
+    pub const NO_RESULTS: u8 = 3;
+}
 
 /// Output format for query results
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -192,10 +197,14 @@ impl From<&Conversation> for ConversationOutput {
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) => ExitCode::from(exit_codes::SUCCESS),
         Err(e) => {
             eprintln!("Error: {}", e);
-            ExitCode::from(1)
+            match e {
+                AppError::InvalidArgs(_) => ExitCode::from(exit_codes::INVALID_ARGS),
+                AppError::NoHistoryFound(_) => ExitCode::from(exit_codes::NO_RESULTS),
+                _ => ExitCode::from(exit_codes::ERROR),
+            }
         }
     }
 }
@@ -258,7 +267,7 @@ fn build_path_filter(args: &ListArgs) -> Result<Option<PathFilter>> {
 }
 
 /// Run the list command
-fn run_list(args: ListArgs, format: OutputFormat, quiet: bool) -> Result<()> {
+fn run_list(args: ListArgs, format: OutputFormat, _quiet: bool) -> Result<()> {
     // Build filters from args
     let time_filter = build_time_filter(&args)?;
     let path_filter = build_path_filter(&args)?;
@@ -288,10 +297,9 @@ fn run_list(args: ListArgs, format: OutputFormat, quiet: bool) -> Result<()> {
         let projects_dir = history::get_claude_projects_dir(&current_dir)?;
 
         if !projects_dir.exists() {
-            if !quiet {
-                eprintln!("No Claude history found for current directory");
-            }
-            std::process::exit(EXIT_NO_RESULTS as i32);
+            return Err(AppError::NoHistoryFound(
+                "No Claude history found for current directory".to_string(),
+            ));
         }
 
         history::load_conversations(
@@ -337,10 +345,7 @@ fn run_list(args: ListArgs, format: OutputFormat, quiet: bool) -> Result<()> {
 
     // Check if empty
     if conversations.is_empty() {
-        if !quiet {
-            eprintln!("No conversations found");
-        }
-        std::process::exit(EXIT_NO_RESULTS as i32);
+        return Err(AppError::NoHistoryFound("No conversations found".to_string()));
     }
 
     // Output results
