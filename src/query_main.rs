@@ -207,13 +207,7 @@ fn run() -> Result<()> {
     match cli.command {
         Commands::List(args) => run_list(args, format, cli.quiet),
         Commands::Show(args) => run_show(args, format),
-        Commands::Usage => {
-            if !cli.quiet {
-                eprintln!("usage command");
-            }
-            // TODO: Implement usage command
-            Ok(())
-        }
+        Commands::Usage => run_usage(format),
     }
 }
 
@@ -593,6 +587,130 @@ fn run_show(args: ShowArgs, format: OutputFormat) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+/// Run the usage command to display documentation for LLM agents
+fn run_usage(_format: OutputFormat) -> Result<()> {
+    print!(r#"# claude-history-query
+
+Non-interactive CLI for querying Claude Code conversation history.
+Provides scriptable, pipeable access to conversation data for shell scripts
+and LLM agents without requiring a TUI.
+
+## Commands
+
+### list
+
+List conversations matching criteria.
+
+```
+claude-history-query list [OPTIONS]
+```
+
+**Options:**
+
+* `-g, --global` - Search all conversations globally (not just current directory)
+* `-s, --since <DURATION>` - Show conversations since duration ago (e.g., 2d, 1w, 3h)
+* `--after <DATE>` - Show conversations after date (YYYY-MM-DD)
+* `--before <DATE>` - Show conversations before date (YYYY-MM-DD)
+* `--include-path <PATTERN>` - Include paths matching regex (can be repeated)
+* `--exclude-path <PATTERN>` - Exclude paths matching regex (can be repeated)
+* `--query <QUERY>` - Boolean search query (e.g., 'rust && !deprecated')
+* `-f, --field <FIELD>` - Fields to output (can be repeated)
+* `-n, --limit <COUNT>` - Maximum number of results to return
+* `--sort <ORDER>` - Sort order: newest, oldest, most-messages, least-messages
+
+### show
+
+Show conversation content.
+
+```
+claude-history-query show <IDENTIFIER> [OPTIONS]
+```
+
+**Arguments:**
+
+* `<IDENTIFIER>` - Conversation identifier (path, UUID, or index from list)
+
+**Options:**
+
+* `--format <FORMAT>` - Output format for messages
+* `-t, --tools` - Include tool calls in output
+* `--thinking` - Include thinking blocks in output
+* `--ts-after <TIMESTAMP>` - Only show messages after this timestamp (ISO 8601 or Unix)
+* `--ts-before <TIMESTAMP>` - Only show messages before this timestamp (ISO 8601 or Unix)
+
+## Output Formats
+
+* `--human` - Human-readable output (default). Shows relative timestamps and formatted text.
+* `--jsonl` - JSON Lines format. One JSON object per line, suitable for parsing.
+
+## Field Names
+
+Available fields for `--field` option:
+
+* `uuid` - Conversation unique identifier
+* `path` - Full path to conversation file
+* `cwd` - Working directory where conversation was started
+* `timestamp` - ISO 8601 timestamp of last activity
+* `preview` - First line of the first user message
+* `project` - Project name derived from working directory
+
+## Common Patterns
+
+### Resume a conversation
+
+```bash
+# Get the UUID of the most recent conversation
+UUID=$(claude-history-query list -n 1 --jsonl | jq -r '.uuid')
+claude --resume "$UUID"
+```
+
+### Search and resume with fzf
+
+```bash
+claude-history-query list -g | fzf | cut -d' ' -f1 | xargs -I{{}} claude --resume {{}}
+```
+
+### Export conversations to backup
+
+```bash
+claude-history-query list -g --jsonl > backup.jsonl
+```
+
+### Delete old conversations
+
+```bash
+claude-history-query list --before 2024-01-01 -f path | xargs rm
+```
+
+### Find conversations about a topic
+
+```bash
+claude-history-query list -g --query "docker && kubernetes"
+```
+
+### Get recent conversations from current project
+
+```bash
+claude-history-query list --since 1w
+```
+
+### Show conversation content as JSONL
+
+```bash
+claude-history-query show <UUID> --jsonl
+```
+
+## Exit Codes
+
+* `0` - Success
+* `1` - General error (I/O, parsing, etc.)
+* `2` - Invalid arguments
+* `3` - No results found
+
+"#);
     Ok(())
 }
 
