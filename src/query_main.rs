@@ -18,7 +18,16 @@ mod tool_format;
 mod tui;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use error::Result;
+use claude_history::path_filter::PathFilter;
+use claude_history::query::{evaluate, parse_query};
+use claude_history::time_filter::TimeFilter;
+use error::{AppError, Result};
+use history::Conversation;
+use serde::Serialize;
+use std::process::ExitCode;
+
+/// Exit code when no results are found
+const EXIT_NO_RESULTS: u8 = 3;
 
 /// Output format for query results
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -109,7 +118,7 @@ pub struct ListArgs {
     pub query: Option<String>,
 
     /// Fields to output (can be repeated)
-    /// Available: id, path, project, summary, message_count, first_ts, last_ts, duration
+    /// Available: uuid, path, project, cwd, timestamp, preview
     #[arg(long, short = 'f', action = clap::ArgAction::Append, value_name = "FIELD")]
     pub field: Vec<String>,
 
@@ -149,29 +158,57 @@ pub struct ShowArgs {
     pub ts_before: Option<String>,
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("Error: {}", e);
-        std::process::exit(1);
+/// Output structure for a conversation in JSON format
+#[derive(Serialize)]
+struct ConversationOutput {
+    uuid: String,
+    path: String,
+    cwd: Option<String>,
+    timestamp: String,
+    preview: String,
+    project: Option<String>,
+}
+
+impl From<&Conversation> for ConversationOutput {
+    fn from(conv: &Conversation) -> Self {
+        Self {
+            uuid: conv
+                .path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string(),
+            path: conv.path.display().to_string(),
+            cwd: conv.cwd.as_ref().map(|p| p.display().to_string()),
+            timestamp: conv.timestamp.to_rfc3339(),
+            preview: conv.preview.clone(),
+            project: conv.project_name.clone(),
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            ExitCode::from(1)
+        }
     }
 }
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let format = cli.output_format();
 
-    match &cli.command {
-        Commands::List(args) => {
-            if !cli.quiet {
-                eprintln!("list command: global={}, since={:?}, query={:?}, limit={:?}, sort={}",
-                    args.global, args.since, args.query, args.limit, args.sort);
-            }
-            // TODO: Implement list command
-            Ok(())
-        }
+    match cli.command {
+        Commands::List(args) => run_list(args, format, cli.quiet),
         Commands::Show(args) => {
             if !cli.quiet {
-                eprintln!("show command: identifier={}, tools={}, thinking={}",
-                    args.identifier, args.tools, args.thinking);
+                eprintln!(
+                    "show command: identifier={}, tools={}, thinking={}",
+                    args.identifier, args.tools, args.thinking
+                );
             }
             // TODO: Implement show command
             Ok(())
@@ -183,5 +220,244 @@ fn run() -> Result<()> {
             // TODO: Implement usage command
             Ok(())
         }
+    }
+}
+
+/// Build a time filter from command line arguments
+fn build_time_filter(args: &ListArgs) -> Result<Option<TimeFilter>> {
+    let mut filter = TimeFilter::new();
+    let mut has_filter = false;
+
+    if let Some(ref since) = args.since {
+        filter = filter.with_since(since).map_err(|e| {
+            AppError::InvalidArgs(format!("invalid --since value '{}': {}", since, e))
+        })?;
+        has_filter = true;
+    }
+
+    if let Some(ref after) = args.after {
+        filter = filter.with_after(after).map_err(|e| {
+            AppError::InvalidArgs(format!("invalid --after value '{}': {}", after, e))
+        })?;
+        has_filter = true;
+    }
+
+    if let Some(ref before) = args.before {
+        filter = filter.with_before(before).map_err(|e| {
+            AppError::InvalidArgs(format!("invalid --before value '{}': {}", before, e))
+        })?;
+        has_filter = true;
+    }
+
+    if has_filter {
+        Ok(Some(filter))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Build a path filter from command line arguments
+fn build_path_filter(args: &ListArgs) -> Result<Option<PathFilter>> {
+    if args.include_path.is_empty() && args.exclude_path.is_empty() {
+        return Ok(None);
+    }
+
+    let filter = PathFilter::from_patterns(&args.include_path, &args.exclude_path).map_err(|e| {
+        AppError::InvalidArgs(format!("invalid path pattern: {}", e))
+    })?;
+
+    Ok(Some(filter))
+}
+
+/// Run the list command
+fn run_list(args: ListArgs, format: OutputFormat, quiet: bool) -> Result<()> {
+    // Build filters from args
+    let time_filter = build_time_filter(&args)?;
+    let path_filter = build_path_filter(&args)?;
+
+    // Parse content query if provided
+    let query_expr = if let Some(ref query_str) = args.query {
+        Some(parse_query(query_str).map_err(|e| {
+            AppError::InvalidArgs(format!("invalid query '{}': {}", query_str, e))
+        })?)
+    } else {
+        None
+    };
+
+    // Load conversations based on global flag
+    let mut conversations = if args.global {
+        history::load_all_conversations(
+            false, // show_last
+            None,  // debug_level
+            time_filter.as_ref(),
+            path_filter.as_ref(),
+        )?
+    } else {
+        // Load from current directory's project
+        let current_dir = std::env::current_dir().map_err(|e| {
+            AppError::Io(e)
+        })?;
+        let projects_dir = history::get_claude_projects_dir(&current_dir)?;
+
+        if !projects_dir.exists() {
+            if !quiet {
+                eprintln!("No Claude history found for current directory");
+            }
+            std::process::exit(EXIT_NO_RESULTS as i32);
+        }
+
+        history::load_conversations(
+            &projects_dir,
+            false, // show_last
+            None,  // debug_level
+            time_filter.as_ref(),
+            path_filter.as_ref(),
+        )?
+    };
+
+    // Apply content query filter
+    if let Some(ref expr) = query_expr {
+        conversations.retain(|conv| evaluate(expr, &conv.full_text));
+    }
+
+    // Apply sort
+    match args.sort.as_str() {
+        "newest" => {
+            conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        }
+        "oldest" => {
+            conversations.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        }
+        "most-messages" => {
+            conversations.sort_by(|a, b| b.message_count.cmp(&a.message_count));
+        }
+        "least-messages" => {
+            conversations.sort_by(|a, b| a.message_count.cmp(&b.message_count));
+        }
+        other => {
+            return Err(AppError::InvalidArgs(format!(
+                "invalid sort order '{}': expected newest, oldest, most-messages, or least-messages",
+                other
+            )));
+        }
+    }
+
+    // Apply limit
+    if let Some(limit) = args.limit {
+        conversations.truncate(limit);
+    }
+
+    // Check if empty
+    if conversations.is_empty() {
+        if !quiet {
+            eprintln!("No conversations found");
+        }
+        std::process::exit(EXIT_NO_RESULTS as i32);
+    }
+
+    // Output results
+    output_list(&conversations, &args.field, format);
+
+    Ok(())
+}
+
+/// Output the list of conversations
+fn output_list(conversations: &[Conversation], fields: &[String], format: OutputFormat) {
+    for conv in conversations {
+        let out = ConversationOutput::from(conv);
+
+        match format {
+            OutputFormat::Jsonl => {
+                let value = if fields.is_empty() {
+                    serde_json::to_value(&out).unwrap()
+                } else {
+                    filter_fields(&out, fields)
+                };
+                println!("{}", serde_json::to_string(&value).unwrap());
+            }
+            OutputFormat::Human => {
+                if fields.is_empty() {
+                    // Default human output with relative time
+                    let relative_time = chrono_humanize::HumanTime::from(conv.timestamp);
+                    println!(
+                        "{} ({}) - {}",
+                        out.uuid,
+                        relative_time,
+                        out.preview
+                    );
+                } else {
+                    // Custom field output
+                    let values: Vec<String> = fields
+                        .iter()
+                        .map(|f| get_field(&out, f))
+                        .collect();
+                    println!("{}", values.join("\t"));
+                }
+            }
+        }
+    }
+}
+
+/// Filter output to specific fields
+fn filter_fields(out: &ConversationOutput, fields: &[String]) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+
+    for field in fields {
+        match field.as_str() {
+            "uuid" => {
+                map.insert("uuid".to_string(), serde_json::Value::String(out.uuid.clone()));
+            }
+            "path" => {
+                map.insert("path".to_string(), serde_json::Value::String(out.path.clone()));
+            }
+            "cwd" => {
+                map.insert(
+                    "cwd".to_string(),
+                    out.cwd
+                        .as_ref()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            "timestamp" => {
+                map.insert(
+                    "timestamp".to_string(),
+                    serde_json::Value::String(out.timestamp.clone()),
+                );
+            }
+            "preview" => {
+                map.insert(
+                    "preview".to_string(),
+                    serde_json::Value::String(out.preview.clone()),
+                );
+            }
+            "project" => {
+                map.insert(
+                    "project".to_string(),
+                    out.project
+                        .as_ref()
+                        .map(|s| serde_json::Value::String(s.clone()))
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            _ => {
+                // Unknown field, skip silently
+            }
+        }
+    }
+
+    serde_json::Value::Object(map)
+}
+
+/// Get a single field value as a string
+fn get_field(out: &ConversationOutput, field: &str) -> String {
+    match field {
+        "uuid" => out.uuid.clone(),
+        "path" => out.path.clone(),
+        "cwd" => out.cwd.clone().unwrap_or_default(),
+        "timestamp" => out.timestamp.clone(),
+        "preview" => out.preview.clone(),
+        "project" => out.project.clone().unwrap_or_default(),
+        _ => String::new(),
     }
 }
