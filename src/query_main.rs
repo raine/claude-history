@@ -778,3 +778,299 @@ fn print_content(content: &serde_json::Value, include_tools: bool, include_think
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === Exit Codes ===
+
+    #[test]
+    fn test_exit_codes_are_distinct() {
+        // Exit codes should be unique to allow scripts to distinguish error types
+        let codes = [
+            exit_codes::SUCCESS,
+            exit_codes::ERROR,
+            exit_codes::INVALID_ARGS,
+            exit_codes::NO_RESULTS,
+        ];
+        let unique: std::collections::HashSet<_> = codes.iter().collect();
+        assert_eq!(unique.len(), codes.len(), "Exit codes must be unique");
+    }
+
+    #[test]
+    fn test_exit_code_values() {
+        // Document expected exit code values for shell scripts
+        assert_eq!(exit_codes::SUCCESS, 0);
+        assert_eq!(exit_codes::ERROR, 1);
+        assert_eq!(exit_codes::INVALID_ARGS, 2);
+        assert_eq!(exit_codes::NO_RESULTS, 3);
+    }
+
+    // === Output Format ===
+
+    #[test]
+    fn test_output_format_default_is_human() {
+        // When no format flag is specified, default to human-readable
+        let cli = Cli {
+            human: false,
+            jsonl: false,
+            quiet: false,
+            command: Commands::Usage,
+        };
+        assert!(matches!(cli.output_format(), OutputFormat::Human));
+    }
+
+    #[test]
+    fn test_output_format_jsonl_flag() {
+        // --jsonl flag produces JSONL output
+        let cli = Cli {
+            human: false,
+            jsonl: true,
+            quiet: false,
+            command: Commands::Usage,
+        };
+        assert!(matches!(cli.output_format(), OutputFormat::Jsonl));
+    }
+
+    #[test]
+    fn test_output_format_human_flag() {
+        // --human flag produces human-readable output
+        let cli = Cli {
+            human: true,
+            jsonl: false,
+            quiet: false,
+            command: Commands::Usage,
+        };
+        assert!(matches!(cli.output_format(), OutputFormat::Human));
+    }
+
+    // === Field Extraction ===
+
+    fn sample_conversation_output() -> ConversationOutput {
+        ConversationOutput {
+            uuid: "abc123".to_string(),
+            path: "/home/user/.claude/projects/test/abc123.jsonl".to_string(),
+            cwd: Some("/home/user/project".to_string()),
+            timestamp: "2026-02-06T14:30:00Z".to_string(),
+            preview: "Fix the authentication bug".to_string(),
+            project: Some("my-project".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_get_field_uuid() {
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "uuid"), "abc123");
+    }
+
+    #[test]
+    fn test_get_field_path() {
+        let out = sample_conversation_output();
+        assert_eq!(
+            get_field(&out, "path"),
+            "/home/user/.claude/projects/test/abc123.jsonl"
+        );
+    }
+
+    #[test]
+    fn test_get_field_cwd() {
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "cwd"), "/home/user/project");
+    }
+
+    #[test]
+    fn test_get_field_cwd_none() {
+        // When cwd is None, return empty string
+        let mut out = sample_conversation_output();
+        out.cwd = None;
+        assert_eq!(get_field(&out, "cwd"), "");
+    }
+
+    #[test]
+    fn test_get_field_timestamp() {
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "timestamp"), "2026-02-06T14:30:00Z");
+    }
+
+    #[test]
+    fn test_get_field_preview() {
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "preview"), "Fix the authentication bug");
+    }
+
+    #[test]
+    fn test_get_field_project() {
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "project"), "my-project");
+    }
+
+    #[test]
+    fn test_get_field_project_none() {
+        // When project is None, return empty string
+        let mut out = sample_conversation_output();
+        out.project = None;
+        assert_eq!(get_field(&out, "project"), "");
+    }
+
+    #[test]
+    fn test_get_field_unknown() {
+        // Unknown field returns empty string
+        let out = sample_conversation_output();
+        assert_eq!(get_field(&out, "nonexistent"), "");
+    }
+
+    // === Field Filtering (JSONL) ===
+
+    #[test]
+    fn test_filter_fields_single() {
+        let out = sample_conversation_output();
+        let result = filter_fields(&out, &["uuid".to_string()]);
+
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert_eq!(obj.get("uuid").unwrap().as_str().unwrap(), "abc123");
+    }
+
+    #[test]
+    fn test_filter_fields_multiple() {
+        let out = sample_conversation_output();
+        let result = filter_fields(&out, &["uuid".to_string(), "cwd".to_string()]);
+
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+        assert_eq!(obj.get("uuid").unwrap().as_str().unwrap(), "abc123");
+        assert_eq!(
+            obj.get("cwd").unwrap().as_str().unwrap(),
+            "/home/user/project"
+        );
+    }
+
+    #[test]
+    fn test_filter_fields_none_value() {
+        // When cwd is None, the JSON value should be null
+        let mut out = sample_conversation_output();
+        out.cwd = None;
+        let result = filter_fields(&out, &["cwd".to_string()]);
+
+        let obj = result.as_object().unwrap();
+        assert!(obj.get("cwd").unwrap().is_null());
+    }
+
+    #[test]
+    fn test_filter_fields_unknown_skipped() {
+        // Unknown fields are silently skipped
+        let out = sample_conversation_output();
+        let result = filter_fields(&out, &["uuid".to_string(), "nonexistent".to_string()]);
+
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 1);
+        assert!(obj.contains_key("uuid"));
+        assert!(!obj.contains_key("nonexistent"));
+    }
+
+    #[test]
+    fn test_filter_fields_all() {
+        // All valid fields can be selected
+        let out = sample_conversation_output();
+        let result = filter_fields(
+            &out,
+            &[
+                "uuid".to_string(),
+                "path".to_string(),
+                "cwd".to_string(),
+                "timestamp".to_string(),
+                "preview".to_string(),
+                "project".to_string(),
+            ],
+        );
+
+        let obj = result.as_object().unwrap();
+        assert_eq!(obj.len(), 6);
+    }
+
+    // === ConversationOutput From Conversion ===
+
+    #[test]
+    fn test_conversation_output_uuid_extraction() {
+        // UUID should be extracted from the file stem
+        use chrono::Local;
+        let conv = Conversation {
+            path: PathBuf::from("/home/user/.claude/projects/test/abc123-xyz.jsonl"),
+            index: 0,
+            timestamp: Local::now(),
+            preview: "Test".to_string(),
+            full_text: "Test content".to_string(),
+            project_name: None,
+            project_path: None,
+            cwd: None,
+            message_count: 1,
+            parse_errors: vec![],
+            summary: None,
+        };
+
+        let out = ConversationOutput::from(&conv);
+        // File stem is "abc123-xyz", which becomes the UUID
+        assert_eq!(out.uuid, "abc123-xyz");
+    }
+
+    #[test]
+    fn test_conversation_output_preserves_cwd() {
+        use chrono::Local;
+        let conv = Conversation {
+            path: PathBuf::from("/test.jsonl"),
+            index: 0,
+            timestamp: Local::now(),
+            preview: "Test".to_string(),
+            full_text: "".to_string(),
+            project_name: None,
+            project_path: None,
+            cwd: Some(PathBuf::from("/home/user/myproject")),
+            message_count: 1,
+            parse_errors: vec![],
+            summary: None,
+        };
+
+        let out = ConversationOutput::from(&conv);
+        assert_eq!(out.cwd.as_deref(), Some("/home/user/myproject"));
+    }
+
+    #[test]
+    fn test_conversation_output_timestamp_rfc3339() {
+        use chrono::{Local, TimeZone};
+        let timestamp = Local.with_ymd_and_hms(2026, 2, 6, 14, 30, 0).unwrap();
+        let conv = Conversation {
+            path: PathBuf::from("/test.jsonl"),
+            index: 0,
+            timestamp,
+            preview: "Test".to_string(),
+            full_text: "".to_string(),
+            project_name: None,
+            project_path: None,
+            cwd: None,
+            message_count: 1,
+            parse_errors: vec![],
+            summary: None,
+        };
+
+        let out = ConversationOutput::from(&conv);
+        // Should be valid RFC3339 format
+        assert!(out.timestamp.contains("2026-02-06"));
+        assert!(out.timestamp.contains("14:30:00"));
+    }
+
+    // === Sort Order Validation ===
+
+    #[test]
+    fn test_valid_sort_orders() {
+        // Document the valid sort order values
+        let valid_orders = ["newest", "oldest", "most-messages", "least-messages"];
+        for order in valid_orders {
+            // These should not panic in a match statement
+            match order {
+                "newest" | "oldest" | "most-messages" | "least-messages" => {}
+                _ => panic!("Unexpected sort order: {}", order),
+            }
+        }
+    }
+}
