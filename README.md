@@ -97,6 +97,17 @@ Search uses fuzzy word matching with the following features:
 - **Prefix matching**: "auth" matches "authentication", "authorize"
 - **Multi-word AND logic**: all query words must match
 
+**Advanced operators:**
+
+| Operator      | Purpose      | Example                                           |
+| ------------- | ------------ | ------------------------------------------------- |
+| `'word`       | Exact match  | `'error` matches "error" exactly, not "errors"    |
+| `!word`       | Exclude      | `!test` excludes results containing "test"        |
+| `word1 word2` | AND          | Both terms must be present                        |
+
+Combine operators for precise searches: `'deploy 'production !staging` finds
+conversations with exact "deploy" and "production" but excludes "staging".
+
 Results are ranked by recency, so recent conversations appear first.
 
 ### Direct file input
