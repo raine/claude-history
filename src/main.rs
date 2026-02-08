@@ -13,6 +13,9 @@ mod tool_format;
 mod tui;
 
 use clap::Parser;
+use claude_history::path_filter::PathFilter;
+use claude_history::query::{evaluate, parse_query, QueryExpr};
+use claude_history::time_filter::TimeFilter;
 use cli::Args;
 use error::{AppError, Result};
 use std::io::IsTerminal;
@@ -91,6 +94,11 @@ fn run() -> Result<()> {
         std::io::stdout().is_terminal(),
     );
 
+    // Build filters from CLI args
+    let time_filter = build_time_filter(&args)?;
+    let path_filter = build_path_filter(&args)?;
+    let content_query = build_content_query(&args)?;
+
     // Handle --render flag: render a JSONL file in ledger format and exit
     if let Some(ref render_path) = args.render {
         let display_options = display::DisplayOptions {
@@ -128,19 +136,70 @@ fn run() -> Result<()> {
 
     // Determine how to load conversations based on mode
     let (conversations, selected_path) = if args.global {
-        // Global Search (-g) - use streaming loader for instant startup
-        let rx = history::load_all_conversations_streaming(show_last, args.debug);
+        // Global Search (-g)
+        // If content query specified, use sync loading so we can filter before display
+        // Otherwise use streaming for instant startup UX
+        if let Some(ref query) = content_query {
+            // Sync loading with content filter
+            let mut conversations = history::load_all_conversations(
+                show_last,
+                args.debug,
+                time_filter.as_ref(),
+                path_filter.as_ref(),
+            )?;
 
-        match tui::run_with_loader(rx, use_relative_time, show_tools, show_thinking)? {
-            (tui::Action::Select(path), convs) => (convs, path),
-            (tui::Action::Resume(path), convs) => {
-                let conv = convs.iter().find(|c| c.path == path);
-                let project_path = conv.and_then(|c| c.project_path.as_ref());
-                resume_with_claude(&path, project_path, default_args)?;
-                return Ok(());
+            // Apply content query filter
+            let before_count = conversations.len();
+            conversations = filter_by_query(conversations, query);
+            debug::info(
+                args.debug,
+                &format!(
+                    "Query filter: {} conversations matched (from {})",
+                    conversations.len(),
+                    before_count
+                ),
+            );
+
+            if conversations.is_empty() {
+                return Err(AppError::NoHistoryFound("query filter".to_string()));
             }
-            (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
-            (tui::Action::Delete(_), _) => unreachable!("Delete is handled internally"),
+
+            match tui::run(
+                conversations.clone(),
+                use_relative_time,
+                show_tools,
+                show_thinking,
+            )? {
+                tui::Action::Select(path) => (conversations, path),
+                tui::Action::Resume(path) => {
+                    let conv = conversations.iter().find(|c| c.path == path);
+                    let project_path = conv.and_then(|c| c.project_path.as_ref());
+                    resume_with_claude(&path, project_path, default_args)?;
+                    return Ok(());
+                }
+                tui::Action::Quit => return Err(AppError::SelectionCancelled),
+                tui::Action::Delete(_) => unreachable!("Delete is handled internally"),
+            }
+        } else {
+            // Streaming loader for instant startup (no content filter)
+            let rx = history::load_all_conversations_streaming(
+                show_last,
+                args.debug,
+                time_filter.clone(),
+                path_filter.clone(),
+            );
+
+            match tui::run_with_loader(rx, use_relative_time, show_tools, show_thinking)? {
+                (tui::Action::Select(path), convs) => (convs, path),
+                (tui::Action::Resume(path), convs) => {
+                    let conv = convs.iter().find(|c| c.path == path);
+                    let project_path = conv.and_then(|c| c.project_path.as_ref());
+                    resume_with_claude(&path, project_path, default_args)?;
+                    return Ok(());
+                }
+                (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
+                (tui::Action::Delete(_), _) => unreachable!("Delete is handled internally"),
+            }
         }
     } else {
         // Current Directory mode - synchronous loading is fast enough
@@ -165,10 +224,35 @@ fn run() -> Result<()> {
             ));
         }
 
-        let conversations = history::load_conversations(&projects_dir, show_last, args.debug)?;
+        let mut conversations = history::load_conversations(
+            &projects_dir,
+            show_last,
+            args.debug,
+            time_filter.as_ref(),
+            path_filter.as_ref(),
+        )?;
+
+        // Apply content query filter if specified
+        if let Some(ref query) = content_query {
+            let before_count = conversations.len();
+            conversations = filter_by_query(conversations, query);
+            debug::info(
+                args.debug,
+                &format!(
+                    "Query filter: {} conversations matched (from {})",
+                    conversations.len(),
+                    before_count
+                ),
+            );
+        }
 
         if conversations.is_empty() {
-            return Err(AppError::NoHistoryFound("selected scope".to_string()));
+            let scope = if content_query.is_some() {
+                "query filter"
+            } else {
+                "selected scope"
+            };
+            return Err(AppError::NoHistoryFound(scope.to_string()));
         }
 
         match tui::run(
@@ -252,6 +336,76 @@ fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Build a TimeFilter from CLI arguments.
+///
+/// Returns None if no time filtering options are specified.
+fn build_time_filter(args: &Args) -> Result<Option<TimeFilter>> {
+    // If no time args specified, return None
+    if args.since.is_none() && args.after.is_none() && args.before.is_none() {
+        return Ok(None);
+    }
+
+    let mut filter = TimeFilter::new();
+
+    if let Some(ref since) = args.since {
+        filter = filter
+            .with_since(since)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --since value: {}", e)))?;
+    }
+
+    if let Some(ref after) = args.after {
+        filter = filter
+            .with_after(after)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --after value: {}", e)))?;
+    }
+
+    if let Some(ref before) = args.before {
+        filter = filter
+            .with_before(before)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid --before value: {}", e)))?;
+    }
+
+    Ok(Some(filter))
+}
+
+/// Build a PathFilter from CLI arguments.
+///
+/// Returns None if no path filtering options are specified.
+fn build_path_filter(args: &Args) -> Result<Option<PathFilter>> {
+    // If no path args specified, return None
+    if args.include_path.is_empty() && args.exclude_path.is_empty() {
+        return Ok(None);
+    }
+
+    PathFilter::from_patterns(&args.include_path, &args.exclude_path)
+        .map(Some)
+        .map_err(|e| AppError::InvalidArgs(format!("Invalid path filter pattern: {}", e)))
+}
+
+/// Build a content query filter from CLI arguments.
+///
+/// Returns None if no query is specified.
+fn build_content_query(args: &Args) -> Result<Option<QueryExpr>> {
+    match &args.query {
+        None => Ok(None),
+        Some(query_str) => parse_query(query_str)
+            .map(Some)
+            .map_err(|e| AppError::InvalidArgs(format!("Invalid query: {}", e))),
+    }
+}
+
+/// Filter conversations by content query.
+///
+/// Returns only conversations where the full_text matches the query.
+fn filter_by_query(mut conversations: Vec<history::Conversation>, query: &QueryExpr) -> Vec<history::Conversation> {
+    conversations.retain(|conv| evaluate(query, &conv.full_text));
+    // Re-index after filtering
+    for (idx, conv) in conversations.iter_mut().enumerate() {
+        conv.index = idx;
+    }
+    conversations
 }
 
 fn resume_with_claude(
