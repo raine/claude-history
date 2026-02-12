@@ -33,6 +33,16 @@ brew install raine/claude-history/claude-history
 cargo install claude-history
 ```
 
+### From source
+
+```sh
+git clone https://github.com/raine/claude-history.git
+cd claude-history
+cargo install --locked --path .
+```
+
+This installs both binaries: `claude-history` (TUI) and `claude-history-query` (CLI).
+
 ## Usage
 
 Run the tool from inside the project directory you're interested in:
@@ -397,6 +407,98 @@ $ just check
 ```
 
 This runs `cargo fmt`, `cargo clippy --fix`, and `cargo build` in parallel.
+
+## claude-history-query
+
+A non-interactive CLI companion optimized for shell scripts and LLM agents.
+Outputs JSONL or human-readable formats suitable for pipelines.
+
+### Commands
+
+```sh
+claude-history-query list [OPTIONS]    # List conversations
+claude-history-query show <ID>         # Show conversation content
+claude-history-query usage             # Self-documenting help for LLMs
+```
+
+### Examples
+
+```sh
+# Resume most recent conversation
+claude --resume "$(claude-history-query list -n 1 -f uuid)"
+
+# Search and resume with fzf
+claude --resume "$(claude-history-query list -g -f uuid | fzf)"
+
+# Export recent conversations to JSONL
+claude-history-query list --since 1w --jsonl > backup.jsonl
+
+# Find conversations about a topic
+claude-history-query list -g --query "docker && kubernetes"
+
+# Delete old conversations
+claude-history-query list --before 2024-01-01 -f path | xargs rm
+
+# Count conversations per project
+claude-history-query list -g -f cwd | sort | uniq -c | sort -rn
+```
+
+### Output formats
+
+* `--human` (default) — Human-readable with relative timestamps
+* `--jsonl` — JSON Lines, one object per line for parsing with `jq`
+
+### Field selection
+
+Use `-f/--field` to output specific fields (tab-separated in human mode, filtered JSON in JSONL mode):
+
+```sh
+claude-history-query list -f uuid -f cwd
+# abc123    /home/user/project
+# def456    /home/user/other
+```
+
+Available fields: `uuid`, `path`, `cwd`, `timestamp`, `preview`, `project`
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | Success |
+| 1 | General error (I/O, parsing) |
+| 2 | Invalid arguments |
+| 3 | No results found |
+
+### Full options
+
+```
+claude-history-query list [OPTIONS]
+
+Options:
+  -g, --global                Search all projects globally
+  -s, --since <DURATION>      Since duration ago (2d, 1w, 3h)
+      --after <DATE>          After date (YYYY-MM-DD)
+      --before <DATE>         Before date (YYYY-MM-DD)
+      --include-path <REGEX>  Include paths matching pattern
+      --exclude-path <REGEX>  Exclude paths matching pattern
+      --query <EXPR>          Boolean search (e.g., "rust && !deprecated")
+  -f, --field <FIELD>         Output specific field(s)
+  -n, --limit <N>             Limit results
+      --sort <ORDER>          newest, oldest, most-messages, least-messages
+      --human                 Human-readable output (default)
+      --jsonl                 JSON Lines output
+  -q, --quiet                 Suppress non-error output
+
+claude-history-query show <ID> [OPTIONS]
+
+Options:
+  -t, --tools                 Include tool calls
+      --thinking              Include thinking blocks
+      --ts-after <TS>         Messages after timestamp
+      --ts-before <TS>        Messages before timestamp
+      --human                 Human-readable output (default)
+      --jsonl                 JSON Lines output
+```
 
 ## Related projects
 

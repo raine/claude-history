@@ -1007,6 +1007,9 @@ mod tests {
             message_count: 1,
             parse_errors: vec![],
             summary: None,
+            model: None,
+            total_tokens: 0,
+            duration_minutes: None,
         };
 
         let out = ConversationOutput::from(&conv);
@@ -1029,6 +1032,9 @@ mod tests {
             message_count: 1,
             parse_errors: vec![],
             summary: None,
+            model: None,
+            total_tokens: 0,
+            duration_minutes: None,
         };
 
         let out = ConversationOutput::from(&conv);
@@ -1051,6 +1057,9 @@ mod tests {
             message_count: 1,
             parse_errors: vec![],
             summary: None,
+            model: None,
+            total_tokens: 0,
+            duration_minutes: None,
         };
 
         let out = ConversationOutput::from(&conv);
