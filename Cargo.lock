@@ -314,6 +314,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "rayon",
+ "regex",
  "serde",
  "serde_json",
  "syntect",

@@ -122,6 +122,92 @@ pub struct Args {
     )]
     pub global: bool,
 
+    // ==================== Time Filtering ====================
+    /// Show conversations since a duration ago (e.g., 2d, 1w, 3h)
+    ///
+    /// Duration format: <number><unit> where unit is:
+    /// - h: hours (e.g., 3h = 3 hours ago)
+    /// - d: days (e.g., 2d = 2 days ago)
+    /// - w: weeks (e.g., 1w = 1 week ago)
+    /// - m: months, ~30 days (e.g., 1m = ~30 days ago)
+    #[arg(
+        long,
+        short = 's',
+        value_name = "DURATION",
+        help = "Show conversations since duration (e.g., 2d, 1w, 3h)"
+    )]
+    pub since: Option<String>,
+
+    /// Show conversations after a specific date (YYYY-MM-DD)
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "Show conversations after date (YYYY-MM-DD)"
+    )]
+    pub after: Option<String>,
+
+    /// Show conversations before a specific date (YYYY-MM-DD)
+    #[arg(
+        long,
+        value_name = "DATE",
+        help = "Show conversations before date (YYYY-MM-DD)"
+    )]
+    pub before: Option<String>,
+
+    // ==================== Path Filtering ====================
+    /// Include only paths matching regex pattern
+    ///
+    /// Can be specified multiple times; paths matching ANY pattern are included.
+    /// If no include patterns are specified, all paths are included by default.
+    ///
+    /// Examples:
+    /// - --include-path "/work/" (paths containing /work/)
+    /// - --include-path "^/home/user/projects" (paths starting with...)
+    /// - --include-path "(?i)rust" (case-insensitive match)
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        value_name = "PATTERN",
+        help = "Include paths matching regex (can be repeated)"
+    )]
+    pub include_path: Vec<String>,
+
+    /// Exclude paths matching regex pattern
+    ///
+    /// Can be specified multiple times; paths matching ANY pattern are excluded.
+    /// Exclusions take precedence over inclusions.
+    ///
+    /// Examples:
+    /// - --exclude-path "test" (exclude paths containing 'test')
+    /// - --exclude-path "node_modules" (exclude node_modules)
+    /// - --exclude-path "\\.git" (exclude .git directories)
+    #[arg(
+        long,
+        action = clap::ArgAction::Append,
+        value_name = "PATTERN",
+        help = "Exclude paths matching regex (can be repeated)"
+    )]
+    pub exclude_path: Vec<String>,
+
+    // ==================== Content Filtering ====================
+    /// Boolean search query to filter conversations by content
+    ///
+    /// Searches the full conversation text using boolean expressions:
+    /// - Terms: `rust`, `"exact phrase"`
+    /// - AND: `rust && api`
+    /// - OR: `rust || python`
+    /// - NOT: `!deprecated`
+    /// - Grouping: `(rust || go) && !java`
+    ///
+    /// Matching is case-insensitive.
+    #[arg(
+        long,
+        short = 'q',
+        value_name = "QUERY",
+        help = "Boolean search query (e.g., 'rust && !deprecated')"
+    )]
+    pub query: Option<String>,
+
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
     pub pager: bool,

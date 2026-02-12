@@ -2,6 +2,25 @@
 //!
 //! This module handles loading conversations from Claude project directories,
 //! both synchronously and via streaming for the TUI.
+//!
+//! # Filtering
+//!
+//! All load functions accept optional filters to restrict results:
+//! - [`TimeFilter`] - Filter by conversation timestamp
+//! - [`PathFilter`] - Filter by project directory path
+//!
+//! ```rust,ignore
+//! use claude_history::time_filter::TimeFilter;
+//! use claude_history::path_filter::PathFilter;
+//!
+//! // Load only conversations from the last 2 days in work projects
+//! let time_filter = TimeFilter::from_since("2d").unwrap();
+//! let path_filter = PathFilter::new().with_include("/work/").unwrap();
+//! let conversations = load_conversations(
+//!     &projects_dir, false, None,
+//!     Some(&time_filter), Some(&path_filter),
+//! )?;
+//! ```
 
 use super::parser::process_conversation_file;
 use super::path::{
@@ -11,6 +30,8 @@ use super::{Conversation, LoaderMessage, Project};
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::{AppError, Result};
+use claude_history::path_filter::PathFilter;
+use claude_history::time_filter::TimeFilter;
 use rayon::prelude::*;
 use std::fs::read_dir;
 use std::path::Path;
@@ -18,11 +39,20 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::SystemTime;
 
-/// Load conversations from ALL projects globally
+/// Load conversations from ALL projects globally.
+///
+/// # Arguments
+///
+/// * `show_last` - If true, show last messages in preview instead of first
+/// * `debug_level` - Optional debug logging level
+/// * `time_filter` - Optional time filter to restrict results by timestamp
+/// * `path_filter` - Optional path filter to restrict results by project path
 #[allow(dead_code)]
 pub fn load_all_conversations(
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time_filter: Option<&TimeFilter>,
+    path_filter: Option<&PathFilter>,
 ) -> Result<Vec<Conversation>> {
     let root = super::get_claude_projects_root()?;
     let projects = list_projects(&root)?;
@@ -35,9 +65,25 @@ pub fn load_all_conversations(
     // Load conversations from all projects in parallel
     let mut all_conversations: Vec<Conversation> = projects
         .par_iter()
+        .filter(|project| {
+            // Apply path filter at project level
+            if let Some(filter) = path_filter {
+                let project_path = decode_project_dir_name_to_path(&project.name);
+                let matches = filter.matches(&project_path);
+                if !matches {
+                    debug::debug(
+                        debug_level,
+                        &format!("Path filter excluded project: {}", project_path.display()),
+                    );
+                }
+                matches
+            } else {
+                true
+            }
+        })
         .flat_map(|project| {
             let project_dir = root.join(&project.name);
-            match load_conversations(&project_dir, show_last, debug_level) {
+            match load_conversations(&project_dir, show_last, debug_level, time_filter, None) {
                 Ok(mut convs) => {
                     // Fallback path for old JSONL files without cwd field
                     let fallback_path = decode_project_dir_name_to_path(&project.name);
@@ -82,16 +128,26 @@ pub fn load_all_conversations(
     Ok(all_conversations)
 }
 
-/// Start loading all conversations in the background
-/// Returns a receiver that will receive LoaderMessage updates
+/// Start loading all conversations in the background.
+///
+/// Returns a receiver that will receive [`LoaderMessage`] updates as projects are loaded.
+///
+/// # Arguments
+///
+/// * `show_last` - If true, show last messages in preview instead of first
+/// * `debug_level` - Optional debug logging level
+/// * `time_filter` - Optional time filter to restrict results by timestamp (owned, will be moved to thread)
+/// * `path_filter` - Optional path filter to restrict results by project path (owned, will be moved to thread)
 pub fn load_all_conversations_streaming(
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time_filter: Option<TimeFilter>,
+    path_filter: Option<PathFilter>,
 ) -> Receiver<LoaderMessage> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        load_all_streaming_inner(tx, show_last, debug_level);
+        load_all_streaming_inner(tx, show_last, debug_level, time_filter, path_filter);
     });
 
     rx
@@ -101,6 +157,8 @@ fn load_all_streaming_inner(
     tx: Sender<LoaderMessage>,
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time_filter: Option<TimeFilter>,
+    path_filter: Option<PathFilter>,
 ) {
     // First, validate that the projects root exists (fatal if not)
     let root = match super::get_claude_projects_root() {
@@ -133,10 +191,28 @@ fn load_all_streaming_inner(
     );
 
     // Process projects in parallel and send batches as they complete
-    projects.par_iter().for_each(|project| {
-        let project_dir = root.join(&project.name);
+    projects
+        .par_iter()
+        .filter(|project| {
+            // Apply path filter at project level
+            if let Some(ref filter) = path_filter {
+                let project_path = decode_project_dir_name_to_path(&project.name);
+                let matches = filter.matches(&project_path);
+                if !matches {
+                    debug::debug(
+                        debug_level,
+                        &format!("Path filter excluded project: {}", project_path.display()),
+                    );
+                }
+                matches
+            } else {
+                true
+            }
+        })
+        .for_each(|project| {
+            let project_dir = root.join(&project.name);
 
-        match load_conversations(&project_dir, show_last, debug_level) {
+            match load_conversations(&project_dir, show_last, debug_level, time_filter.as_ref(), None) {
             Ok(mut convs) => {
                 if convs.is_empty() {
                     return;
@@ -223,11 +299,35 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
-/// Find and process all conversation files in one pass
+/// Find and process all conversation files in one pass.
+///
+/// # Arguments
+///
+/// * `projects_dir` - The Claude projects directory to load from
+/// * `show_last` - If true, show last messages in preview instead of first
+/// * `debug_level` - Optional debug logging level
+/// * `time_filter` - Optional time filter to restrict results by timestamp
+/// * `path_filter` - Optional path filter (typically applied at project level by callers)
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use claude_history::time_filter::TimeFilter;
+/// use claude_history::path_filter::PathFilter;
+///
+/// // Load all conversations
+/// let all = load_conversations(&dir, false, None, None, None)?;
+///
+/// // Load only last week's conversations
+/// let time_filter = TimeFilter::from_since("1w").unwrap();
+/// let recent = load_conversations(&dir, false, None, Some(&time_filter), None)?;
+/// ```
 pub fn load_conversations(
     projects_dir: &Path,
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time_filter: Option<&TimeFilter>,
+    _path_filter: Option<&PathFilter>,  // Filtering happens at project level in callers
 ) -> Result<Vec<Conversation>> {
     // Find all JSONL files and capture metadata in one pass
     let mut files_with_meta = Vec::new();
@@ -300,6 +400,23 @@ pub fn load_conversations(
 
     // Ensure deterministic ordering after parallel processing
     conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    // Apply time filter if provided
+    if let Some(filter) = time_filter {
+        let before_count = conversations.len();
+        conversations.retain(|conv| filter.matches(conv.timestamp));
+        let filtered_count = before_count - conversations.len();
+        if filtered_count > 0 {
+            debug::info(
+                debug_level,
+                &format!(
+                    "Time filter excluded {} conversations ({} remaining)",
+                    filtered_count,
+                    conversations.len()
+                ),
+            );
+        }
+    }
 
     // Inject project info into each conversation
     let fallback_path = projects_dir
