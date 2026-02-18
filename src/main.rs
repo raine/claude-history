@@ -139,8 +139,10 @@ fn run() -> Result<()> {
         return Ok(());
     }
 
+    let use_global = resolve_bool_setting(args.global, false, config.global, false);
+
     // Determine how to load conversations based on mode
-    let (conversations, selected_path) = if args.global {
+    let (conversations, selected_path) = if use_global {
         // Global Search (-g) - use streaming loader for instant startup
         let rx = history::load_all_conversations_streaming(show_last, args.debug);
 

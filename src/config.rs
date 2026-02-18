@@ -9,6 +9,7 @@ use std::path::PathBuf;
 #[derive(Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigFile {
+    pub global: Option<bool>,
     pub display: Option<DisplayConfig>,
     pub resume: Option<ResumeConfig>,
 }
