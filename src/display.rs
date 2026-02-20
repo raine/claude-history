@@ -32,15 +32,15 @@ const SEPARATOR: &str = " │ ";
 const SEPARATOR_WIDTH: usize = 3; // Display width of " │ "
 
 // Colors matching the TUI theme
-const TEAL: CustomColor = CustomColor {
-    r: 78,
-    g: 201,
-    b: 176,
+const CLAUDE_TERRACOTTA: CustomColor = CustomColor {
+    r: 218,
+    g: 119,
+    b: 86,
 };
-const DIM_TEAL: CustomColor = CustomColor {
-    r: 60,
-    g: 160,
-    b: 140,
+const CLAUDE_TERRACOTTA_DIM: CustomColor = CustomColor {
+    r: 170,
+    g: 93,
+    b: 67,
 };
 const SEPARATOR_COLOR: CustomColor = CustomColor {
     r: 80,
@@ -194,7 +194,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
 
     fn format_assistant_text(&mut self, text: &str) {
         let rendered = render_markdown(text, self.content_width);
-        self.print_markdown("Claude", |s| s.custom_color(TEAL).bold(), &rendered);
+        self.print_markdown("Claude", |s| s.custom_color(CLAUDE_TERRACOTTA).bold(), &rendered);
     }
 
     fn format_tool_call(&mut self, name: &str, input: &serde_json::Value) {
@@ -202,7 +202,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
 
         // Print the header with appropriate styling
         let padded_name = format!("{:>width$}", "Claude", width = NAME_WIDTH);
-        let _ = write!(self.writer, "{}", padded_name.custom_color(DIM_TEAL));
+        let _ = write!(self.writer, "{}", padded_name.custom_color(CLAUDE_TERRACOTTA_DIM));
         let _ = write!(self.writer, "{}", SEPARATOR.custom_color(SEPARATOR_COLOR));
 
         // Print the header in subtle gray
@@ -229,7 +229,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
     }
 
     fn format_thinking(&mut self, thought: &str) {
-        self.print_lines("Thinking", |s| s.custom_color(DIM_TEAL), thought);
+        self.print_lines("Thinking", |s| s.custom_color(CLAUDE_TERRACOTTA_DIM), thought);
     }
 
     fn end_message(&mut self) {
@@ -245,7 +245,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
     fn format_agent_assistant_text(&mut self, agent_id: &str, text: &str) {
         let rendered = render_markdown(text, self.content_width);
         let name = format!("↳{}", short_agent_id(agent_id));
-        self.print_markdown(&name, |s| s.custom_color(TEAL).dimmed(), &rendered);
+        self.print_markdown(&name, |s| s.custom_color(CLAUDE_TERRACOTTA).dimmed(), &rendered);
     }
 
     fn format_agent_tool_call(&mut self, agent_id: &str, name: &str, input: &serde_json::Value) {
@@ -257,7 +257,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
         let _ = write!(
             self.writer,
             "{}",
-            padded_name.custom_color(DIM_TEAL).dimmed()
+            padded_name.custom_color(CLAUDE_TERRACOTTA_DIM).dimmed()
         );
         let _ = write!(self.writer, "{}", SEPARATOR.custom_color(SEPARATOR_COLOR));
 
@@ -273,7 +273,7 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
     fn format_agent_tool_result(&mut self, _agent_id: &str, content: Option<&serde_json::Value>) {
         self.print_lines(
             "  ↳ Tool",
-            |s| s.custom_color(DIM_TEAL).dimmed(),
+            |s| s.custom_color(CLAUDE_TERRACOTTA_DIM).dimmed(),
             "<Result>",
         );
         let content_str = format_tool_content(content);
@@ -799,8 +799,8 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
         show_timing: false, // Non-TUI render doesn't support timing toggle
         content_width,
         assistant_label: "Claude".to_string(),
-        assistant_color: (78, 201, 176),     // TEAL
-        assistant_dim_color: (60, 160, 140),  // DIM_TEAL
+        assistant_color: (218, 119, 86),      // Claude terracotta
+        assistant_dim_color: (170, 93, 67),   // Claude terracotta dim
     };
 
     let rendered_lines = render_conversation(file_path, &render_options)?;

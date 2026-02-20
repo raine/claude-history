@@ -95,11 +95,11 @@ fn provider_badge(provider: ProviderKind) -> Span<'static> {
     match provider {
         ProviderKind::Claude => Span::styled(
             "[CC] ",
-            Style::default().fg(Color::Rgb(78, 201, 176)), // Teal
+            Style::default().fg(Color::Rgb(218, 119, 86)), // Claude terracotta
         ),
         ProviderKind::Cursor => Span::styled(
             "[Cu] ",
-            Style::default().fg(Color::Rgb(180, 130, 230)), // Purple
+            Style::default().fg(Color::Rgb(180, 130, 230)), // Cursor purple
         ),
     }
 }

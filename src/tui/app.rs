@@ -20,7 +20,7 @@ use std::time::Duration;
 /// Returns (label, color, dim_color) for a provider
 fn provider_theme(kind: &ProviderKind) -> (String, (u8, u8, u8), (u8, u8, u8)) {
     match kind {
-        ProviderKind::Claude => ("Claude".to_string(), (78, 201, 176), (60, 160, 140)),
+        ProviderKind::Claude => ("Claude".to_string(), (218, 119, 86), (170, 93, 67)),
         ProviderKind::Cursor => ("Cursor".to_string(), (180, 130, 230), (140, 100, 180)),
     }
 }
