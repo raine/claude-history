@@ -9,7 +9,7 @@ use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::Result;
 use chrono::{DateTime, Local};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -40,9 +40,6 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
         .and_then(|f| f.to_str())
         .unwrap_or("unknown");
 
-    // Collect all lines for context access when logging parse errors
-    let lines: Vec<String> = reader.lines().map_while(|l| l.ok()).collect();
-
     let mut all_parts = Vec::new();
     let mut preview_parts = Vec::new();
     let mut user_messages = Vec::new();
@@ -60,12 +57,40 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
     let mut first_timestamp: Option<chrono::DateTime<chrono::FixedOffset>> = None;
     let mut last_timestamp: Option<chrono::DateTime<chrono::FixedOffset>> = None;
 
-    for (line_idx, line) in lines.iter().enumerate() {
+    // Stream-parse lines with a ring buffer for error context (avoids loading entire file)
+    // Ring buffer holds up to 2 previous lines for before-context
+    let mut ring_buf: VecDeque<String> = VecDeque::with_capacity(3);
+    // Pending errors that need after-context lines filled in
+    let mut pending_errors: Vec<(ParseError, usize)> = Vec::new(); // (error, lines_needed)
+
+    for (line_idx, line_result) in reader.lines().enumerate() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+
+        // Fill after-context for any pending errors
+        if !line.trim().is_empty() {
+            for (err, needed) in pending_errors.iter_mut() {
+                if *needed > 0 {
+                    err.context_after.push(line.clone());
+                    *needed -= 1;
+                }
+            }
+        }
+        // Flush completed pending errors
+        pending_errors.retain(|(_, needed)| *needed > 0);
+
         if line.trim().is_empty() {
+            // Still track in ring buffer for context
+            ring_buf.push_back(line);
+            if ring_buf.len() > 2 {
+                ring_buf.pop_front();
+            }
             continue;
         }
 
-        match serde_json::from_str::<LogEntry>(line) {
+        match serde_json::from_str::<LogEntry>(&line) {
             Ok(entry) => {
                 // Extract text content
                 match entry {
@@ -92,12 +117,20 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
 
                         let text = extract_text_from_user(&message);
                         if text.is_empty() {
+                            ring_buf.push_back(line);
+                            if ring_buf.len() > 2 {
+                                ring_buf.pop_front();
+                            }
                             continue;
                         }
 
                         user_messages.push(text.clone());
 
                         if is_clear_metadata_message(&text) {
+                            ring_buf.push_back(line);
+                            if ring_buf.len() > 2 {
+                                ring_buf.pop_front();
+                            }
                             continue;
                         }
 
@@ -171,19 +204,19 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
                 }
             }
             Err(e) => {
-                // Capture parse error with surrounding context
-                let start = line_idx.saturating_sub(2);
-                let context_before: Vec<String> = lines[start..line_idx].to_vec();
-                let end = (line_idx + 3).min(lines.len());
-                let context_after: Vec<String> = lines[line_idx + 1..end].to_vec();
+                // Capture parse error with ring buffer for before-context
+                let context_before: Vec<String> = ring_buf.iter().cloned().collect();
 
-                parse_errors.push(ParseError {
+                let error = ParseError {
                     line_number: line_idx + 1, // 1-indexed for display
                     line_content: line.clone(),
                     error_message: e.to_string(),
                     context_before,
-                    context_after,
-                });
+                    context_after: Vec::new(),
+                };
+
+                // Queue for after-context collection (up to 2 lines)
+                pending_errors.push((error, 2));
 
                 debug::warn(
                     debug_level,
@@ -196,6 +229,17 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
                 );
             }
         }
+
+        // Update ring buffer
+        ring_buf.push_back(line);
+        if ring_buf.len() > 2 {
+            ring_buf.pop_front();
+        }
+    }
+
+    // Collect any remaining pending errors
+    for (error, _) in pending_errors {
+        parse_errors.push(error);
     }
 
     // Check if this is a clear-only conversation or if preview is empty after filtering

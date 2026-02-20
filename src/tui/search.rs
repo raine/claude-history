@@ -6,6 +6,8 @@ use rayon::prelude::*;
 pub struct SearchableConversation {
     /// Lowercased full text for searching
     pub text_lower: String,
+    /// Original full text (moved from Conversation to avoid duplication)
+    pub full_text: String,
     /// Original conversation index
     pub index: usize,
 }
@@ -28,25 +30,34 @@ pub fn is_word_separator(c: char) -> bool {
     c.is_whitespace() || c == '_'
 }
 
-/// Precompute lowercased search text for all conversations
-pub fn precompute_search_text(conversations: &[Conversation]) -> Vec<SearchableConversation> {
+/// Precompute lowercased search text for all conversations.
+/// Moves `full_text` ownership from each Conversation into SearchableConversation
+/// to avoid storing the same text twice in memory.
+pub fn precompute_search_text(conversations: &mut [Conversation]) -> Vec<SearchableConversation> {
     conversations
-        .par_iter()
+        .iter_mut()
         .enumerate()
-        .map(|(idx, conv)| SearchableConversation {
-            text_lower: normalize_for_search(&conv.full_text),
-            index: idx,
+        .map(|(idx, conv)| {
+            let full_text = std::mem::take(&mut conv.full_text);
+            let text_lower = normalize_for_search(&full_text);
+            SearchableConversation {
+                text_lower,
+                full_text,
+                index: idx,
+            }
         })
         .collect()
 }
 
-/// Filter and score conversations based on query
-/// Returns indices into the original conversations vec, sorted by score descending
+/// Filter and score conversations based on query.
+/// Returns indices into the original conversations vec, sorted by score descending.
+/// When `narrow_from` is provided, only scores those indices (used when query extends previous).
 pub fn search(
     conversations: &[Conversation],
     searchable: &[SearchableConversation],
     query: &str,
     now: DateTime<Local>,
+    narrow_from: Option<&[usize]>,
 ) -> Vec<usize> {
     let query = query.trim();
     if query.is_empty() {
@@ -60,23 +71,44 @@ pub fn search(
         return (0..conversations.len()).collect();
     }
 
-    // Score all conversations in parallel
-    let mut scored: Vec<(usize, f64, DateTime<Local>)> = searchable
-        .par_iter()
-        .filter_map(|s| {
-            let score = score_text(
-                &s.text_lower,
-                &query_words,
-                conversations[s.index].timestamp,
-                now,
-            );
-            if score > 0.0 {
-                Some((s.index, score, conversations[s.index].timestamp))
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Score conversations in parallel, optionally narrowing to a subset
+    let mut scored: Vec<(usize, f64, DateTime<Local>)> = if let Some(indices) = narrow_from {
+        let allowed: std::collections::HashSet<usize> = indices.iter().copied().collect();
+        searchable
+            .par_iter()
+            .filter(|s| allowed.contains(&s.index))
+            .filter_map(|s| {
+                let score = score_text(
+                    &s.text_lower,
+                    &query_words,
+                    conversations[s.index].timestamp,
+                    now,
+                );
+                if score > 0.0 {
+                    Some((s.index, score, conversations[s.index].timestamp))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else {
+        searchable
+            .par_iter()
+            .filter_map(|s| {
+                let score = score_text(
+                    &s.text_lower,
+                    &query_words,
+                    conversations[s.index].timestamp,
+                    now,
+                );
+                if score > 0.0 {
+                    Some((s.index, score, conversations[s.index].timestamp))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    };
 
     // Sort by score descending, then by timestamp descending for stability
     scored.sort_unstable_by(|a, b| {
@@ -176,46 +208,46 @@ mod tests {
     #[test]
     fn search_matches_underscore_separated() {
         let now = Local::now();
-        let convs = vec![make_conv("HARDENED_RUNTIME config", now)];
-        let searchable = precompute_search_text(&convs);
-        let results = search(&convs, &searchable, "harden runtime", now);
+        let mut convs = vec![make_conv("HARDENED_RUNTIME config", now)];
+        let searchable = precompute_search_text(&mut convs);
+        let results = search(&convs, &searchable, "harden runtime", now, None);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn search_matches_different_case() {
         let now = Local::now();
-        let convs = vec![make_conv("Hardened Runtime enabled", now)];
-        let searchable = precompute_search_text(&convs);
-        let results = search(&convs, &searchable, "harden runtime", now);
+        let mut convs = vec![make_conv("Hardened Runtime enabled", now)];
+        let searchable = precompute_search_text(&mut convs);
+        let results = search(&convs, &searchable, "harden runtime", now, None);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn search_prefix_matches_words() {
         let now = Local::now();
-        let convs = vec![make_conv("hardened security", now)];
-        let searchable = precompute_search_text(&convs);
-        let results = search(&convs, &searchable, "harden", now);
+        let mut convs = vec![make_conv("hardened security", now)];
+        let searchable = precompute_search_text(&mut convs);
+        let results = search(&convs, &searchable, "harden", now, None);
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     fn search_requires_all_words() {
         let now = Local::now();
-        let convs = vec![make_conv("hardened security", now)];
-        let searchable = precompute_search_text(&convs);
-        let results = search(&convs, &searchable, "harden runtime", now);
+        let mut convs = vec![make_conv("hardened security", now)];
+        let searchable = precompute_search_text(&mut convs);
+        let results = search(&convs, &searchable, "harden runtime", now, None);
         assert_eq!(results.len(), 0); // "runtime" not present
     }
 
     #[test]
     fn search_with_underscore_in_query() {
         let now = Local::now();
-        let convs = vec![make_conv("hardened runtime enabled", now)];
-        let searchable = precompute_search_text(&convs);
+        let mut convs = vec![make_conv("hardened runtime enabled", now)];
+        let searchable = precompute_search_text(&mut convs);
         // Query with underscore should still match space-separated text
-        let results = search(&convs, &searchable, "hardened_runtime", now);
+        let results = search(&convs, &searchable, "hardened_runtime", now, None);
         assert_eq!(results.len(), 1);
     }
 

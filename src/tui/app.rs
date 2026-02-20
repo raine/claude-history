@@ -1,3 +1,4 @@
+use crate::claude::LogEntry;
 use crate::debug_log;
 use crate::error::{AppError, Result};
 use crate::history::{
@@ -92,6 +93,8 @@ pub struct ViewState {
     pub search_matches: Vec<usize>,
     /// Current match index
     pub current_match: usize,
+    /// Cached log entries to avoid re-reading from disk on toggle
+    pub cached_entries: Vec<LogEntry>,
 }
 
 /// Search mode within view
@@ -163,17 +166,19 @@ pub struct App {
     show_timing: bool,
     /// Whether the app is running in single file mode (direct input, no list)
     single_file_mode: bool,
+    /// Previous search query for incremental filtering
+    previous_query: String,
 }
 
 impl App {
     /// Create a new app with all conversations pre-loaded (existing behavior)
     pub fn new(
-        conversations: Vec<Conversation>,
+        mut conversations: Vec<Conversation>,
         use_relative_time: bool,
         tool_display: ToolDisplayMode,
         show_thinking: bool,
     ) -> Self {
-        let searchable = search::precompute_search_text(&conversations);
+        let searchable = search::precompute_search_text(&mut conversations);
         let filtered: Vec<usize> = (0..conversations.len()).collect();
         let selected = if filtered.is_empty() { None } else { Some(0) };
 
@@ -194,6 +199,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
+            previous_query: String::new(),
         }
     }
 
@@ -220,6 +226,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
+            previous_query: String::new(),
         }
     }
 
@@ -271,12 +278,14 @@ impl App {
                 search_query: String::new(),
                 search_matches: Vec::new(),
                 current_match: 0,
+                cached_entries: Vec::new(),
             }),
             status_message: None,
             tool_display,
             show_thinking,
             show_timing: false,
             single_file_mode: true,
+            previous_query: String::new(),
         }
     }
 
@@ -314,7 +323,7 @@ impl App {
         }
 
         // Now precompute search text (only once, at the end)
-        self.searchable = search::precompute_search_text(&self.conversations);
+        self.searchable = search::precompute_search_text(&mut self.conversations);
 
         self.loading_state = LoadingState::Ready;
 
@@ -358,7 +367,22 @@ impl App {
     /// Update filtered results based on current query
     fn update_filter(&mut self) {
         let now = Local::now();
-        self.filtered = search::search(&self.conversations, &self.searchable, &self.query, now);
+        // When the new query extends the previous one, only rescore the already-filtered subset
+        let narrow_hint = if !self.previous_query.is_empty()
+            && self.query.starts_with(&self.previous_query)
+        {
+            Some(self.filtered.clone())
+        } else {
+            None
+        };
+        self.filtered = search::search(
+            &self.conversations,
+            &self.searchable,
+            &self.query,
+            now,
+            narrow_hint.as_deref(),
+        );
+        self.previous_query = self.query.clone();
         self.selected = if self.filtered.is_empty() {
             None
         } else {
@@ -447,6 +471,10 @@ impl App {
 
     pub fn conversations(&self) -> &[Conversation] {
         &self.conversations
+    }
+
+    pub fn searchable(&self) -> &[SearchableConversation] {
+        &self.searchable
     }
 
     pub fn selected(&self) -> Option<usize> {
@@ -1356,6 +1384,7 @@ impl App {
                     search_query: String::new(),
                     search_matches: Vec::new(),
                     current_match: 0,
+                    cached_entries: entries,
                 });
             }
             Err(e) => {
@@ -1478,7 +1507,6 @@ impl App {
         use crate::tui::viewer::{RenderOptions, render_conversation, render_entries};
 
         if let AppMode::View(ref mut state) = self.app_mode {
-            // Try provider-based reading first, fallback to file-based
             let conv = self
                 .conversations
                 .iter()
@@ -1497,12 +1525,18 @@ impl App {
                 assistant_color,
                 assistant_dim_color,
             };
-            let lines_result = if let Some(conv) = conv {
+
+            // Use cached entries if available, otherwise read from disk
+            let lines_result = if !state.cached_entries.is_empty() {
+                Ok(render_entries(&state.cached_entries, &options))
+            } else if let Some(conv) = conv {
                 let provider = providers.iter().find(|p| p.kind() == conv.provider);
                 match provider {
-                    Some(p) => p
-                        .read_entries(conv)
-                        .map(|entries| render_entries(&entries, &options)),
+                    Some(p) => p.read_entries(conv).map(|entries| {
+                        let lines = render_entries(&entries, &options);
+                        state.cached_entries = entries;
+                        lines
+                    }),
                     None => render_conversation(&state.conversation_path, &options)
                         .map_err(AppError::Io),
                 }

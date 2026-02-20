@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "lowercase")]
 pub enum LogEntry {
@@ -55,21 +55,21 @@ pub enum LogEntry {
     },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct UserMessage {
     #[allow(dead_code)]
     pub role: String,
     pub content: UserContent,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum UserContent {
     String(String),
     Blocks(Vec<ContentBlock>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AssistantMessage {
     #[allow(dead_code)]
     pub role: String,
@@ -92,7 +92,7 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -146,7 +146,7 @@ pub fn extract_text_from_assistant(message: &AssistantMessage) -> String {
 }
 
 /// Agent progress data from subagent conversations
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AgentProgressData {
     #[allow(dead_code)]
     #[serde(rename = "type")]
@@ -159,7 +159,7 @@ pub struct AgentProgressData {
 }
 
 /// Individual message within an agent conversation
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AgentMessage {
     #[serde(rename = "type")]
     pub message_type: String, // "user" or "assistant"
@@ -167,7 +167,7 @@ pub struct AgentMessage {
 }
 
 /// Content of an agent message (mirrors UserMessage/AssistantMessage structure)
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AgentMessageContent {
     #[allow(dead_code)]
     pub role: String,
@@ -175,7 +175,7 @@ pub struct AgentMessageContent {
 }
 
 /// Agent message content is always an array of content blocks
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(untagged)]
 pub enum AgentContent {
     Blocks(Vec<ContentBlock>),

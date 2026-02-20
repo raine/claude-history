@@ -1211,12 +1211,19 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
 
             // Check for hidden matches and build context line if needed
             let context_line = if !query_words.is_empty() {
+                // Look up full_text from searchable (ownership moved there to save memory)
+                let full_text = app
+                    .searchable()
+                    .iter()
+                    .find(|s| s.index == conv_idx)
+                    .map(|s| s.full_text.as_str())
+                    .unwrap_or("");
                 if let Some((match_pos, match_char_len)) =
-                    find_hidden_match(&conv.full_text, &truncated_preview, &query_words)
+                    find_hidden_match(full_text, &truncated_preview, &query_words)
                 {
                     let context_width = width.saturating_sub(4); // Account for indicator
                     let context_text = extract_match_context(
-                        &conv.full_text,
+                        full_text,
                         match_pos,
                         match_char_len,
                         context_width,
