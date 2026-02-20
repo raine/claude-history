@@ -41,8 +41,8 @@ impl fmt::Display for DebugLevel {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "claude-history")]
-#[command(about = "View Claude conversation history")]
+#[command(name = "mnemonai")]
+#[command(about = "Universal AI coding conversation history browser")]
 pub struct Args {
     /// Show tool calls in the conversation output
     #[arg(long, short = 't', group = "tools_display")]

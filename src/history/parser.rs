@@ -3,7 +3,7 @@
 //! This module handles parsing Claude conversation JSONL files and extracting
 //! conversation metadata like preview text, message counts, and working directory.
 
-use super::{Conversation, ParseError};
+use super::{Conversation, ParseError, ProviderKind};
 use crate::claude::{LogEntry, TokenUsage, extract_text_from_assistant, extract_text_from_user};
 use crate::cli::DebugLevel;
 use crate::debug;
@@ -280,9 +280,18 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
         _ => None,
     };
 
+    // Extract session ID from filename stem (e.g., "abc123.jsonl" -> "abc123")
+    let id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     Ok(Some(Conversation {
         path,
         index: 0,
+        provider: ProviderKind::Claude,
+        id,
         timestamp,
         preview,
         full_text,

@@ -1,8 +1,10 @@
 use crate::debug_log;
 use crate::error::{AppError, Result};
 use crate::history::{
-    Conversation, LoaderMessage, format_short_name_from_path, process_conversation_file,
+    Conversation, LoaderMessage, ProviderKind, format_short_name_from_path,
+    process_conversation_file,
 };
+use crate::providers::Provider;
 use crate::tui::search::{self, SearchableConversation};
 use crate::tui::ui;
 use crate::tui::viewer::ToolDisplayMode;
@@ -14,6 +16,14 @@ use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
+
+/// Returns (label, color, dim_color) for a provider
+fn provider_theme(kind: &ProviderKind) -> (String, (u8, u8, u8), (u8, u8, u8)) {
+    match kind {
+        ProviderKind::Claude => ("Claude".to_string(), (78, 201, 176), (60, 160, 140)),
+        ProviderKind::Cursor => ("Cursor".to_string(), (180, 130, 230), (140, 100, 180)),
+    }
+}
 
 /// Result of running the TUI
 pub enum Action {
@@ -131,6 +141,8 @@ pub struct App {
     selected: Option<usize>,
     /// Current search query
     query: String,
+    /// Parsed and normalized query words (cached for render performance)
+    query_words: Vec<String>,
     /// Cursor position in query (character index, not byte)
     cursor_pos: usize,
     /// Whether to use relative time display
@@ -171,6 +183,7 @@ impl App {
             filtered,
             selected,
             query: String::new(),
+            query_words: Vec::new(),
             cursor_pos: 0,
             use_relative_time,
             loading_state: LoadingState::Ready,
@@ -196,6 +209,7 @@ impl App {
             filtered: Vec::new(),
             selected: None,
             query: String::new(),
+            query_words: Vec::new(),
             cursor_pos: 0,
             use_relative_time,
             loading_state: LoadingState::Loading { loaded: 0 },
@@ -239,6 +253,7 @@ impl App {
             filtered,
             selected,
             query: String::new(),
+            query_words: Vec::new(),
             cursor_pos: 0,
             use_relative_time,
             loading_state: LoadingState::Ready,
@@ -331,6 +346,15 @@ impl App {
         matches!(self.loading_state, LoadingState::Loading { .. })
     }
 
+    /// Refresh the cached query words from the current query
+    fn refresh_query_words(&mut self) {
+        let query_normalized = search::normalize_for_search(self.query.trim());
+        self.query_words = query_normalized
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect();
+    }
+
     /// Update filtered results based on current query
     fn update_filter(&mut self) {
         let now = Local::now();
@@ -340,6 +364,9 @@ impl App {
         } else {
             Some(0)
         };
+
+        // Cache parsed query words for render performance
+        self.refresh_query_words();
     }
 
     /// Move selection up
@@ -430,6 +457,10 @@ impl App {
         &self.query
     }
 
+    pub fn query_words(&self) -> &[String] {
+        &self.query_words
+    }
+
     pub fn use_relative_time(&self) -> bool {
         self.use_relative_time
     }
@@ -444,14 +475,6 @@ impl App {
 
     pub fn status_message(&self) -> Option<&(String, std::time::Instant)> {
         self.status_message.as_ref()
-    }
-
-    /// Returns how long until the active status message expires, if any
-    pub fn status_message_remaining(&self) -> Option<Duration> {
-        const STATUS_TTL: Duration = Duration::from_secs(3);
-        self.status_message
-            .as_ref()
-            .and_then(|(_, instant)| STATUS_TTL.checked_sub(instant.elapsed()))
     }
 
     pub fn cursor_pos(&self) -> usize {
@@ -583,7 +606,7 @@ impl App {
     }
 
     /// Handle a key event during export/yank menu mode
-    fn handle_menu_key(&mut self, code: KeyCode) -> Option<Action> {
+    fn handle_menu_key(&mut self, code: KeyCode, providers: &[Box<dyn Provider>]) -> Option<Action> {
         let (selected, is_yank) = match &mut self.dialog_mode {
             DialogMode::ExportMenu { selected } => (selected, false),
             DialogMode::YankMenu { selected } => (selected, true),
@@ -603,29 +626,29 @@ impl App {
             }
             // Number keys for direct selection
             KeyCode::Char('1') => {
-                self.perform_export(0, is_yank);
+                self.perform_export_with_providers(0, is_yank, providers);
                 self.dialog_mode = DialogMode::None;
                 None
             }
             KeyCode::Char('2') => {
-                self.perform_export(1, is_yank);
+                self.perform_export_with_providers(1, is_yank, providers);
                 self.dialog_mode = DialogMode::None;
                 None
             }
             KeyCode::Char('3') => {
-                self.perform_export(2, is_yank);
+                self.perform_export_with_providers(2, is_yank, providers);
                 self.dialog_mode = DialogMode::None;
                 None
             }
             KeyCode::Char('4') => {
-                self.perform_export(3, is_yank);
+                self.perform_export_with_providers(3, is_yank, providers);
                 self.dialog_mode = DialogMode::None;
                 None
             }
             // Enter to select current option
             KeyCode::Enter => {
                 let sel = *selected;
-                self.perform_export(sel, is_yank);
+                self.perform_export_with_providers(sel, is_yank, providers);
                 self.dialog_mode = DialogMode::None;
                 None
             }
@@ -649,16 +672,15 @@ impl App {
         }
     }
 
-    /// Perform export or yank operation
-    fn perform_export(&mut self, option: usize, to_clipboard: bool) {
-        let (path, options) = match &self.app_mode {
-            AppMode::View(state) => (
-                state.conversation_path.clone(),
-                crate::tui::export::ExportOptions {
-                    show_tools: state.tool_display.is_visible(),
-                    show_thinking: state.show_thinking,
-                },
-            ),
+    /// Perform export or yank operation with provider support
+    fn perform_export_with_providers(
+        &mut self,
+        option: usize,
+        to_clipboard: bool,
+        providers: &[Box<dyn Provider>],
+    ) {
+        let path = match &self.app_mode {
+            AppMode::View(state) => state.conversation_path.clone(),
             _ => return,
         };
 
@@ -667,10 +689,64 @@ impl App {
             None => return,
         };
 
-        let result = if to_clipboard {
-            crate::tui::export::export_to_clipboard(&path, format, options)
+        // Try provider-based export for non-JSONL formats
+        let conv = self.conversations.iter().find(|c| c.path == path);
+
+        let assistant_label = match conv.map(|c| &c.provider) {
+            Some(ProviderKind::Cursor) => "Cursor",
+            _ => "Claude",
+        }.to_string();
+
+        let export_options = match &self.app_mode {
+            AppMode::View(state) => crate::tui::export::ExportOptions {
+                show_tools: state.tool_display.is_visible(),
+                show_thinking: state.show_thinking,
+                assistant_label,
+            },
+            _ => return,
+        };
+        let provider = conv.and_then(|c| providers.iter().find(|p| p.kind() == c.provider));
+
+        let result = if let (Some(provider), Some(conv)) = (provider, conv) {
+            // Use provider to read entries for export
+            match provider.read_entries(conv) {
+                Ok(entries) => {
+                    let content =
+                        crate::tui::export::generate_content_from_entries(&entries, format, export_options);
+                    if to_clipboard {
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&content)) {
+                            Ok(()) => crate::tui::export::ExportResult {
+                                message: "Copied to clipboard".to_string(),
+                            },
+                            Err(e) => crate::tui::export::ExportResult {
+                                message: format!("Clipboard error: {}", e),
+                            },
+                        }
+                    } else {
+                        let timestamp = chrono::Local::now().format("%Y-%m-%d-%H%M%S");
+                        let ext = format.extension();
+                        let filename = format!("conversation-{}.{}", timestamp, ext);
+                        match std::fs::write(&filename, &content) {
+                            Ok(_) => crate::tui::export::ExportResult {
+                                message: format!("Exported to {}", filename),
+                            },
+                            Err(e) => crate::tui::export::ExportResult {
+                                message: format!("Failed to write: {}", e),
+                            },
+                        }
+                    }
+                }
+                Err(e) => crate::tui::export::ExportResult {
+                    message: format!("Failed to read: {}", e),
+                },
+            }
         } else {
-            crate::tui::export::export_to_file(&path, format, options)
+            // Fallback to file-based export
+            if to_clipboard {
+                crate::tui::export::export_to_clipboard(&path, format, export_options)
+            } else {
+                crate::tui::export::export_to_file(&path, format, export_options)
+            }
         };
 
         self.status_message = Some((result.message, std::time::Instant::now()));
@@ -683,12 +759,13 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
         viewport_height: usize,
+        providers: &[Box<dyn Provider>],
     ) -> Option<Action> {
         // Handle dialogs first
         match self.dialog_mode {
             DialogMode::ConfirmDelete => return self.handle_confirm_key(code),
             DialogMode::ExportMenu { .. } | DialogMode::YankMenu { .. } => {
-                return self.handle_menu_key(code);
+                return self.handle_menu_key(code, providers);
             }
             DialogMode::Help => return self.handle_help_key(code),
             DialogMode::None => {}
@@ -696,7 +773,7 @@ impl App {
 
         // Delegate based on app mode
         match &self.app_mode {
-            AppMode::View(_) => self.handle_view_key(code, modifiers, viewport_height),
+            AppMode::View(_) => self.handle_view_key(code, modifiers, viewport_height, providers),
             AppMode::List => self.handle_list_key(code, modifiers, viewport_height),
         }
     }
@@ -707,6 +784,7 @@ impl App {
         code: KeyCode,
         modifiers: KeyModifiers,
         viewport_height: usize,
+        providers: &[Box<dyn Provider>],
     ) -> Option<Action> {
         // First check if we're in search typing mode
         if let AppMode::View(ref state) = self.app_mode
@@ -829,19 +907,19 @@ impl App {
 
             // Toggle tools
             KeyCode::Char('t') => {
-                self.toggle_view_tools(viewport_height);
+                self.toggle_view_tools(viewport_height, providers);
                 None
             }
 
             // Toggle thinking
             KeyCode::Char('T') => {
-                self.toggle_view_thinking(viewport_height);
+                self.toggle_view_thinking(viewport_height, providers);
                 None
             }
 
             // Toggle timing (timestamps + durations)
             KeyCode::Char('i') => {
-                self.toggle_view_timing(viewport_height);
+                self.toggle_view_timing(viewport_height, providers);
                 None
             }
 
@@ -1043,7 +1121,9 @@ impl App {
                     None
                 }
                 KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.delete_word_backwards();
+                    if self.delete_word_backwards() {
+                        self.refresh_query_words();
+                    }
                     None
                 }
                 // Open help overlay
@@ -1062,6 +1142,8 @@ impl App {
                         .unwrap_or(self.query.len());
                     self.query.insert(byte_pos, c);
                     self.cursor_pos += 1;
+                    // Refresh query words cache even during loading so UI highlighting stays in sync
+                    self.refresh_query_words();
                     None
                 }
                 KeyCode::Backspace => {
@@ -1071,6 +1153,8 @@ impl App {
                     {
                         self.query.remove(byte_pos);
                         self.cursor_pos -= 1;
+                        // Refresh query words cache even during loading so UI highlighting stays in sync
+                        self.refresh_query_words();
                     }
                     None
                 }
@@ -1080,6 +1164,8 @@ impl App {
                         && let Some((byte_pos, _)) = self.query.char_indices().nth(self.cursor_pos)
                     {
                         self.query.remove(byte_pos);
+                        // Refresh query words cache even during loading so UI highlighting stays in sync
+                        self.refresh_query_words();
                     }
                     None
                 }
@@ -1214,8 +1300,12 @@ impl App {
     }
 
     /// Enter view mode for the currently selected conversation
-    pub fn enter_view_mode(&mut self, content_width: usize) {
-        use crate::tui::viewer::{RenderOptions, render_conversation};
+    pub fn enter_view_mode(
+        &mut self,
+        content_width: usize,
+        providers: &[Box<dyn Provider>],
+    ) {
+        use crate::tui::viewer::{RenderOptions, render_entries};
 
         let Some(selected) = self.selected else {
             return;
@@ -1223,17 +1313,35 @@ impl App {
         let Some(&conv_idx) = self.filtered.get(selected) else {
             return;
         };
-        let path = self.conversations[conv_idx].path.clone();
+        let conv = &self.conversations[conv_idx];
+        let path = conv.path.clone();
+
+        let (assistant_label, assistant_color, assistant_dim_color) =
+            provider_theme(&conv.provider);
 
         let options = RenderOptions {
             tool_display: self.tool_display,
             show_thinking: self.show_thinking,
             show_timing: self.show_timing,
             content_width,
+            assistant_label,
+            assistant_color,
+            assistant_dim_color,
         };
 
-        match render_conversation(&path, &options) {
-            Ok(rendered_lines) => {
+        // Find the right provider and read entries
+        let provider = providers.iter().find(|p| p.kind() == conv.provider);
+        let entries_result = match provider {
+            Some(p) => p.read_entries(conv),
+            None => {
+                // Fallback: read from file path (Claude provider behavior)
+                crate::tui::viewer::read_log_entries(&path).map_err(AppError::Io)
+            }
+        };
+
+        match entries_result {
+            Ok(entries) => {
+                let rendered_lines = render_entries(&entries, &options);
                 let total_lines = rendered_lines.len();
                 self.app_mode = AppMode::View(ViewState {
                     conversation_path: path,
@@ -1335,45 +1443,74 @@ impl App {
     }
 
     /// Cycle tool display mode in view mode
-    fn toggle_view_tools(&mut self, viewport_height: usize) {
+    fn toggle_view_tools(&mut self, viewport_height: usize, providers: &[Box<dyn Provider>]) {
         if let AppMode::View(ref mut state) = self.app_mode {
             state.tool_display = state.tool_display.next();
             self.tool_display = state.tool_display; // Persist at app level
-            self.re_render_view(viewport_height);
+            self.re_render_view(viewport_height, providers);
         }
     }
 
     /// Toggle thinking visibility in view mode
-    fn toggle_view_thinking(&mut self, viewport_height: usize) {
+    fn toggle_view_thinking(&mut self, viewport_height: usize, providers: &[Box<dyn Provider>]) {
         if let AppMode::View(ref mut state) = self.app_mode {
             state.show_thinking = !state.show_thinking;
             self.show_thinking = state.show_thinking; // Persist at app level
-            self.re_render_view(viewport_height);
+            self.re_render_view(viewport_height, providers);
         }
     }
 
     /// Toggle timing visibility in view mode (timestamps + durations)
-    fn toggle_view_timing(&mut self, viewport_height: usize) {
+    fn toggle_view_timing(&mut self, viewport_height: usize, providers: &[Box<dyn Provider>]) {
         if let AppMode::View(ref mut state) = self.app_mode {
             state.show_timing = !state.show_timing;
             self.show_timing = state.show_timing; // Persist at app level
-            self.re_render_view(viewport_height);
+            self.re_render_view(viewport_height, providers);
         }
     }
 
     /// Re-render the view with current toggle settings
-    fn re_render_view(&mut self, viewport_height: usize) {
-        use crate::tui::viewer::{RenderOptions, render_conversation};
+    fn re_render_view(
+        &mut self,
+        viewport_height: usize,
+        providers: &[Box<dyn Provider>],
+    ) {
+        use crate::tui::viewer::{RenderOptions, render_conversation, render_entries};
 
         if let AppMode::View(ref mut state) = self.app_mode {
+            // Try provider-based reading first, fallback to file-based
+            let conv = self
+                .conversations
+                .iter()
+                .find(|c| c.path == state.conversation_path);
+
+            let provider_kind = conv.map(|c| &c.provider).unwrap_or(&ProviderKind::Claude);
+            let (assistant_label, assistant_color, assistant_dim_color) =
+                provider_theme(provider_kind);
+
             let options = RenderOptions {
                 tool_display: state.tool_display,
                 show_thinking: state.show_thinking,
                 show_timing: state.show_timing,
                 content_width: state.content_width,
+                assistant_label,
+                assistant_color,
+                assistant_dim_color,
+            };
+            let lines_result = if let Some(conv) = conv {
+                let provider = providers.iter().find(|p| p.kind() == conv.provider);
+                match provider {
+                    Some(p) => p
+                        .read_entries(conv)
+                        .map(|entries| render_entries(&entries, &options)),
+                    None => render_conversation(&state.conversation_path, &options)
+                        .map_err(AppError::Io),
+                }
+            } else {
+                render_conversation(&state.conversation_path, &options).map_err(AppError::Io)
             };
 
-            if let Ok(lines) = render_conversation(&state.conversation_path, &options) {
+            if let Ok(lines) = lines_result {
                 let old_scroll = state.scroll_offset;
                 state.total_lines = lines.len();
                 state.rendered_lines = lines;
@@ -1406,12 +1543,17 @@ impl App {
     }
 
     /// Check if view needs re-render due to width change
-    pub fn check_view_resize(&mut self, new_content_width: usize, viewport_height: usize) {
+    pub fn check_view_resize(
+        &mut self,
+        new_content_width: usize,
+        viewport_height: usize,
+        providers: &[Box<dyn Provider>],
+    ) {
         if let AppMode::View(ref mut state) = self.app_mode
             && state.content_width != new_content_width
         {
             state.content_width = new_content_width;
-            self.re_render_view(viewport_height);
+            self.re_render_view(viewport_height, providers);
         }
     }
 }
@@ -1468,6 +1610,7 @@ pub fn run(
     use_relative_time: bool,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
+    providers: &[Box<dyn Provider>],
 ) -> Result<Action> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -1491,7 +1634,7 @@ pub fn run(
         let content_width = (frame_area.width as usize).saturating_sub(NAME_WIDTH + 3);
 
         // Check for resize in view mode
-        app.check_view_resize(content_width, viewport_height);
+        app.check_view_resize(content_width, viewport_height, providers);
 
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
@@ -1505,31 +1648,38 @@ pub fn run(
                     && !app.is_loading()
                     && app.selected().is_some()
                 {
-                    app.enter_view_mode(content_width);
+                    app.enter_view_mode(content_width, providers);
                     continue;
                 }
 
-                if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
+                if let Some(action) =
+                    app.handle_key(key.code, key.modifiers, viewport_height, providers)
+                {
                     match action {
                         Action::Delete(ref path) => {
-                            // Delete the file from disk
-                            match std::fs::remove_file(path) {
-                                Ok(()) => {
-                                    // Only remove from list if file deletion succeeded
-                                    app.remove_selected_from_list();
-                                    // If in view mode, return to list
-                                    app.exit_view_mode();
+                            // Delete through provider dispatch
+                            let conv =
+                                app.conversations().iter().find(|c| &c.path == path).cloned();
+                            let deleted = if let Some(ref conv) = conv {
+                                if let Some(provider) =
+                                    providers.iter().find(|p| p.kind() == conv.provider)
+                                {
+                                    provider.delete(conv).is_ok()
+                                } else {
+                                    std::fs::remove_file(path).is_ok()
                                 }
-                                Err(e) => {
-                                    let _ = debug_log::log_debug(&format!(
-                                        "Failed to delete {}: {}",
-                                        path.display(),
-                                        e
-                                    ));
-                                    // Keep item in list since file still exists
-                                }
+                            } else {
+                                std::fs::remove_file(path).is_ok()
+                            };
+                            if deleted {
+                                app.remove_selected_from_list();
+                                app.exit_view_mode();
+                            } else {
+                                let _ = debug_log::log_debug(&format!(
+                                    "Failed to delete {}",
+                                    path.display(),
+                                ));
                             }
-                            // Continue the loop (don't exit TUI)
                         }
                         Action::Select(ref path) => {
                             let _ = debug_log::log_selected_path(path);
@@ -1554,6 +1704,7 @@ pub fn run_with_loader(
     use_relative_time: bool,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
+    providers: &[Box<dyn Provider>],
 ) -> Result<(Action, Vec<Conversation>)> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -1609,22 +1760,13 @@ pub fn run_with_loader(
         let content_width = (frame_area.width as usize).saturating_sub(NAME_WIDTH + 3);
 
         // Check for resize in view mode
-        app.check_view_resize(content_width, viewport_height);
+        app.check_view_resize(content_width, viewport_height, providers);
 
         // Render current state
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
-        // Use short poll timeout while loading (to check for loader messages),
-        // otherwise block until input arrives (or until status message expires)
-        let poll_timeout = if app.is_loading() {
-            Duration::from_millis(50)
-        } else if let Some(remaining) = app.status_message_remaining() {
-            remaining
-        } else {
-            Duration::from_secs(3600)
-        };
-
-        if event::poll(poll_timeout).map_err(|e| AppError::Io(io::Error::other(e)))?
+        // Poll for keyboard input with timeout (allows us to check loader messages)
+        if event::poll(Duration::from_millis(50)).map_err(|e| AppError::Io(io::Error::other(e)))?
             && let Event::Key(key) = event::read().map_err(|e| AppError::Io(io::Error::other(e)))?
             && key.kind == KeyEventKind::Press
         {
@@ -1635,31 +1777,38 @@ pub fn run_with_loader(
                 && !app.is_loading()
                 && app.selected().is_some()
             {
-                app.enter_view_mode(content_width);
+                app.enter_view_mode(content_width, providers);
                 continue;
             }
 
-            if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
+            if let Some(action) =
+                app.handle_key(key.code, key.modifiers, viewport_height, providers)
+            {
                 match action {
                     Action::Delete(ref path) => {
-                        // Delete the file from disk
-                        match std::fs::remove_file(path) {
-                            Ok(()) => {
-                                // Only remove from list if file deletion succeeded
-                                app.remove_selected_from_list();
-                                // If in view mode, return to list
-                                app.exit_view_mode();
+                        // Delete through provider dispatch
+                        let conv =
+                            app.conversations().iter().find(|c| &c.path == path).cloned();
+                        let deleted = if let Some(ref conv) = conv {
+                            if let Some(provider) =
+                                providers.iter().find(|p| p.kind() == conv.provider)
+                            {
+                                provider.delete(conv).is_ok()
+                            } else {
+                                std::fs::remove_file(path).is_ok()
                             }
-                            Err(e) => {
-                                let _ = debug_log::log_debug(&format!(
-                                    "Failed to delete {}: {}",
-                                    path.display(),
-                                    e
-                                ));
-                                // Keep item in list since file still exists
-                            }
+                        } else {
+                            std::fs::remove_file(path).is_ok()
+                        };
+                        if deleted {
+                            app.remove_selected_from_list();
+                            app.exit_view_mode();
+                        } else {
+                            let _ = debug_log::log_debug(&format!(
+                                "Failed to delete {}",
+                                path.display(),
+                            ));
                         }
-                        // Continue the loop (don't exit TUI)
                     }
                     _ => return Ok((action, app.into_conversations())),
                 }
@@ -1674,6 +1823,7 @@ pub fn run_single_file(
     use_relative_time: bool,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
+    providers: &[Box<dyn Provider>],
 ) -> Result<()> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -1692,13 +1842,14 @@ pub fn run_single_file(
         let content_width = (frame_area.width as usize).saturating_sub(NAME_WIDTH + 3);
 
         // Check for resize in view mode (this triggers initial render too)
-        app.check_view_resize(content_width, viewport_height);
+        app.check_view_resize(content_width, viewport_height, providers);
 
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
         if let Event::Key(key) = event::read().map_err(|e| AppError::Io(io::Error::other(e)))?
             && key.kind == KeyEventKind::Press
-            && let Some(Action::Quit) = app.handle_key(key.code, key.modifiers, viewport_height)
+            && let Some(Action::Quit) =
+                app.handle_key(key.code, key.modifiers, viewport_height, providers)
         {
             return Ok(());
         }

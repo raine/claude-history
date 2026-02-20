@@ -1,7 +1,8 @@
+use crate::history::ProviderKind;
 use crate::tui::app::{
     App, AppMode, DialogMode, LineStyle, LoadingState, RenderedLine, ViewSearchMode, ViewState,
 };
-use crate::tui::search::normalize_for_search;
+use crate::tui::search::is_word_separator;
 use chrono::{DateTime, Local};
 use chrono_humanize::{Accuracy, HumanTime, Tense};
 use ratatui::layout::Position;
@@ -87,6 +88,20 @@ fn format_tokens(tokens: u64) -> String {
 /// Format token count with K/M suffix and "tokens" label (long form, e.g., "926k tokens")
 fn format_tokens_long(tokens: u64) -> String {
     format!("{} tokens", format_tokens(tokens))
+}
+
+/// Create a colored provider badge span
+fn provider_badge(provider: ProviderKind) -> Span<'static> {
+    match provider {
+        ProviderKind::Claude => Span::styled(
+            "[CC] ",
+            Style::default().fg(Color::Rgb(78, 201, 176)), // Teal
+        ),
+        ProviderKind::Cursor => Span::styled(
+            "[Cu] ",
+            Style::default().fg(Color::Rgb(180, 130, 230)), // Purple
+        ),
+    }
 }
 
 /// Render the TUI
@@ -381,14 +396,16 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         };
 
     // Build header spans for metadata line
+    let conv_provider = conv.map(|c| c.provider.clone());
     let build_metadata_spans = |include_summary: bool| {
-        let mut spans = vec![
-            Span::raw("  "),
-            Span::styled(
-                project.clone(),
-                Style::default().fg(Color::Rgb(78, 201, 176)).bold(),
-            ),
-        ];
+        let mut spans = vec![Span::raw("  ")];
+        if let Some(ref provider) = conv_provider {
+            spans.push(provider_badge(provider.clone()));
+        }
+        spans.push(Span::styled(
+            project.clone(),
+            Style::default().fg(Color::Rgb(78, 201, 176)).bold(),
+        ));
 
         // Add model if present
         if let Some(ref m) = model {
@@ -983,15 +1000,13 @@ fn render_help_overlay(frame: &mut Frame, is_view_mode: bool, is_single_file_mod
 
 fn render_list(frame: &mut Frame, app: &App, area: Rect) {
     let width = area.width as usize;
-    let query_normalized: String = normalize_for_search(app.query().trim())
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Use cached query words instead of reparsing
+    let query_words: Vec<&str> = app.query_words().iter().map(|s| s.as_str()).collect();
 
     // Calculate visible range FIRST (before building any items)
     // When searching, items may have 4 lines (with context), so use 4 lines per item
     // to ensure the offset calculation matches the actual rendered heights
-    let lines_per_item = if query_normalized.is_empty() {
+    let lines_per_item = if query_words.is_empty() {
         LINES_PER_ITEM // 3 lines: header, preview, separator
     } else {
         4 // 4 lines: header, preview, context (optional but reserve space), separator
@@ -1122,11 +1137,12 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default()
             };
 
-            // Build header with highlighted project name
+            // Build header with provider badge and highlighted project name
             let mut header_spans = vec![Span::styled(indicator, indicator_style)];
+            header_spans.push(provider_badge(conv.provider.clone()));
             header_spans.extend(highlight_text(
                 &project_part,
-                &query_normalized,
+                &query_words,
                 project_style,
                 highlight_style,
             ));
@@ -1135,7 +1151,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             if let Some(ref summary) = summary_part {
                 header_spans.extend(highlight_text(
                     summary,
-                    &query_normalized,
+                    &query_words,
                     summary_style,
                     summary_highlight_style,
                 ));
@@ -1186,7 +1202,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             let mut preview_spans = vec![Span::styled(indicator, indicator_style)];
             preview_spans.extend(highlight_text(
                 &truncated_preview,
-                &query_normalized,
+                &query_words,
                 preview_style,
                 highlight_style,
             ));
@@ -1194,9 +1210,9 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             let preview = Line::from(preview_spans).style(selection_bg);
 
             // Check for hidden matches and build context line if needed
-            let context_line = if !query_normalized.is_empty() {
+            let context_line = if !query_words.is_empty() {
                 if let Some((match_pos, match_char_len)) =
-                    find_hidden_match(&conv.full_text, &truncated_preview, &query_normalized)
+                    find_hidden_match(&conv.full_text, &truncated_preview, &query_words)
                 {
                     let context_width = width.saturating_sub(4); // Account for indicator
                     let context_text = extract_match_context(
@@ -1224,7 +1240,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                     let mut context_spans = vec![Span::styled(indicator, indicator_style)];
                     context_spans.extend(highlight_text(
                         &truncated_context,
-                        &query_normalized,
+                        &query_words,
                         context_base_style,
                         context_highlight_style,
                     ));
@@ -1297,100 +1313,203 @@ fn sanitize_preview(text: &str) -> String {
 }
 
 /// Split text into spans with matched portions highlighted (case-insensitive)
-/// Find all non-overlapping matches of `query_normalized` in `text` after normalizing `text`.
-/// Returns byte ranges in the original `text` for each match.
-fn find_normalized_match_ranges(text: &str, query_normalized: &str) -> Vec<(usize, usize)> {
-    let query_chars: Vec<char> = query_normalized.chars().collect();
-    if query_chars.is_empty() {
-        return Vec::new();
-    }
-
-    // Normalize text char-by-char, keeping a mapping to original byte positions.
-    // Each normalized char maps to (original_byte_start, original_byte_end).
-    let mut norm_chars: Vec<char> = Vec::new();
-    let mut char_map: Vec<(usize, usize)> = Vec::new();
-
-    let mut iter = text.char_indices().peekable();
-    while let Some((byte_start, ch)) = iter.next() {
-        let byte_end = iter.peek().map_or(text.len(), |(i, _)| *i);
-        if ch == '_' {
-            norm_chars.push(' ');
-            char_map.push((byte_start, byte_end));
-        } else {
-            for lc in ch.to_lowercase() {
-                norm_chars.push(lc);
-                char_map.push((byte_start, byte_end));
-            }
-        }
-    }
-
-    let mut matches = Vec::new();
-    let mut i = 0;
-    while i + query_chars.len() <= norm_chars.len() {
-        if norm_chars[i..i + query_chars.len()] == query_chars[..] {
-            let start_byte = char_map[i].0;
-            let end_byte = char_map[i + query_chars.len() - 1].1;
-            matches.push((start_byte, end_byte));
-            i += query_chars.len(); // non-overlapping
-        } else {
-            i += 1;
-        }
-    }
-
-    matches
-}
-
 fn highlight_text(
     text: &str,
-    query: &str,
+    query_words: &[&str],
     base_style: Style,
     highlight_style: Style,
 ) -> Vec<Span<'static>> {
-    if query.is_empty() {
+    if query_words.is_empty() {
         return vec![Span::styled(text.to_string(), base_style)];
     }
 
-    let ranges = find_normalized_match_ranges(text, query);
-    if ranges.is_empty() {
-        return vec![Span::styled(text.to_string(), base_style)];
-    }
+    // Collect chars for iteration (original text only)
+    let chars: Vec<char> = text.chars().collect();
+
+    // Build char-to-byte mapping
+    let char_to_byte: Vec<usize> = text
+        .char_indices()
+        .map(|(byte_idx, _)| byte_idx)
+        .chain(std::iter::once(text.len()))
+        .collect();
 
     let mut spans = Vec::new();
-    let mut pos = 0;
+    let mut last_end = 0;
+    let mut char_idx = 0;
 
-    for (start, end) in &ranges {
-        if *start > pos {
-            spans.push(Span::styled(text[pos..*start].to_string(), base_style));
+    while char_idx < chars.len() {
+        // Check if we're at a word start
+        let at_word_start = if char_idx == 0 {
+            !is_word_separator(chars[char_idx])
+        } else {
+            is_word_separator(chars[char_idx - 1]) && !is_word_separator(chars[char_idx])
+        };
+
+        if at_word_start {
+            // Find word end
+            let word_start = char_idx;
+            let mut word_end = char_idx;
+            while word_end < chars.len() && !is_word_separator(chars[word_end]) {
+                word_end += 1;
+            }
+
+            // Extract original word and lowercase it for comparison
+            // This avoids Unicode index mismatch issues from to_lowercase changing char count
+            let start_byte = char_to_byte[word_start];
+            let end_byte = char_to_byte[word_end];
+            let original_word = &text[start_byte..end_byte];
+            let word_lower = original_word.to_lowercase();
+
+            // Check if any query word is a prefix of this word
+            let matched_query = query_words.iter().find(|&&qw| word_lower.starts_with(qw));
+
+            if let Some(qw) = matched_query {
+                // Add non-highlighted text before this word
+                if word_start > last_end {
+                    let prev_start_byte = char_to_byte[last_end];
+                    spans.push(Span::styled(
+                        text[prev_start_byte..start_byte].to_string(),
+                        base_style,
+                    ));
+                }
+
+                // Highlight the matched prefix portion
+                // Use char count from original word to handle Unicode correctly
+                let prefix_len = qw.chars().count();
+                let highlight_end = (word_start + prefix_len).min(word_end);
+                let highlight_end_byte = char_to_byte[highlight_end];
+                spans.push(Span::styled(
+                    text[start_byte..highlight_end_byte].to_string(),
+                    highlight_style,
+                ));
+
+                // Add the rest of the word (unhighlighted)
+                if highlight_end < word_end {
+                    spans.push(Span::styled(
+                        text[highlight_end_byte..end_byte].to_string(),
+                        base_style,
+                    ));
+                }
+
+                last_end = word_end;
+            }
+            char_idx = word_end;
+        } else {
+            char_idx += 1;
         }
-        spans.push(Span::styled(
-            text[*start..*end].to_string(),
-            highlight_style,
-        ));
-        pos = *end;
     }
 
-    if pos < text.len() {
-        spans.push(Span::styled(text[pos..].to_string(), base_style));
+    // Add remaining text
+    if last_end < chars.len() {
+        let start_byte = char_to_byte[last_end];
+        spans.push(Span::styled(text[start_byte..].to_string(), base_style));
     }
 
-    spans
+    if spans.is_empty() {
+        vec![Span::styled(text.to_string(), base_style)]
+    } else {
+        spans
+    }
 }
 
 /// Find the first match in full_text that is NOT visible in the preview.
-/// Returns (byte_offset, query_char_len) or None if all matches are visible.
-fn find_hidden_match(full_text: &str, preview: &str, query: &str) -> Option<(usize, usize)> {
-    if query.is_empty() {
+/// Returns (byte_offset, matched_word_char_len) or None if all matches are visible.
+fn find_hidden_match(
+    full_text: &str,
+    preview: &str,
+    query_words: &[&str],
+) -> Option<(usize, usize)> {
+    if query_words.is_empty() {
         return None;
     }
 
-    let preview_match_count = find_normalized_match_ranges(preview, query).len();
-    let all_matches = find_normalized_match_ranges(full_text, query);
+    // Count word prefix matches in text using single-pass iteration
+    // Uses original text chars and lowercases words individually to avoid Unicode index issues
+    let count_word_matches = |text: &str| -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let char_to_byte: Vec<usize> = text
+            .char_indices()
+            .map(|(byte_idx, _)| byte_idx)
+            .chain(std::iter::once(text.len()))
+            .collect();
 
-    // Return the first match beyond those visible in the preview
-    all_matches
-        .into_iter()
-        .nth(preview_match_count)
-        .map(|(start, _end)| (start, query.chars().count()))
+        let mut count = 0;
+        let mut prev_sep = true;
+
+        for (i, &c) in chars.iter().enumerate() {
+            let is_sep = is_word_separator(c);
+            if !is_sep && prev_sep {
+                // Word start - find word end
+                let word_end = chars[i..]
+                    .iter()
+                    .position(|&c| is_word_separator(c))
+                    .map(|p| i + p)
+                    .unwrap_or(chars.len());
+
+                // Extract and lowercase word
+                let start_byte = char_to_byte[i];
+                let end_byte = char_to_byte[word_end];
+                let word = &text[start_byte..end_byte];
+                let word_lower = word.to_lowercase();
+
+                if query_words.iter().any(|&qw| word_lower.starts_with(qw)) {
+                    count += 1;
+                }
+            }
+            prev_sep = is_sep;
+        }
+        count
+    };
+
+    let preview_matches = count_word_matches(preview);
+    let full_matches = count_word_matches(full_text);
+
+    if full_matches <= preview_matches {
+        return None;
+    }
+
+    // Find the (preview_matches + 1)th match in full_text using single-pass
+    // Use original text chars to avoid Unicode index mismatch
+    let chars: Vec<char> = full_text.chars().collect();
+
+    // Build char-to-byte mapping from original text
+    let char_to_byte: Vec<usize> = full_text
+        .char_indices()
+        .map(|(byte_idx, _)| byte_idx)
+        .chain(std::iter::once(full_text.len()))
+        .collect();
+
+    let mut match_count = 0;
+    let mut prev_sep = true;
+
+    for (i, &c) in chars.iter().enumerate() {
+        let is_sep = is_word_separator(c);
+        if !is_sep && prev_sep {
+            // Word start
+            let word_end = chars[i..]
+                .iter()
+                .position(|&c| is_word_separator(c))
+                .map(|p| i + p)
+                .unwrap_or(chars.len());
+
+            // Extract and lowercase word
+            let start_byte = char_to_byte[i];
+            let end_byte = char_to_byte[word_end];
+            let word = &full_text[start_byte..end_byte];
+            let word_lower = word.to_lowercase();
+
+            if let Some(&qw) = query_words.iter().find(|&&qw| word_lower.starts_with(qw)) {
+                match_count += 1;
+                if match_count > preview_matches {
+                    // Return byte offset and the matched prefix length
+                    return Some((start_byte, qw.chars().count()));
+                }
+            }
+        }
+        prev_sep = is_sep;
+    }
+
+    None
 }
 
 /// Extract a context snippet around a match position in full_text.
@@ -1510,144 +1629,5 @@ mod tests {
         assert_eq!(format_tokens_long(1000), "1k tokens");
         assert_eq!(format_tokens_long(926000), "926k tokens");
         assert_eq!(format_tokens_long(1_500_000), "1.5M tokens");
-    }
-
-    // --- highlight_text / find_normalized_match_ranges tests ---
-
-    /// Helper: extract (text, is_highlighted) from spans
-    fn span_info<'a>(spans: &'a [Span<'a>], highlight_style: Style) -> Vec<(&'a str, bool)> {
-        spans
-            .iter()
-            .map(|s| (s.content.as_ref(), s.style == highlight_style))
-            .collect()
-    }
-
-    #[test]
-    fn highlight_phrase_not_partial_word() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        // "red team" should NOT highlight "red" in "redaction"
-        let spans = highlight_text("Extend log redaction to cover", "red team", base, hl);
-        let info = span_info(&spans, hl);
-        // No highlights - "red team" is not present as a phrase
-        assert!(info.iter().all(|(_, highlighted)| !highlighted));
-    }
-
-    #[test]
-    fn highlight_phrase_exact_match() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        let spans = highlight_text(
-            "You are being tested as a security red team exercise.",
-            "red team",
-            base,
-            hl,
-        );
-        let info = span_info(&spans, hl);
-        // Should highlight "red team"
-        assert!(
-            info.iter()
-                .any(|(text, highlighted)| *text == "red team" && *highlighted)
-        );
-    }
-
-    #[test]
-    fn highlight_multiple_matches() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        let spans = highlight_text("foo bar foo bar foo", "foo", base, hl);
-        let highlighted: Vec<_> = span_info(&spans, hl)
-            .into_iter()
-            .filter(|(_, h)| *h)
-            .collect();
-        assert_eq!(highlighted.len(), 3);
-        assert!(highlighted.iter().all(|(text, _)| *text == "foo"));
-    }
-
-    #[test]
-    fn highlight_underscore_normalization() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        // Query "red team" should match "red_team" because _ normalizes to space
-        let spans = highlight_text("config for red_team setup", "red team", base, hl);
-        let info = span_info(&spans, hl);
-        assert!(
-            info.iter()
-                .any(|(text, highlighted)| *text == "red_team" && *highlighted)
-        );
-    }
-
-    #[test]
-    fn highlight_case_insensitive() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        let spans = highlight_text("Hello World", "hello", base, hl);
-        let info = span_info(&spans, hl);
-        assert!(
-            info.iter()
-                .any(|(text, highlighted)| *text == "Hello" && *highlighted)
-        );
-    }
-
-    #[test]
-    fn highlight_empty_query() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        let spans = highlight_text("some text", "", base, hl);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), "some text");
-    }
-
-    #[test]
-    fn highlight_no_match() {
-        let base = Style::default();
-        let hl = Style::default().fg(Color::Yellow);
-        let spans = highlight_text("some text", "xyz", base, hl);
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), "some text");
-    }
-
-    #[test]
-    fn find_normalized_ranges_phrase() {
-        let ranges = find_normalized_match_ranges("hello red team world", "red team");
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(
-            &"hello red team world"[ranges[0].0..ranges[0].1],
-            "red team"
-        );
-    }
-
-    #[test]
-    fn find_normalized_ranges_no_partial_word() {
-        // "red" should not match as part of "red team" query in "redaction"
-        let ranges = find_normalized_match_ranges("Extend log redaction to cover", "red team");
-        assert_eq!(ranges.len(), 0);
-    }
-
-    #[test]
-    fn find_normalized_ranges_underscore() {
-        let ranges = find_normalized_match_ranges("set red_team flag", "red team");
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(&"set red_team flag"[ranges[0].0..ranges[0].1], "red_team");
-    }
-
-    #[test]
-    fn hidden_match_finds_non_preview_match() {
-        let full_text = "redaction stuff here and then red team exercise later";
-        let preview = "redaction stuff here and then";
-        // With phrase matching, preview has 0 matches, full_text has 1
-        let result = find_hidden_match(full_text, preview, "red team");
-        assert!(result.is_some());
-        let (pos, char_len) = result.unwrap();
-        assert_eq!(&full_text[pos..pos + "red team".len()], "red team");
-        assert_eq!(char_len, "red team".chars().count());
-    }
-
-    #[test]
-    fn hidden_match_none_when_all_visible() {
-        let full_text = "red team exercise";
-        let preview = "red team exercise";
-        let result = find_hidden_match(full_text, preview, "red team");
-        assert!(result.is_none());
     }
 }

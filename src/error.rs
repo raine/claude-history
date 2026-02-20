@@ -8,6 +8,9 @@ pub enum AppError {
     #[error("JSON parsing error: {0}")]
     Json(#[from] serde_json::Error),
 
+    #[error("SQLite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
+
     #[error("Claude projects directory not found at {0}")]
     ProjectsDirNotFound(String),
 

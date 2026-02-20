@@ -1,0 +1,15 @@
+{
+  "name": "mnemonai-bridge",
+  "displayName": "mnemonai Bridge",
+  "description": "Bridge extension for mnemonai to open Cursor conversations",
+  "version": "0.1.0",
+  "publisher": "mnemonai",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "onUri"
+  ],
+  "main": "./extension.js",
+  "contributes": {}
+}

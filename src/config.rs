@@ -31,14 +31,21 @@ pub struct ResumeConfig {
     pub default_args: Option<Vec<String>>,
 }
 
-/// Returns the path to the configuration file: ~/.config/claude-history/config.toml
-/// This path is used for all platforms.
+/// Returns the path to the configuration file: ~/.config/mnemonai/config.toml
+/// Also checks the legacy path ~/.config/claude-history/config.toml for backwards compatibility.
 fn get_config_path() -> Option<PathBuf> {
-    home::home_dir().map(|mut path| {
-        path.push(".config");
-        path.push("claude-history");
-        path.push("config.toml");
-        path
+    home::home_dir().map(|home| {
+        let new_path = home.join(".config").join("mnemonai").join("config.toml");
+        if new_path.exists() {
+            return new_path;
+        }
+        // Fall back to legacy path
+        let legacy_path = home.join(".config").join("claude-history").join("config.toml");
+        if legacy_path.exists() {
+            return legacy_path;
+        }
+        // Default to new path (even if it doesn't exist yet)
+        new_path
     })
 }
 

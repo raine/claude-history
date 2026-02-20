@@ -1,418 +1,130 @@
-# claude-history
+# mnemonai
 
-<img src="/meta/screenshot.webp" />
+Universal AI coding conversation history browser. Search, browse, and resume conversations across multiple AI coding tools from a single TUI.
 
-`claude-history` is a companion CLI for Claude Code. It lets you search recent
-conversations recorded in Claude's local project history with a built-in
-terminal UI, then view the selected transcript directly in the terminal with
-scrolling, search, and export capabilities.
+## Supported Tools
 
-Run it from the project directory you work on with Claude Code and it will
-discover the matching transcript folder automatically.
-
-[Install](#install) · [Usage](#usage) · [Configuration](#configuration) ·
-[Changelog](CHANGELOG.md)
+| Tool | History Format | Resume Support |
+|------|---------------|----------------|
+| **Claude Code** | JSONL files in `~/.claude/projects/` | `claude --resume <session-id>` |
+| **Cursor** | SQLite in workspace storage | Bridge extension + `cursor://` URI |
 
 ## Install
 
-### Quick install
+### From source
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/raine/claude-history/main/scripts/install.sh | bash
+```bash
+cargo install --path .
 ```
 
-### Homebrew (macOS/Linux)
+### From crates.io (coming soon)
 
-```sh
-brew install raine/claude-history/claude-history
-```
-
-### Cargo
-
-```sh
-cargo install claude-history
+```bash
+cargo install mnemonai
 ```
 
 ## Usage
 
-Run the tool from inside the project directory you're interested in:
-
-```sh
-$ claude-history
-```
-
-This opens a terminal UI listing all conversations, sorted by recency. Type to
-search across all transcripts. Each item shows a preview of the conversation and
-match context is highlighted when your search matches content not visible in the
-preview.
-
-### Keyboard navigation (List mode)
-
-| Key                     | Action                          |
-| ----------------------- | ------------------------------- |
-| `↑` / `↓`               | Move selection                  |
-| `←` / `→`               | Move cursor in search           |
-| `Ctrl+P` / `Ctrl+N`     | Move selection (vi-style)       |
-| `Ctrl+D` / `Ctrl+U`     | Half page down/up (vim-style)   |
-| `Page Up` / `Page Down` | Jump by page                    |
-| `Home` / `End`          | Jump to first/last              |
-| `Enter`                 | Open conversation viewer        |
-| `Ctrl+O`                | Select and exit (for scripting) |
-| `Ctrl+W`                | Delete word before cursor       |
-| `Ctrl+R`                | Resume conversation             |
-| `Ctrl+X`                | Delete conversation             |
-| `?`                     | Show keyboard shortcuts         |
-| `Esc` / `Ctrl+C`        | Quit                            |
-
-### Keyboard navigation (Viewer mode)
-
-| Key            | Action                                             |
-| -------------- | -------------------------------------------------- |
-| `j` / `↓`      | Scroll down                                        |
-| `k` / `↑`      | Scroll up                                          |
-| `d` / `Ctrl+D` | Half page down                                     |
-| `u` / `Ctrl+U` | Half page up                                       |
-| `Page Down`    | Full page down                                     |
-| `Page Up`      | Full page up                                       |
-| `g` / `Home`   | Jump to top                                        |
-| `G` / `End`    | Jump to bottom                                     |
-| `/`            | Start search                                       |
-| `n`            | Next search match                                  |
-| `N`            | Previous search match                              |
-| `t`            | Cycle tools: off/truncated/full                    |
-| `T`            | Toggle thinking                                    |
-| `p`            | Show file path                                     |
-| `Y`            | Copy file path to clipboard                        |
-| `I`            | Copy session ID to clipboard                       |
-| `Ctrl+R`       | Resume conversation                                |
-| `Ctrl+X`       | Delete conversation                                |
-| `?`            | Show keyboard shortcuts                            |
-| `q` / `Esc`    | Return to list (or quit in direct file input mode) |
-| `Ctrl+C`       | Quit                                               |
-
-### Search
-
-Search uses fuzzy word matching with the following features:
-
-- **Case-insensitive**: "config" matches "CONFIG"
-- **Underscore as separator**: "api key" matches "API_KEY"
-- **Prefix matching**: "auth" matches "authentication", "authorize"
-- **Multi-word AND logic**: all query words must match
-
-Results are ranked by recency, so recent conversations appear first.
-
-### Direct file input
-
-You can open a JSONL conversation file directly, bypassing the conversation
-selection UI:
-
-```sh
-$ claude-history /path/to/conversation.jsonl
-```
-
-All display options work in this mode:
-
-```sh
-$ claude-history --show-tools --show-thinking /path/to/conversation.jsonl
-```
-
-Press `q` or `Esc` to quit when viewing a file directly.
-
-### Conversation viewer
-
-Press `Enter` on a conversation to open the built-in viewer. The viewer displays
-conversations in a ledger-style format with scrolling support.
-
-**Features:**
-
-- **Scrolling**: Navigate with vim-style keys (`j`/`k`) or arrow keys
-- **Search**: Press `/` to search within the conversation, then `n`/`N` to
-  navigate matches
-- **Cycle tools**: Press `t` to cycle tool display (off → truncated → full)
-- **Toggle thinking**: Press `T` to show/hide thinking blocks
-- **Show path**: Press `p` to display the conversation file path
-
-Press `q` or `Esc` to return to the conversation list.
-
-```
-View Claude conversation history
-
-Usage: claude-history [OPTIONS] [FILE]
-
-Arguments:
-  [FILE]  JSONL conversation file to view directly
-
-Options:
-  -t, --show-tools       Show tool calls in the conversation output
-      --no-tools         Hide tool calls from the conversation output
-  -d, --show-dir         Print the conversation directory path and exit
-  -l, --last             Show the last messages in the TUI preview
-      --first            Show the first messages in the TUI preview
-  -r, --relative-time    Display relative time (e.g. "10 minutes ago")
-      --absolute-time    Display absolute timestamp
-      --show-thinking    Show thinking blocks in the conversation output
-      --hide-thinking    Hide thinking blocks from the conversation output
-  -c, --resume           Resume the selected conversation in Claude Code
-  -p, --show-path        Print the selected conversation file path
-  -i, --show-id          Print the selected conversation session ID
-      --plain            Output plain text without ledger formatting
-      --debug [<LEVEL>]  Print debug information (filter by level: debug, info, warn, error)
-  -g, --global           Search all conversations from all projects at once
-      --render <FILE>    Render a JSONL file in ledger format and exit
-      --no-color         Disable colored output
-      --pager            Display output through a pager (less)
-      --no-pager         Disable pager output
-  -h, --help             Print help
-```
-
-### Preview modes
-
-- `claude-history` shows the first messages in the preview
-- `claude-history --last` flips the preview to the last messages
-
-### Showing tool calls
-
-In the TUI viewer, tool calls default to **truncated** mode — showing the tool
-header plus the first few body lines with a "(N more lines...)" indicator. Press
-`t` to cycle through modes: off → truncated → full. Use `--show-tools` (or `-t`)
-to start in full mode, or `--no-tools` to start with tools hidden.
-
-### Showing thinking blocks
-
-Extended thinking models (like Claude Sonnet 4.5) include reasoning steps in
-their output. By default, these thinking blocks are hidden to keep conversations
-focused. Use `--show-thinking` to display them when you want to see Claude's
-reasoning process.
-
-### Resuming conversations
-
-If you want to continue a conversation, launch `claude-history` with `--resume`
-and it will hand off to `claude --resume <conversation-id>`.
-
-You can configure default arguments to pass to the `claude` command every time
-you resume a conversation. This is useful if you typically run Claude with
-specific flags (like `--dangerously-skip-permissions`) and want them applied
-automatically when resuming:
-
-```toml
-# ~/.config/claude-history/config.toml
-[resume]
-default_args = ["--dangerously-skip-permissions"]
-```
-
-With this configuration, when you resume a conversation, it will run:
-
-```sh
-claude --resume <conversation-id> --dangerously-skip-permissions
-```
-
-This provides a cleaner alternative to shell aliases, as the arguments are
-applied specifically when resuming through `claude-history`, without affecting
-how you normally invoke Claude.
-
-If you use a shell alias for `claude` with extra flags, you can use `--show-id`
-to select a session and resume it manually:
-
-```sh
-claude --resume $(claude-history --show-id)
-```
-
-In the viewer, press `I` to copy the session ID to clipboard.
-
-### Markdown rendering
-
-Claude's responses are rendered with markdown formatting for better terminal
-readability. Use `--plain` to disable rendering and get raw text output.
-
-### Plain output mode
-
-Use `--plain` to output conversations without ledger formatting:
-
-```sh
-$ claude-history --plain
-```
-
-This produces simple `Role: content` output without colors, text wrapping, or
-markdown rendering, suitable for piping to other tools or LLMs:
-
-```
-You: How do I fix this bug?
-
-Claude: Looking at the code, the issue is...
-```
-
-### Pager output
-
-By default, conversation output is piped through a pager (`less -R`) when stdout
-is a terminal. This enables scrolling through long conversations. Use
-`--no-pager` to disable this behavior and print directly to stdout.
-
-The pager respects the `$PAGER` environment variable. If not set, it defaults to
-`less -R` (which preserves ANSI colors).
-
-### Global search
-
-Use `--global` (or `-g`) to search all conversations from all projects at once:
-
-```sh
-$ claude-history --global
-```
-
-This displays all conversations from every project in a single view, sorted by
-modification time (newest first). Each conversation shows its project path so
-you can identify which project it belongs to. Conversations load in the
-background so you can start typing immediately.
-
-For [workmux](https://github.com/raine/workmux) users, worktree paths are
-displayed in a compact format: `[project/worktree]` instead of just the worktree
-folder name.
-
-The `--resume` flag works with global search. It will automatically run Claude
-in the correct project directory for the selected conversation.
-
-### Integration with other scripts
-
-You can integrate `claude-history` into other tools to pass conversation context
-to new Claude Code sessions. This is useful when you want Claude to understand
-what you were working on previously.
-
-For example, a commit message generator script could use the conversation
-history to write more contextual commit messages:
-
 ```bash
-# Get conversation history if --context flag is set
-conversation_context=""
-if [ "$include_history" = true ]; then
-    echo "Loading conversation history..."
-    conversation_history=$(claude-history --plain 2>/dev/null)
-    if [ -n "$conversation_history" ]; then
-        conversation_context="
+# Launch the TUI
+mnemonai
 
-=== START CONVERSATION CONTEXT ===
-$conversation_history
-=== END CONVERSATION CONTEXT ===
+# Filter by provider
+mnemonai --provider claude
+mnemonai --provider cursor
 
-"
-    fi
-fi
+# Start with a search query
+mnemonai --query "authentication"
 
-# Pass to Claude CLI with the conversation context
-prompt="Write a commit message for these changes.
-${conversation_context}
-Staged changes:
-$staged_diff"
-
-claude -p "$prompt"
+# Filter by project
+mnemonai --project /path/to/project
 ```
+
+## Keyboard Shortcuts
+
+### List View
+
+| Key | Action |
+|-----|--------|
+| Type | Fuzzy search conversations |
+| `Up/Down` or `j/k` | Navigate list |
+| `Enter` | View conversation |
+| `r` | Resume conversation in original tool |
+| `Tab` | Cycle provider filter (All → Claude → Cursor) |
+| `Esc` | Clear search / Quit |
+| `q` | Quit |
+
+### Detail View
+
+| Key | Action |
+|-----|--------|
+| `Up/Down` or `j/k` | Scroll |
+| `Page Up/Down` | Scroll fast |
+| `g/G` | Jump to top/bottom |
+| `r` | Resume conversation |
+| `Esc` or `q` | Back to list |
 
 ## Configuration
 
-You can set default preferences for display options in
-`~/.config/claude-history/config.toml`. Command-line flags will override these
-settings.
+Create `~/.config/mnemonai/config.toml`:
 
-Create the config file:
-
-```sh
-mkdir -p ~/.config/claude-history
-cat > ~/.config/claude-history/config.toml << 'EOF'
-# Always use global search (default: false)
-# global = false
-
+```toml
 [display]
-# Tool display: true = hidden, false = full (default: unset = truncated)
-# no_tools = false
+show_tools = false      # Show tool-use messages
+relative_time = true    # "2 hours ago" vs "2026-02-18 14:30"
 
-# Show last messages in TUI preview (default: false)
-last = false
+[providers.claude]
+enabled = true
 
-# Use relative time formatting (default: false)
-relative_time = true
-
-# Show thinking blocks (default: false)
-show_thinking = false
-
-# Use plain output without ledger formatting (default: false)
-plain = false
-
-# Use pager for output (default: true when stdout is a terminal)
-pager = true
-
-[resume]
-# Default arguments to pass to claude command when resuming
-# Example: default_args = ["--dangerously-skip-permissions"]
-EOF
+[providers.cursor]
+enabled = true
 ```
 
-### Available options
+## Architecture
 
-#### Global options
-
-- `global` (boolean): Always use global search across all projects (default:
-  false). Equivalent to always passing `--global` / `-g`
-
-#### Display options
-
-- `no_tools` (boolean): When `true`, hides tool calls; when `false`, shows them
-  in full. When unset (default), tools display in truncated mode
-- `last` (boolean): Show last messages instead of first in TUI preview (default:
-  false)
-- `relative_time` (boolean): Display relative time instead of absolute timestamp
-  (default: false)
-- `show_thinking` (boolean): Show thinking blocks in conversation output
-  (default: false)
-- `plain` (boolean): Output plain text without ledger formatting (default:
-  false)
-- `pager` (boolean): Pipe output through a pager for scrolling (default: true
-  when stdout is a terminal)
-
-#### Resume options
-
-- `default_args` (array of strings): Arguments to pass to the `claude` command
-  when resuming conversations. Useful for flags like
-  `--dangerously-skip-permissions` that you want applied every time you resume.
-  Example: `default_args = ["--dangerously-skip-permissions", "--verbose"]`
-
-### Overriding config
-
-Each display option has opposing flags for explicit override:
-
-- `--no-tools` / `--show-tools`
-- `--last` / `--first`
-- `--relative-time` / `--absolute-time`
-- `--hide-thinking` / `--show-thinking`
-- `--plain` (no opposite flag)
-- `--no-pager` / `--pager`
-
-For example, if your config has `no_tools = false` (showing tools), you can
-temporarily hide them with `--no-tools`.
-
-## Filtering details
-
-The tool filters out some noisy artifacts before showing conversations, so you
-only see transcripts that are likely to matter for your recent work.
-
-- Skips the "Warmup / I'm Claude Code…" exchanges that are sometimes injected
-  without user interaction
-- Skips conversations that only contain the `/clear` terminal command
-
-## Development
-
-The repository includes `just` recipes:
-
-```sh
-$ just check
+```
+src/
+├── main.rs              # Entry point, event loop
+├── cli.rs               # clap argument parsing
+├── config.rs            # TOML configuration
+├── error.rs             # Error types
+├── model.rs             # Unified conversation/message types
+├── providers/
+│   ├── mod.rs           # Provider trait
+│   ├── claude.rs        # Claude Code JSONL loader
+│   └── cursor.rs        # Cursor SQLite loader
+├── resume/
+│   ├── claude.rs        # claude --resume
+│   └── cursor.rs        # cursor:// URI + bridge extension
+├── tui/
+│   ├── app.rs           # State machine
+│   ├── ui.rs            # List + detail rendering
+│   ├── search.rs        # Fuzzy search
+│   └── viewer.rs        # Conversation renderer
+└── render/
+    ├── markdown.rs      # Markdown → styled text
+    └── syntax.rs        # Syntax highlighting
 ```
 
-This runs `cargo fmt`, `cargo clippy --fix`, and `cargo build` in parallel.
+### Provider Trait
 
-## Related projects
+Adding a new AI tool is straightforward — implement the `Provider` trait:
 
-- [workmux](https://github.com/raine/workmux) — Git worktrees + tmux windows for
-  parallel AI agent workflows
-- [git-surgeon](https://github.com/raine/git-surgeon) — Non-interactive
-  hunk-level git staging for AI agents
-- [consult-llm-mcp](https://github.com/raine/consult-llm-mcp) — MCP server that
-  lets Claude Code consult stronger AI models (o3, Gemini, GPT-5.1 Codex)
-- [tmux-file-picker](https://github.com/raine/tmux-file-picker) — Pop up fzf in
-  tmux to quickly insert file paths, perfect for AI coding assistants
+```rust
+pub trait Provider: Send + Sync {
+    fn name(&self) -> &str;
+    fn detect(&self) -> bool;
+    fn load_conversations(&self) -> Result<Vec<Conversation>>;
+    fn resume(&self, conversation: &Conversation) -> Result<()>;
+}
+```
+
+## Cursor Bridge Extension
+
+The `extension/` directory contains a minimal VS Code extension that enables resuming Cursor conversations. It registers a URI handler that calls `composer.openComposer(composerId)` when mnemonai opens a `cursor://` URI.
+
+The extension is auto-installed on first resume attempt.
+
+## License
+
+MIT

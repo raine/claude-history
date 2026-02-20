@@ -18,6 +18,7 @@ pub struct FormattedToolCall {
 /// The `max_width` parameter controls line wrapping for tools with long content (e.g., Bash commands).
 pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> FormattedToolCall {
     match name {
+        // Claude Code tools
         "Task" => format_task(input),
         "Bash" => format_bash(input, max_width),
         "Read" => format_read(input),
@@ -27,6 +28,21 @@ pub fn format_tool_call(name: &str, input: &Value, max_width: usize) -> Formatte
         "Write" => format_write(input),
         "WebFetch" => format_web_fetch(input),
         "WebSearch" => format_web_search(input),
+        // Cursor tools — map to equivalent formatting
+        "run_terminal_cmd" | "run_terminal_command_v2" => format_cursor_terminal(input, max_width),
+        "read_file" | "read_file_v2" => format_cursor_read(input),
+        "edit_file" | "edit_file_v2" | "edit_file_v2_search_replace"
+        | "edit_file_v2_apply_based" | "edit_file_v2_write" | "search_replace"
+        | "apply_patch" | "MultiEdit" => format_cursor_edit(input),
+        "grep" | "grep_search" | "rg" | "ripgrep" | "ripgrep_raw_search"
+        | "codebase_search" | "semantic_search_full" => format_cursor_search(input),
+        "list_dir" | "list_dir_v2" | "glob_file_search" | "file_search" => {
+            format_cursor_list(input)
+        }
+        "web_fetch" => format_web_fetch(input),
+        "web_search" => format_web_search(input),
+        "write" | "delete_file" => format_cursor_write(input),
+        "task_v2" | "create_plan" => format_cursor_task(input),
         _ => format_fallback(name, input),
     }
 }
@@ -193,6 +209,128 @@ fn format_web_search(input: &Value) -> FormattedToolCall {
 
     FormattedToolCall {
         header: format!("Search: \"{}\"", query),
+        body: None,
+    }
+}
+
+// --- Cursor tool formatters ---
+
+fn format_cursor_terminal(input: &Value, max_width: usize) -> FormattedToolCall {
+    let command = input
+        .get("command")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let prefix = "Bash: ";
+    let prefix_len = prefix.len();
+    let available_width = max_width.saturating_sub(prefix_len);
+
+    if available_width == 0 || command.chars().count() <= available_width {
+        return FormattedToolCall {
+            header: format!("{}{}", prefix, command),
+            body: None,
+        };
+    }
+
+    let wrapped: Vec<_> = textwrap::wrap(command, available_width)
+        .into_iter()
+        .map(|cow| cow.into_owned())
+        .collect();
+    if wrapped.len() <= 1 {
+        return FormattedToolCall {
+            header: format!("{}{}", prefix, command),
+            body: None,
+        };
+    }
+    let header = format!("{}{}", prefix, wrapped[0]);
+    let body = wrapped[1..].join("\n");
+    FormattedToolCall {
+        header,
+        body: Some(body),
+    }
+}
+
+fn format_cursor_read(input: &Value) -> FormattedToolCall {
+    let file_path = input
+        .get("filePath")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    FormattedToolCall {
+        header: format!("Read: {}", file_path),
+        body: None,
+    }
+}
+
+fn format_cursor_edit(input: &Value) -> FormattedToolCall {
+    let file_path = input
+        .get("filePath")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("target_file"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    FormattedToolCall {
+        header: format!("Edit: {}", file_path),
+        body: None,
+    }
+}
+
+fn format_cursor_search(input: &Value) -> FormattedToolCall {
+    let query = input
+        .get("query")
+        .or_else(|| input.get("pattern"))
+        .or_else(|| input.get("regex"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let path = input
+        .get("path")
+        .or_else(|| input.get("directory"))
+        .and_then(|v| v.as_str());
+    let header = if let Some(p) = path {
+        format!("Search: \"{}\" in {}", query, p)
+    } else {
+        format!("Search: \"{}\"", query)
+    };
+    FormattedToolCall {
+        header,
+        body: None,
+    }
+}
+
+fn format_cursor_list(input: &Value) -> FormattedToolCall {
+    let path = input
+        .get("path")
+        .or_else(|| input.get("directory"))
+        .or_else(|| input.get("pattern"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(".");
+    FormattedToolCall {
+        header: format!("List: {}", path),
+        body: None,
+    }
+}
+
+fn format_cursor_write(input: &Value) -> FormattedToolCall {
+    let file_path = input
+        .get("filePath")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("path"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    FormattedToolCall {
+        header: format!("Write: {}", file_path),
+        body: None,
+    }
+}
+
+fn format_cursor_task(input: &Value) -> FormattedToolCall {
+    let description = input
+        .get("description")
+        .or_else(|| input.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    FormattedToolCall {
+        header: format!("Task: {}", description),
         body: None,
     }
 }

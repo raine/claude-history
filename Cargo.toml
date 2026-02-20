@@ -1,14 +1,10 @@
 [package]
-name = "claude-history"
-version = "0.1.26"
+name = "mnemonai"
+version = "0.1.0"
 edition = "2024"
-description = "Fuzzy-search Claude Code conversation history from the terminal."
-readme = "README.md"
+description = "Universal AI coding conversation history browser"
 license = "MIT"
-repository = "https://github.com/raine/claude-history"
-homepage = "https://github.com/raine/claude-history"
-keywords = ["claude", "claude-code", "fzf", "cli", "history"]
-categories = ["command-line-utilities"]
+repository = "https://github.com/bquenin/mnemonai"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -28,3 +24,4 @@ pulldown-cmark = "0.13"
 unicode-width = "0.2"
 arboard = "3.4"
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+rusqlite = { version = "0.32", features = ["bundled"] }

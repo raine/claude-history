@@ -156,6 +156,8 @@ mod tests {
         Conversation {
             path: PathBuf::new(),
             index: 0,
+            provider: crate::history::ProviderKind::Claude,
+            id: String::new(),
             timestamp,
             preview: text.to_string(),
             full_text: text.to_string(),

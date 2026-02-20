@@ -798,6 +798,9 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
         show_thinking: options.show_thinking,
         show_timing: false, // Non-TUI render doesn't support timing toggle
         content_width,
+        assistant_label: "Claude".to_string(),
+        assistant_color: (78, 201, 176),     // TEAL
+        assistant_dim_color: (60, 160, 140),  // DIM_TEAL
     };
 
     let rendered_lines = render_conversation(file_path, &render_options)?;

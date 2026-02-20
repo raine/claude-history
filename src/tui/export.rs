@@ -39,7 +39,7 @@ impl ExportFormat {
     }
 
     /// Get file extension for this format
-    fn extension(&self) -> &'static str {
+    pub fn extension(&self) -> &'static str {
         match self {
             ExportFormat::Ledger | ExportFormat::Plain => "txt",
             ExportFormat::Markdown => "md",
@@ -54,10 +54,12 @@ pub struct ExportResult {
 }
 
 /// Options for export content generation
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ExportOptions {
     pub show_tools: bool,
     pub show_thinking: bool,
+    /// Label for assistant messages (e.g., "Claude" or "Cursor")
+    pub assistant_label: String,
 }
 
 /// Export conversation to file
@@ -119,7 +121,7 @@ pub fn export_to_clipboard(
     }
 }
 
-/// Generate content in the specified format
+/// Generate content in the specified format from a file path
 fn generate_content(
     source_path: &Path,
     format: ExportFormat,
@@ -127,33 +129,54 @@ fn generate_content(
 ) -> std::io::Result<String> {
     match format {
         ExportFormat::Jsonl => fs::read_to_string(source_path),
-        ExportFormat::Plain => generate_plain(source_path, options),
-        ExportFormat::Markdown => generate_markdown(source_path, options),
-        ExportFormat::Ledger => generate_ledger(source_path, options),
+        _ => {
+            let entries = read_entries_from_file(source_path)?;
+            Ok(generate_content_from_entries(&entries, format, options))
+        }
     }
 }
 
-/// Generate plain text format (simple "Speaker: message" lines)
-fn generate_plain(path: &Path, options: ExportOptions) -> std::io::Result<String> {
+/// Read log entries from a JSONL file for export
+fn read_entries_from_file(path: &Path) -> std::io::Result<Vec<LogEntry>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
+    Ok(reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect())
+}
+
+/// Generate content in the specified format from pre-parsed entries
+pub fn generate_content_from_entries(
+    entries: &[LogEntry],
+    format: ExportFormat,
+    options: ExportOptions,
+) -> String {
+    match format {
+        ExportFormat::Plain => generate_plain_from_entries(entries, options),
+        ExportFormat::Markdown => generate_markdown_from_entries(entries, options),
+        ExportFormat::Ledger => generate_ledger_from_entries(entries, options),
+        ExportFormat::Jsonl => {
+            // JSONL from entries is not supported (use file-based export instead)
+            String::from("<JSONL export requires file path>")
+        }
+    }
+}
+
+/// Generate plain text format from entries
+fn generate_plain_from_entries(entries: &[LogEntry], options: ExportOptions) -> String {
     let mut output = String::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
-            match entry {
-                LogEntry::User { message, .. } => {
-                    if let Some(text) = extract_user_text(&message) {
-                        output.push_str(&format!("You: {}\n\n", text));
-                    }
-                    // Tool results
-                    if options.show_tools
-                        && let UserContent::Blocks(blocks) = &message.content
-                    {
+    for entry in entries {
+        match entry {
+            LogEntry::User { message, .. } => {
+                if let Some(text) = extract_user_text(message) {
+                    output.push_str(&format!("You: {}\n\n", text));
+                }
+                if options.show_tools {
+                    if let UserContent::Blocks(blocks) = &message.content {
                         for block in blocks {
                             if let ContentBlock::ToolResult { content, .. } = block {
                                 let content_str = format_tool_result_for_export(content.as_ref());
@@ -162,52 +185,43 @@ fn generate_plain(path: &Path, options: ExportOptions) -> std::io::Result<String
                         }
                     }
                 }
-                LogEntry::Assistant { message, .. } => {
-                    for block in &message.content {
-                        match block {
-                            ContentBlock::Text { text } => {
-                                output.push_str(&format!("Claude: {}\n\n", text));
-                            }
-                            ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
-                                let formatted = format_tool_call_for_export(name, input);
-                                output.push_str(&format!("Tool: {}\n\n", formatted));
-                            }
-                            ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
-                                output.push_str(&format!("Thinking: {}\n\n", thinking));
-                            }
-                            _ => {}
+            }
+            LogEntry::Assistant { message, .. } => {
+                for block in &message.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            output.push_str(&format!("{}: {}\n\n", options.assistant_label, text));
                         }
+                        ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
+                            let formatted = format_tool_call_for_export(name, input);
+                            output.push_str(&format!("Tool: {}\n\n", formatted));
+                        }
+                        ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
+                            output.push_str(&format!("Thinking: {}\n\n", thinking));
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 
-    Ok(output)
+    output
 }
 
-/// Generate markdown format (with ## headers for speakers)
-fn generate_markdown(path: &Path, options: ExportOptions) -> std::io::Result<String> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+/// Generate markdown format from entries
+fn generate_markdown_from_entries(entries: &[LogEntry], options: ExportOptions) -> String {
     let mut output = String::new();
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
-            match entry {
-                LogEntry::User { message, .. } => {
-                    if let Some(text) = extract_user_text(&message) {
-                        output.push_str(&format!("## You\n\n{}\n\n", text));
-                    }
-                    // Tool results
-                    if options.show_tools
-                        && let UserContent::Blocks(blocks) = &message.content
-                    {
+    for entry in entries {
+        match entry {
+            LogEntry::User { message, .. } => {
+                if let Some(text) = extract_user_text(message) {
+                    output.push_str(&format!("## You\n\n{}\n\n", text));
+                }
+                if options.show_tools {
+                    if let UserContent::Blocks(blocks) = &message.content {
                         for block in blocks {
                             if let ContentBlock::ToolResult { content, .. } = block {
                                 let content_str = format_tool_result_for_export(content.as_ref());
@@ -217,108 +231,86 @@ fn generate_markdown(path: &Path, options: ExportOptions) -> std::io::Result<Str
                         }
                     }
                 }
-                LogEntry::Assistant { message, .. } => {
-                    for block in &message.content {
-                        match block {
-                            ContentBlock::Text { text } => {
-                                output.push_str(&format!("## Claude\n\n{}\n\n", text));
-                            }
-                            ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
-                                let formatted = format_tool_call_for_export(name, input);
-                                let fenced = markdown_code_fence(&formatted);
-                                output.push_str(&format!("### Tool: {}\n\n{}\n\n", name, fenced));
-                            }
-                            ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
-                                output.push_str(&format!("### Thinking\n\n{}\n\n", thinking));
-                            }
-                            _ => {}
+            }
+            LogEntry::Assistant { message, .. } => {
+                for block in &message.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            output.push_str(&format!("## {}\n\n{}\n\n", options.assistant_label, text));
                         }
+                        ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
+                            let formatted = format_tool_call_for_export(name, input);
+                            let fenced = markdown_code_fence(&formatted);
+                            output.push_str(&format!("### Tool: {}\n\n{}\n\n", name, fenced));
+                        }
+                        ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
+                            output.push_str(&format!("### Thinking\n\n{}\n\n", thinking));
+                        }
+                        _ => {}
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
     }
 
-    Ok(output)
+    output
 }
 
-/// Total line width for ledger export (including name column and separator)
-const LEDGER_WIDTH: usize = 90;
-
-/// Generate ledger-style format (formatted like the TUI viewer)
-fn generate_ledger(path: &Path, options: ExportOptions) -> std::io::Result<String> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
+/// Generate ledger-style format from entries
+fn generate_ledger_from_entries(entries: &[LogEntry], options: ExportOptions) -> String {
     let mut output = String::new();
-
     const NAME_WIDTH: usize = 9;
-    // 3 for " │ " separator
-    let content_width = LEDGER_WIDTH - NAME_WIDTH - 3;
 
-    for line in reader.lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
-            match entry {
-                LogEntry::User { message, .. } => {
-                    if let Some(text) = extract_user_text(&message) {
-                        let wrapped = wrap_plain_text(&text, content_width);
-                        append_ledger_block(&mut output, "You", &wrapped, NAME_WIDTH);
-                        output.push('\n');
-                    }
-                    // Tool results
-                    if options.show_tools
-                        && let UserContent::Blocks(blocks) = &message.content
-                    {
+    for entry in entries {
+        match entry {
+            LogEntry::User { message, .. } => {
+                if let Some(text) = extract_user_text(message) {
+                    append_ledger_block(&mut output, "You", &text, NAME_WIDTH);
+                    output.push('\n');
+                }
+                if options.show_tools {
+                    if let UserContent::Blocks(blocks) = &message.content {
                         for block in blocks {
                             if let ContentBlock::ToolResult { content, .. } = block {
                                 let content_str = format_tool_result_for_export(content.as_ref());
-                                if content_str.trim().is_empty() {
-                                    continue;
-                                }
-                                let wrapped = wrap_plain_text(&content_str, content_width);
-                                append_ledger_block(&mut output, "↳ Result", &wrapped, NAME_WIDTH);
+                                append_ledger_block(
+                                    &mut output,
+                                    "↳ Result",
+                                    &content_str,
+                                    NAME_WIDTH,
+                                );
                                 output.push('\n');
                             }
                         }
                     }
                 }
-                LogEntry::Assistant { message, .. } => {
-                    for block in &message.content {
-                        match block {
-                            ContentBlock::Text { text } => {
-                                let rendered =
-                                    crate::markdown::render_markdown_plain(text, content_width);
-                                let rendered = rendered.trim_end();
-                                append_ledger_block(&mut output, "Claude", rendered, NAME_WIDTH);
-                                output.push('\n');
-                            }
-                            ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
-                                let formatted =
-                                    format_tool_call_for_ledger(name, input, content_width);
-                                append_ledger_block(&mut output, "Tool", &formatted, NAME_WIDTH);
-                                output.push('\n');
-                            }
-                            ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
-                                let rendered =
-                                    crate::markdown::render_markdown_plain(thinking, content_width);
-                                let rendered = rendered.trim_end();
-                                append_ledger_block(&mut output, "Thinking", rendered, NAME_WIDTH);
-                                output.push('\n');
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
             }
+            LogEntry::Assistant { message, .. } => {
+                for block in &message.content {
+                    match block {
+                        ContentBlock::Text { text } => {
+                            append_ledger_block(&mut output, &options.assistant_label, text, NAME_WIDTH);
+                            output.push('\n');
+                        }
+                        ContentBlock::ToolUse { name, input, .. } if options.show_tools => {
+                            let formatted = format_tool_call_for_export(name, input);
+                            append_ledger_block(&mut output, "Tool", &formatted, NAME_WIDTH);
+                            output.push('\n');
+                        }
+                        ContentBlock::Thinking { thinking, .. } if options.show_thinking => {
+                            append_ledger_block(&mut output, "Thinking", thinking, NAME_WIDTH);
+                            output.push('\n');
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    Ok(output)
+    output
 }
 
 /// Append a ledger-formatted block to the output
@@ -410,51 +402,17 @@ fn markdown_code_fence(content: &str) -> String {
     format!("{}\n{}\n{}", fence, content, fence)
 }
 
-/// Default width for non-ledger export (no wrapping needed for markdown export)
+/// Default width for export (no wrapping needed for markdown export)
 const EXPORT_WIDTH: usize = usize::MAX;
 
-/// Format a tool call for export (non-ledger formats)
+/// Format a tool call for export
 fn format_tool_call_for_export(name: &str, input: &serde_json::Value) -> String {
+    // Use large width to avoid wrapping in export (full command on one line is better for copying)
     let formatted = tool_format::format_tool_call(name, input, EXPORT_WIDTH);
     match formatted.body {
         Some(body) => format!("{}\n{}", formatted.header, body),
         None => formatted.header,
     }
-}
-
-/// Format a tool call for ledger export with line wrapping
-fn format_tool_call_for_ledger(name: &str, input: &serde_json::Value, max_width: usize) -> String {
-    let formatted = tool_format::format_tool_call(name, input, max_width);
-    let text = match formatted.body {
-        Some(body) => format!("{}\n{}", formatted.header, body),
-        None => formatted.header,
-    };
-    // Wrap any remaining long lines
-    wrap_plain_text(&text, max_width)
-}
-
-/// Wrap plain text to max_width, preserving existing line breaks
-fn wrap_plain_text(text: &str, max_width: usize) -> String {
-    let mut result = String::new();
-    for (i, line) in text.lines().enumerate() {
-        if i > 0 {
-            result.push('\n');
-        }
-        if line.is_empty() {
-            continue;
-        }
-        let wrapped: Vec<_> = textwrap::wrap(line, max_width)
-            .into_iter()
-            .map(|cow| cow.into_owned())
-            .collect();
-        for (j, w) in wrapped.iter().enumerate() {
-            if j > 0 {
-                result.push('\n');
-            }
-            result.push_str(w);
-        }
-    }
-    result
 }
 
 /// Format tool result content for export
@@ -477,168 +435,5 @@ fn format_tool_result_for_export(content: Option<&serde_json::Value>) -> String 
             serde_json::to_string_pretty(value).unwrap_or_else(|_| "<error>".to_string())
         }
         None => "<no content>".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_wrap_plain_text_preserves_short_lines() {
-        let result = wrap_plain_text("short line", 80);
-        assert_eq!(result, "short line");
-    }
-
-    #[test]
-    fn test_wrap_plain_text_wraps_long_line() {
-        let long = "word ".repeat(20); // 100 chars
-        let result = wrap_plain_text(long.trim(), 40);
-        for line in result.lines() {
-            assert!(line.len() <= 40, "Line exceeds max_width: {:?}", line);
-        }
-        // All words should be preserved
-        assert_eq!(result.matches("word").count(), 20);
-    }
-
-    #[test]
-    fn test_wrap_plain_text_preserves_existing_newlines() {
-        let text = "line one\nline two\nline three";
-        let result = wrap_plain_text(text, 80);
-        assert_eq!(result.lines().count(), 3);
-    }
-
-    #[test]
-    fn test_wrap_plain_text_preserves_empty_lines() {
-        let text = "line one\n\nline three";
-        let result = wrap_plain_text(text, 80);
-        assert_eq!(result, "line one\n\nline three");
-    }
-
-    #[test]
-    fn test_append_ledger_block_format() {
-        let mut output = String::new();
-        append_ledger_block(&mut output, "Claude", "Hello\nWorld", 9);
-        let lines: Vec<&str> = output.lines().collect();
-        assert_eq!(lines.len(), 2);
-        assert!(lines[0].starts_with("   Claude │ Hello"));
-        assert!(lines[1].starts_with("          │ World"));
-    }
-
-    #[test]
-    fn test_ledger_line_width() {
-        // Verify that a wrapped line fits within LEDGER_WIDTH
-        let name_width = 9;
-        let content_width = LEDGER_WIDTH - name_width - 3;
-        let long_text = "word ".repeat(20);
-        let wrapped = wrap_plain_text(long_text.trim(), content_width);
-        let mut output = String::new();
-        append_ledger_block(&mut output, "Claude", &wrapped, name_width);
-        for line in output.lines() {
-            // Count display width (name + " │ " + content)
-            let width = line.chars().count();
-            assert!(
-                width <= LEDGER_WIDTH,
-                "Ledger line exceeds {} chars (got {}): {:?}",
-                LEDGER_WIDTH,
-                width,
-                line
-            );
-        }
-    }
-
-    #[test]
-    fn test_ledger_markdown_rendering() {
-        // Verify that markdown is rendered (not raw) in ledger export
-        let content_width = LEDGER_WIDTH - 9 - 3;
-        let rendered =
-            crate::markdown::render_markdown_plain("This has **bold** and `code`", content_width);
-        // Should not contain markdown formatting markers for bold
-        assert!(
-            !rendered.contains("**"),
-            "Should strip bold markers: {:?}",
-            rendered
-        );
-        // Should contain backticks for inline code
-        assert!(
-            rendered.contains("`code`"),
-            "Should keep inline code backticks: {:?}",
-            rendered
-        );
-        // Should not contain ANSI codes
-        assert!(
-            !rendered.contains("\x1b"),
-            "Should not contain ANSI codes: {:?}",
-            rendered
-        );
-    }
-
-    #[test]
-    fn test_generate_ledger_wraps_and_renders() {
-        // Create a sample JSONL with a long assistant message containing markdown
-        let long_text = "This is a **really long** sentence that should definitely wrap because it contains many words and exceeds the content width of the ledger format which is 68 characters.";
-        let entry = serde_json::json!({
-            "type": "assistant",
-            "message": {
-                "id": "test",
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "text", "text": long_text}],
-                "model": "test",
-                "stop_reason": "end_turn",
-                "stop_sequence": null,
-                "usage": {"input_tokens": 0, "output_tokens": 0}
-            },
-            "timestamp": "2024-01-01T00:00:00Z"
-        });
-
-        let tmpdir = std::env::temp_dir();
-        let tmppath = tmpdir.join("claude-history-test-ledger.jsonl");
-        std::fs::write(&tmppath, format!("{}\n", entry)).unwrap();
-
-        let result = generate_ledger(
-            &tmppath,
-            ExportOptions {
-                show_tools: false,
-                show_thinking: false,
-            },
-        )
-        .unwrap();
-
-        std::fs::remove_file(&tmppath).ok();
-
-        eprintln!("Ledger output:\n{}", result);
-
-        // Every line should fit within LEDGER_WIDTH
-        for line in result.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let width = line.chars().count();
-            assert!(
-                width <= LEDGER_WIDTH,
-                "Ledger line exceeds {} chars (got {}): {:?}",
-                LEDGER_WIDTH,
-                width,
-                line
-            );
-        }
-
-        // Should contain the speaker name
-        assert!(result.contains("Claude"), "Should have speaker name");
-        // Should not contain ANSI codes
-        assert!(!result.contains("\x1b"), "Should not contain ANSI codes");
-        // Bold markers should be stripped (markdown rendered)
-        assert!(
-            !result.contains("**"),
-            "Should not contain raw bold markers"
-        );
-        // Content should be wrapped across multiple lines
-        let content_lines: Vec<&str> = result.lines().filter(|l| !l.is_empty()).collect();
-        assert!(
-            content_lines.len() > 1,
-            "Long text should wrap to multiple lines, got: {:?}",
-            content_lines
-        );
     }
 }

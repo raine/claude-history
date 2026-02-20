@@ -17,8 +17,6 @@ const NAME_WIDTH: usize = 9;
 /// Width of timestamp prefix when timing is enabled (space + HH:MM + space)
 const TIMESTAMP_WIDTH: usize = 7;
 const WHITE: (u8, u8, u8) = (255, 255, 255);
-const TEAL: (u8, u8, u8) = (78, 201, 176);
-const DIM_TEAL: (u8, u8, u8) = (60, 160, 140);
 const SEPARATOR_COLOR: (u8, u8, u8) = (80, 80, 80);
 const CODE_COLOR: (u8, u8, u8) = (147, 161, 199);
 const GREEN: (u8, u8, u8) = (0, 255, 0);
@@ -75,6 +73,12 @@ pub struct RenderOptions {
     pub show_thinking: bool,
     pub show_timing: bool,
     pub content_width: usize,
+    /// Label for assistant messages (e.g., "Claude" or "Cursor")
+    pub assistant_label: String,
+    /// Color for assistant label and text blocks
+    pub assistant_color: (u8, u8, u8),
+    /// Dimmed color for tool calls and thinking blocks
+    pub assistant_dim_color: (u8, u8, u8),
 }
 
 /// Format an ISO 8601 timestamp to HH:MM local time
@@ -86,32 +90,36 @@ fn format_timestamp(iso_timestamp: &str) -> Option<String> {
         .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
 }
 
+/// Read log entries from a JSONL file
+pub fn read_log_entries(file_path: &Path) -> std::io::Result<Vec<LogEntry>> {
+    let file = File::open(file_path)?;
+    let reader = BufReader::new(file);
+    Ok(reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(&l).ok())
+        .collect())
+}
+
+/// Render pre-parsed log entries to lines for display in the TUI viewer
+pub fn render_entries(entries: &[LogEntry], options: &RenderOptions) -> Vec<RenderedLine> {
+    let mut lines = Vec::new();
+    for entry in entries {
+        render_entry(&mut lines, entry, options);
+    }
+    // Collapse consecutive empty lines into single empty lines.
+    lines.dedup_by(|a, b| a.spans.is_empty() && b.spans.is_empty());
+    lines
+}
+
 /// Render a conversation file to lines for display in the TUI viewer
 pub fn render_conversation(
     file_path: &Path,
     options: &RenderOptions,
 ) -> std::io::Result<Vec<RenderedLine>> {
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-    let mut lines = Vec::new();
-
-    for line_result in reader.lines() {
-        let line = line_result?;
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
-            render_entry(&mut lines, &entry, options);
-        }
-    }
-
-    // Collapse consecutive empty lines into single empty lines.
-    // Multiple render functions each add trailing empty lines, which can
-    // result in double blanks when a tool result has empty output.
-    lines.dedup_by(|a, b| a.spans.is_empty() && b.spans.is_empty());
-
-    Ok(lines)
+    let entries = read_log_entries(file_path)?;
+    Ok(render_entries(&entries, options))
 }
 
 fn render_entry(lines: &mut Vec<RenderedLine>, entry: &LogEntry, options: &RenderOptions) {
@@ -277,7 +285,7 @@ fn render_assistant_message(
                 continue;
             }
             let md_lines = render_markdown_to_lines(text, options.content_width);
-            render_ledger_block_styled(lines, "Claude", TEAL, true, md_lines, ts_remaining);
+            render_ledger_block_styled(lines, &options.assistant_label, options.assistant_color, true, md_lines, ts_remaining);
             printed = true;
             // After first block consumes the timestamp, use blank padding for alignment
             if ts_remaining.is_some() {
@@ -304,8 +312,8 @@ fn render_assistant_message(
                     lines,
                     name,
                     input,
-                    "Claude",
-                    DIM_TEAL,
+                    &options.assistant_label,
+                    options.assistant_dim_color,
                     false,
                     options.content_width,
                     ts,
@@ -332,7 +340,7 @@ fn render_assistant_message(
                 } else {
                     None
                 };
-                render_ledger_block_styled(lines, "Thinking", DIM_TEAL, false, styled_lines, ts);
+                render_ledger_block_styled(lines, "Thinking", options.assistant_dim_color, false, styled_lines, ts);
                 printed = true;
             }
         }
@@ -569,7 +577,6 @@ impl TuiMarkdownRenderer {
             TagEnd::CodeBlock => {
                 self.in_code_block = false;
                 let code_content = std::mem::take(&mut self.code_block_content);
-                let code_content = crate::markdown::wrap_code_lines(&code_content, self.max_width);
 
                 // Try syntax highlighting first
                 if let Some(highlighted_lines) =
@@ -1290,7 +1297,7 @@ fn render_agent_message(
                         render_ledger_block_plain_dimmed(
                             lines,
                             "  ↳ Tool",
-                            DIM_TEAL,
+                            options.assistant_dim_color,
                             "<Result>",
                             options.show_timing,
                         );
@@ -1344,7 +1351,7 @@ fn render_agent_message(
                 render_ledger_block_styled_dimmed(
                     lines,
                     &name,
-                    TEAL,
+                    options.assistant_color,
                     md_lines,
                     options.show_timing,
                 );
@@ -1366,7 +1373,7 @@ fn render_agent_message(
                             name,
                             input,
                             &label,
-                            DIM_TEAL,
+                            options.assistant_dim_color,
                             true,
                             options.content_width,
                             align_ts,

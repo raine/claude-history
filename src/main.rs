@@ -8,6 +8,7 @@ mod error;
 mod history;
 mod markdown;
 mod pager;
+mod providers;
 mod syntax;
 mod tool_format;
 mod tui;
@@ -15,9 +16,12 @@ mod tui;
 use clap::Parser;
 use cli::Args;
 use error::{AppError, Result};
+use history::LoaderMessage;
+use providers::Provider;
 use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 
 fn main() {
     if let Err(e) = run() {
@@ -103,6 +107,13 @@ fn run() -> Result<()> {
         display_config.pager,
         std::io::stdout().is_terminal(),
     );
+    let use_global = args.global || config.global.unwrap_or(false);
+
+    // Build provider registry
+    let providers: Vec<Box<dyn Provider>> = vec![
+        Box::new(providers::claude::ClaudeProvider::new()),
+        Box::new(providers::cursor::CursorProvider::new()),
+    ];
 
     // Handle --render flag: render a JSONL file in ledger format and exit
     if let Some(ref render_path) = args.render {
@@ -135,30 +146,42 @@ fn run() -> Result<()> {
             use_relative_time,
             tool_display,
             show_thinking,
+            &providers,
         )?;
         return Ok(());
     }
 
-    let use_global = resolve_bool_setting(args.global, false, config.global, false);
+    // Handle --show-dir flag (Claude-specific, print directory and exit)
+    if args.show_dir {
+        if let Ok(current_dir) = std::env::current_dir() {
+            if let Ok(projects_dir) = history::get_claude_projects_dir(&current_dir) {
+                println!("{}", projects_dir.display());
+            }
+        }
+        return Ok(());
+    }
 
     // Determine how to load conversations based on mode
     let (conversations, selected_path) = if use_global {
-        // Global Search (-g) - use streaming loader for instant startup
-        let rx = history::load_all_conversations_streaming(show_last, args.debug);
+        // Global mode - merge streaming loaders from all providers
+        let receivers: Vec<_> = providers
+            .iter()
+            .map(|p| p.load_conversations_streaming(show_last, args.debug))
+            .collect();
+        let rx = merge_streaming_loaders(receivers);
 
-        match tui::run_with_loader(rx, use_relative_time, tool_display, show_thinking)? {
+        match tui::run_with_loader(rx, use_relative_time, tool_display, show_thinking, &providers)?
+        {
             (tui::Action::Select(path), convs) => (convs, path),
             (tui::Action::Resume(path), convs) => {
-                let conv = convs.iter().find(|c| c.path == path);
-                let project_path = conv.and_then(|c| c.project_path.as_ref());
-                resume_with_claude(&path, project_path, default_args)?;
+                resume_conversation(&convs, &path, &providers, default_args)?;
                 return Ok(());
             }
             (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
             (tui::Action::Delete(_), _) => unreachable!("Delete is handled internally"),
         }
     } else {
-        // Current Directory mode - synchronous loading is fast enough
+        // Local mode - load from all providers for current directory
         let current_dir = std::env::current_dir().map_err(|e| {
             AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -166,21 +189,30 @@ fn run() -> Result<()> {
             ))
         })?;
 
-        let projects_dir = history::get_claude_projects_dir(&current_dir)?;
+        let mut conversations = Vec::new();
 
-        // If --show-dir flag is set, print directory and exit
-        if args.show_dir {
-            println!("{}", projects_dir.display());
-            return Ok(());
+        for provider in &providers {
+            match provider.load_conversations(show_last, args.debug) {
+                Ok(mut convs) => {
+                    // For non-Claude providers, filter to current directory
+                    if provider.kind() != history::ProviderKind::Claude {
+                        convs.retain(|c| {
+                            c.project_path
+                                .as_ref()
+                                .is_some_and(|p| p == &current_dir)
+                        });
+                    }
+                    conversations.extend(convs);
+                }
+                Err(_) => {} // Silently skip providers that fail in local mode
+            }
         }
 
-        if !projects_dir.exists() {
-            return Err(AppError::ProjectsDirNotFound(
-                projects_dir.display().to_string(),
-            ));
+        // Sort merged conversations by timestamp (newest first) and re-index
+        conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        for (idx, conv) in conversations.iter_mut().enumerate() {
+            conv.index = idx;
         }
-
-        let conversations = history::load_conversations(&projects_dir, show_last, args.debug)?;
 
         if conversations.is_empty() {
             return Err(AppError::NoHistoryFound("selected scope".to_string()));
@@ -191,12 +223,11 @@ fn run() -> Result<()> {
             use_relative_time,
             tool_display,
             show_thinking,
+            &providers,
         )? {
             tui::Action::Select(path) => (conversations, path),
             tui::Action::Resume(path) => {
-                let conv = conversations.iter().find(|c| c.path == path);
-                let project_path = conv.and_then(|c| c.project_path.as_ref());
-                resume_with_claude(&path, project_path, default_args)?;
+                resume_conversation(&conversations, &path, &providers, default_args)?;
                 return Ok(());
             }
             tui::Action::Quit => return Err(AppError::SelectionCancelled),
@@ -210,37 +241,25 @@ fn run() -> Result<()> {
     }
 
     if args.show_id {
-        let conversation_id = selected_path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
+        let conv = conversations.iter().find(|c| c.path == selected_path);
+        let id = conv
+            .map(|c| c.id.as_str())
+            .or_else(|| {
+                selected_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+            })
             .ok_or_else(|| {
                 AppError::ClaudeExecutionError(
                     "Conversation filename is not valid Unicode".to_string(),
                 )
             })?;
-        println!("{}", conversation_id);
+        println!("{}", id);
         return Ok(());
     }
 
     if args.resume {
-        // Find the selected conversation to get its project_path
-        let conv = conversations.iter().find(|c| c.path == selected_path);
-        debug::debug(
-            args.debug,
-            &format!("Selected path: {}", selected_path.display()),
-        );
-        debug::debug(
-            args.debug,
-            &format!("Found conversation: {}", conv.is_some()),
-        );
-        if let Some(c) = conv {
-            debug::debug(args.debug, &format!("project_path: {:?}", c.project_path));
-            if let Some(p) = &c.project_path {
-                debug::debug(args.debug, &format!("project_path exists: {}", p.exists()));
-            }
-        }
-        let project_path = conv.and_then(|c| c.project_path.as_ref());
-        resume_with_claude(&selected_path, project_path, default_args)?;
+        resume_conversation(&conversations, &selected_path, &providers, default_args)?;
         return Ok(());
     }
 
@@ -282,63 +301,68 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn resume_with_claude(
-    selected_path: &Path,
-    project_path: Option<&PathBuf>,
-    default_args: &[String],
-) -> Result<()> {
-    let conversation_id = selected_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .ok_or_else(|| {
-            AppError::ClaudeExecutionError("Conversation filename is not valid Unicode".to_string())
-        })?
-        .to_owned();
+/// Merge multiple streaming loader receivers into a single receiver.
+/// Each provider streams independently; batches are forwarded immediately.
+/// Done is only sent when ALL providers have finished.
+/// Fatal errors from individual providers are downgraded to ProjectError
+/// so the app continues with other providers.
+fn merge_streaming_loaders(receivers: Vec<Receiver<LoaderMessage>>) -> Receiver<LoaderMessage> {
+    let (tx, rx) = mpsc::channel();
+    let remaining = Arc::new(AtomicUsize::new(receivers.len()));
 
-    // Require a valid project directory to resume
-    let project_dir = match project_path {
-        Some(path) if path.exists() && path.is_dir() => path,
-        Some(path) => {
-            return Err(AppError::ClaudeExecutionError(format!(
-                "Project directory no longer exists: {}",
-                path.display()
-            )));
-        }
-        None => {
-            return Err(AppError::ClaudeExecutionError(
-                "Cannot determine project directory for this conversation".to_string(),
-            ));
-        }
-    };
-
-    let mut command = Command::new("claude");
-    command.args(["--resume", &conversation_id]);
-    command.args(default_args);
-    command.current_dir(project_dir);
-
-    run_claude_command(command)
-}
-
-#[cfg(unix)]
-fn run_claude_command(mut command: Command) -> Result<()> {
-    use std::os::unix::process::CommandExt;
-
-    let err = command.exec();
-    Err(AppError::ClaudeExecutionError(err.to_string()))
-}
-
-#[cfg(not(unix))]
-fn run_claude_command(mut command: Command) -> Result<()> {
-    let status = command
-        .status()
-        .map_err(|e| AppError::ClaudeExecutionError(e.to_string()))?;
-
-    if !status.success() {
-        return Err(AppError::ClaudeExecutionError(format!(
-            "claude CLI exited with status {}",
-            status
-        )));
+    for receiver in receivers {
+        let tx = tx.clone();
+        let remaining = remaining.clone();
+        std::thread::spawn(move || {
+            for msg in receiver {
+                match msg {
+                    LoaderMessage::Done => {
+                        // Only send Done when all providers have finished
+                        if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            let _ = tx.send(LoaderMessage::Done);
+                        }
+                    }
+                    LoaderMessage::Fatal(_) => {
+                        // Downgrade: one provider failing shouldn't kill the app
+                        let _ = tx.send(LoaderMessage::ProjectError);
+                        if remaining.fetch_sub(1, Ordering::SeqCst) == 1 {
+                            let _ = tx.send(LoaderMessage::Done);
+                        }
+                    }
+                    other => {
+                        let _ = tx.send(other);
+                    }
+                }
+            }
+        });
     }
 
-    Ok(())
+    rx
+}
+
+/// Resume a conversation through the appropriate provider
+fn resume_conversation(
+    conversations: &[history::Conversation],
+    path: &std::path::Path,
+    providers: &[Box<dyn Provider>],
+    default_args: &[String],
+) -> Result<()> {
+    let conv = conversations
+        .iter()
+        .find(|c| c.path == path)
+        .ok_or_else(|| {
+            AppError::ClaudeExecutionError("Conversation not found for resume".to_string())
+        })?;
+
+    let provider = providers
+        .iter()
+        .find(|p| p.kind() == conv.provider)
+        .ok_or_else(|| {
+            AppError::ClaudeExecutionError(format!(
+                "No provider found for {:?} conversation",
+                conv.provider
+            ))
+        })?;
+
+    provider.resume(conv, default_args)
 }

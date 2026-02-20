@@ -25,6 +25,13 @@ pub use loader::{load_all_conversations_streaming, load_conversations};
 pub use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path};
 
+/// Identifies which AI tool provider a conversation originated from
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProviderKind {
+    Claude,
+    Cursor,
+}
+
 /// Represents a JSONL parsing error with context for debugging
 #[derive(Clone, Debug)]
 pub struct ParseError {
@@ -41,6 +48,10 @@ pub struct ParseError {
 pub struct Conversation {
     pub path: PathBuf,
     pub index: usize,
+    /// Which provider this conversation belongs to
+    pub provider: ProviderKind,
+    /// Unique identifier (session UUID for Claude, composer ID for Cursor)
+    pub id: String,
     pub timestamp: DateTime<Local>,
     pub preview: String,
     pub full_text: String,

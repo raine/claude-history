@@ -1,3 +1,5 @@
 /target
-__pycache__/
-/history
+Cargo.lock
+*.swp
+*.swo
+.DS_Store
