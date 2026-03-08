@@ -14,6 +14,28 @@ const LINES_PER_ITEM: usize = 3;
 /// Duration before status messages auto-clear
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
+// ── Terminal-adaptive color palette ──────────────────────────────────────────
+// Uses ANSI palette colors (0-15) and Color::Reset so terminal themes can
+// remap them for both dark and light backgrounds. Avoids hardcoded RGB for
+// text that must remain readable.
+
+/// Primary text: uses the terminal's own default foreground
+const CLR_TEXT: Color = Color::Reset;
+/// Dimmed text (metadata, timestamps, previews)
+const CLR_DIM: Color = Color::DarkGray;
+/// Accent color (prompts, selected items, keybindings)
+const CLR_ACCENT: Color = Color::Cyan;
+/// Accent for custom titles
+const CLR_TITLE_CUSTOM: Color = Color::Yellow;
+/// Separator lines, borders
+const CLR_BORDER: Color = Color::DarkGray;
+/// Very dim (unselected indicators, disabled keys)
+const CLR_FAINT: Color = Color::DarkGray;
+/// Duration display
+const CLR_DURATION: Color = Color::Cyan;
+/// Model name
+const CLR_MODEL: Color = Color::Magenta;
+
 /// Format model name for display (e.g., "claude-opus-4-5-20251101" → "opus-4.5")
 fn format_model_name(model: &str) -> String {
     // Handle claude-opus-4-5-YYYYMMDD format
@@ -105,7 +127,7 @@ fn render_list_mode(frame: &mut Frame, app: &App) {
     let outer_block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(60, 60, 60)));
+        .border_style(Style::default().fg(CLR_BORDER));
     let inner_area = outer_block.inner(area);
     frame.render_widget(outer_block, area);
 
@@ -155,18 +177,18 @@ fn render_status_message(frame: &mut Frame, msg: &str, area: Rect) {
         Span::raw("  "),
         Span::styled(msg, Style::default().fg(Color::Yellow)),
     ]);
-    let status = Paragraph::new(status_line).style(Style::default().bg(Color::Rgb(30, 30, 35)));
+    let status = Paragraph::new(status_line);
     frame.render_widget(status, area);
 }
 
 fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     let is_loading = app.is_loading();
 
-    let key_style = Style::default().fg(Color::Rgb(78, 201, 176));
-    let label_style = Style::default().fg(Color::Rgb(100, 100, 100));
+    let key_style = Style::default().fg(CLR_ACCENT);
+    let label_style = Style::default().fg(CLR_DIM);
     // Dimmed styles for unavailable shortcuts during loading
-    let dim_key_style = Style::default().fg(Color::Rgb(60, 60, 60));
-    let dim_label_style = Style::default().fg(Color::Rgb(60, 60, 60));
+    let dim_key_style = Style::default().fg(CLR_FAINT);
+    let dim_label_style = Style::default().fg(CLR_FAINT);
 
     let (action_key, action_label) = if is_loading {
         (dim_key_style, dim_label_style)
@@ -189,7 +211,7 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
     ];
 
     let status_line = Line::from(spans);
-    let status = Paragraph::new(status_line).style(Style::default().bg(Color::Rgb(30, 30, 35)));
+    let status = Paragraph::new(status_line);
     frame.render_widget(status, area);
 }
 
@@ -417,7 +439,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             Span::raw("  "),
             Span::styled(
                 project.clone(),
-                Style::default().fg(Color::Rgb(78, 201, 176)).bold(),
+                Style::default().fg(CLR_ACCENT).bold(),
             ),
         ];
 
@@ -426,7 +448,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 t.clone(),
-                Style::default().fg(Color::Rgb(200, 180, 120)), // Warm gold
+                Style::default().fg(CLR_TITLE_CUSTOM),
             ));
         }
 
@@ -435,14 +457,14 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 m.clone(),
-                Style::default().fg(Color::Rgb(180, 140, 200)),
+                Style::default().fg(CLR_MODEL),
             ));
         }
 
         spans.push(Span::raw(" · "));
         spans.push(Span::styled(
             msg_count.clone(),
-            Style::default().fg(Color::Rgb(140, 140, 140)),
+            Style::default().fg(CLR_DIM),
         ));
 
         // Add conversation duration if present
@@ -450,7 +472,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 d.clone(),
-                Style::default().fg(Color::Rgb(100, 140, 130)),
+                Style::default().fg(CLR_DURATION),
             ));
         }
 
@@ -459,14 +481,14 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 t.clone(),
-                Style::default().fg(Color::Rgb(140, 140, 140)),
+                Style::default().fg(CLR_DIM),
             ));
         }
 
         spans.push(Span::raw(" · "));
         spans.push(Span::styled(
             timestamp.clone(),
-            Style::default().fg(Color::Rgb(140, 140, 140)),
+            Style::default().fg(CLR_DIM),
         ));
 
         // Add summary if requested
@@ -474,7 +496,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             spans.push(Span::raw(" · "));
             spans.push(Span::styled(
                 s.clone(),
-                Style::default().fg(Color::Rgb(180, 180, 180)),
+                Style::default().fg(CLR_DIM),
             ));
         }
 
@@ -493,7 +515,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         if let Some(summary_text) = summary {
             lines.push(Line::from(vec![
                 Span::raw("  "),
-                Span::styled(summary_text, Style::default().fg(Color::Rgb(180, 180, 180))),
+                Span::styled(summary_text, Style::default().fg(CLR_DIM)),
             ]));
         }
         lines
@@ -502,7 +524,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
     let header = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::Rgb(60, 60, 60))),
+            .border_style(Style::default().fg(CLR_BORDER)),
     );
 
     frame.render_widget(header, area);
@@ -549,7 +571,7 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::raw("  "),
             Span::styled(msg, Style::default().fg(Color::Green)),
         ]);
-        let status = Paragraph::new(status_line).style(Style::default().bg(Color::Rgb(30, 30, 35)));
+        let status = Paragraph::new(status_line);
         frame.render_widget(status, area);
         return;
     }
@@ -560,8 +582,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
     let width = total.to_string().len().max(4);
     let scroll_pos = format!("[{:>width$}/{:<width$}]", state.scroll_offset + 1, total);
 
-    let key_style = Style::default().fg(Color::Rgb(78, 201, 176));
-    let label_style = Style::default().fg(Color::Rgb(100, 100, 100));
+    let key_style = Style::default().fg(CLR_ACCENT);
+    let label_style = Style::default().fg(CLR_DIM);
 
     // Fixed-width status labels to prevent jumping when toggling
     let tools_status = state.tool_display.status_label();
@@ -570,7 +592,7 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
 
     let mut spans = vec![
         Span::raw("  "),
-        Span::styled(scroll_pos, Style::default().fg(Color::Rgb(140, 140, 140))),
+        Span::styled(scroll_pos, Style::default().fg(CLR_DIM)),
         Span::raw("  "),
         Span::styled("t", key_style),
         Span::styled(format!("ools·{} ", tools_status), label_style),
@@ -612,7 +634,7 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
     }
 
     let status_line = Line::from(spans);
-    let status = Paragraph::new(status_line).style(Style::default().bg(Color::Rgb(30, 30, 35)));
+    let status = Paragraph::new(status_line);
     frame.render_widget(status, area);
 }
 
@@ -633,11 +655,11 @@ fn render_search_input(frame: &mut Frame, state: &ViewState, area: Rect) {
 
     let input_line = Line::from(vec![
         Span::raw("  /"),
-        Span::styled(&state.search_query, Style::default().fg(Color::White)),
-        Span::styled(match_info, Style::default().fg(Color::Rgb(140, 140, 140))),
+        Span::styled(&state.search_query, Style::default().fg(CLR_TEXT)),
+        Span::styled(match_info, Style::default().fg(CLR_DIM)),
     ]);
 
-    let input = Paragraph::new(input_line).style(Style::default().bg(Color::Rgb(30, 30, 35)));
+    let input = Paragraph::new(input_line);
     frame.render_widget(input, area);
 
     // Position cursor
@@ -703,7 +725,7 @@ fn highlight_line_matches(
         Style::default().bg(Color::Yellow).fg(Color::Black)
     } else {
         Style::default()
-            .bg(Color::Rgb(78, 201, 176))
+            .bg(CLR_ACCENT)
             .fg(Color::Black)
     };
 
@@ -774,7 +796,7 @@ fn build_style(style: &LineStyle) -> Style {
         s = s.italic();
     }
     if style.dimmed {
-        s = s.fg(Color::Rgb(100, 100, 100));
+        s = s.fg(CLR_DIM);
     }
     s
 }
@@ -801,12 +823,12 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let padding = (area.width as usize).saturating_sub(left_len + count_len + 1);
 
     // Prompt is always active - user can type during loading
-    let prompt_style = Style::default().fg(Color::Rgb(78, 201, 176));
+    let prompt_style = Style::default().fg(CLR_ACCENT);
 
     let status_style = if app.is_loading() {
-        Style::default().fg(Color::Rgb(78, 201, 176)) // Highlight loading status
+        Style::default().fg(CLR_ACCENT)
     } else {
-        Style::default().fg(Color::Rgb(100, 100, 100))
+        Style::default().fg(CLR_DIM)
     };
 
     let search_line = Line::from(vec![
@@ -821,7 +843,7 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
     let input = Paragraph::new(search_line).block(
         Block::default()
             .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::Rgb(60, 60, 60))),
+            .border_style(Style::default().fg(CLR_BORDER)),
     );
 
     frame.render_widget(input, area);
@@ -842,7 +864,7 @@ fn render_confirm_dialog(frame: &mut Frame, area: Rect) {
             "Delete this conversation? ",
             Style::default().fg(Color::Yellow),
         ),
-        Span::styled("(y/n)", Style::default().fg(Color::Rgb(140, 140, 140))),
+        Span::styled("(y/n)", Style::default().fg(CLR_DIM)),
     ]);
     let paragraph = Paragraph::new(prompt);
     frame.render_widget(paragraph, area);
@@ -876,16 +898,13 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     // Clear the area behind the modal first
     frame.render_widget(Clear, menu_area);
 
-    // Render background
-    let background = Block::default().style(Style::default().bg(Color::Rgb(25, 25, 30)));
-    frame.render_widget(background, menu_area);
-
     // Render border
     let block = Block::default()
         .title(format!(" {} ", title))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(78, 201, 176)));
+        .border_style(Style::default().fg(CLR_ACCENT))
+        .style(Style::default().bg(Color::Reset));
 
     let inner = block.inner(menu_area);
     frame.render_widget(block, menu_area);
@@ -894,9 +913,9 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     let mut lines = Vec::new();
     for (i, opt) in options.iter().enumerate() {
         let style = if i == selected {
-            Style::default().fg(Color::Rgb(78, 201, 176)).bold()
+            Style::default().fg(CLR_ACCENT).bold()
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(CLR_TEXT)
         };
         let prefix = if i == selected { "▶ " } else { "  " };
         lines.push(Line::styled(format!("{}{}", prefix, opt), style));
@@ -904,7 +923,7 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     lines.push(Line::from(""));
     lines.push(Line::styled(
         "  [Esc] Cancel",
-        Style::default().fg(Color::Rgb(100, 100, 100)),
+        Style::default().fg(CLR_DIM),
     ));
 
     let menu_content = Paragraph::new(lines);
@@ -987,16 +1006,13 @@ fn render_help_overlay(frame: &mut Frame, is_view_mode: bool, is_single_file_mod
     // Clear the area behind the modal
     frame.render_widget(Clear, menu_area);
 
-    // Render background
-    let background = Block::default().style(Style::default().bg(Color::Rgb(25, 25, 30)));
-    frame.render_widget(background, menu_area);
-
     // Render border
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Rgb(78, 201, 176)));
+        .border_style(Style::default().fg(CLR_ACCENT))
+        .style(Style::default().bg(Color::Reset));
 
     let inner = block.inner(menu_area);
     frame.render_widget(block, menu_area);
@@ -1010,10 +1026,10 @@ fn render_help_overlay(frame: &mut Frame, is_view_mode: bool, is_single_file_mod
             Span::raw("  "), // Left padding
             Span::styled(
                 format!("{}{}", key, " ".repeat(key_padding)),
-                Style::default().fg(Color::Rgb(78, 201, 176)),
+                Style::default().fg(CLR_ACCENT),
             ),
-            Span::styled(" │ ", Style::default().fg(Color::Rgb(60, 60, 60))),
-            Span::styled(*action, Style::default().fg(Color::White)),
+            Span::styled(" │ ", Style::default().fg(CLR_BORDER)),
+            Span::styled(*action, Style::default().fg(CLR_TEXT)),
         ]));
     }
 
@@ -1084,9 +1100,9 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             // Selection indicator: vertical bar for all rows (with left padding)
             let indicator = " ▌ ";
             let indicator_style = if is_selected {
-                Style::default().fg(Color::Rgb(78, 201, 176))
+                Style::default().fg(CLR_ACCENT)
             } else {
-                Style::default().fg(Color::Rgb(60, 60, 60))
+                Style::default().fg(CLR_FAINT)
             };
 
             // Build left part: indicator + project + optional custom title + optional summary
@@ -1161,29 +1177,29 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
 
             // Header line: ▌ project-name · summary                    timestamp
             let project_style = if is_selected {
-                Style::default().fg(Color::White).bold()
+                Style::default().fg(CLR_TEXT).bold()
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(CLR_TEXT)
             };
 
-            let summary_style = Style::default().fg(Color::Rgb(140, 155, 175)); // Soft slate blue
-            let summary_highlight_style = Style::default().fg(Color::Rgb(180, 195, 215)); // Lighter slate blue for highlights
+            let summary_style = Style::default().fg(CLR_DIM);
+            let summary_highlight_style = Style::default().fg(CLR_ACCENT);
 
-            // Highlight style: cyan with bold for selected row
+            // Highlight style: accent with bold for selected row
             let highlight_style = if is_selected {
-                Style::default().fg(Color::Rgb(78, 201, 176)).bold()
+                Style::default().fg(CLR_ACCENT).bold()
             } else {
-                Style::default().fg(Color::Rgb(78, 201, 176))
+                Style::default().fg(CLR_ACCENT)
             };
 
             let selection_bg = if is_selected {
-                Style::default().bg(Color::Rgb(45, 45, 55))
+                Style::default().bold()
             } else {
                 Style::default()
             };
 
-            let custom_title_style = Style::default().fg(Color::Rgb(200, 180, 120)); // Warm gold
-            let custom_title_highlight_style = Style::default().fg(Color::Rgb(230, 210, 150)); // Lighter gold for highlights
+            let custom_title_style = Style::default().fg(CLR_TITLE_CUSTOM);
+            let custom_title_highlight_style = Style::default().fg(CLR_ACCENT);
 
             // Build header with highlighted project name
             let mut header_spans = vec![Span::styled(indicator, indicator_style)];
@@ -1217,26 +1233,26 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             header_spans.push(Span::raw(" ".repeat(padding)));
             header_spans.push(Span::styled(
                 msg_count,
-                Style::default().fg(Color::Rgb(110, 110, 110)),
+                Style::default().fg(CLR_DIM),
             ));
             // Add conversation duration if present
             if let Some(ref d) = duration {
                 header_spans.push(Span::styled(
                     " · ",
-                    Style::default().fg(Color::Rgb(70, 70, 70)),
+                    Style::default().fg(CLR_FAINT),
                 ));
                 header_spans.push(Span::styled(
                     d.clone(),
-                    Style::default().fg(Color::Rgb(100, 140, 130)),
+                    Style::default().fg(CLR_DURATION),
                 ));
             }
             header_spans.push(Span::styled(
                 " · ",
-                Style::default().fg(Color::Rgb(70, 70, 70)),
+                Style::default().fg(CLR_FAINT),
             ));
             header_spans.push(Span::styled(
                 timestamp,
-                Style::default().fg(Color::Rgb(140, 140, 140)),
+                Style::default().fg(CLR_DIM),
             ));
 
             let header = Line::from(header_spans).style(selection_bg);
@@ -1251,7 +1267,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             // Build preview with highlighted matches
-            let preview_style = Style::default().fg(Color::Rgb(130, 130, 130));
+            let preview_style = Style::default().fg(CLR_DIM);
             let mut preview_spans = vec![Span::styled(indicator, indicator_style)];
             preview_spans.extend(highlight_text(
                 &truncated_preview,
@@ -1272,8 +1288,8 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                     context_width,
                 )
                 .map(|context_text| {
-                    let context_base_style = Style::default().fg(Color::Rgb(100, 100, 100));
-                    let context_highlight_style = Style::default().fg(Color::Rgb(60, 160, 140));
+                    let context_base_style = Style::default().fg(CLR_DIM);
+                    let context_highlight_style = Style::default().fg(CLR_ACCENT);
 
                     let mut context_spans = vec![Span::styled(indicator, indicator_style)];
                     context_spans.extend(highlight_text(
@@ -1292,7 +1308,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             // Separator line: dim horizontal rule (full width)
             let separator = Line::from(Span::styled(
                 separator_str.as_str(),
-                Style::default().fg(Color::Rgb(50, 50, 50)),
+                Style::default().fg(CLR_BORDER),
             ));
 
             // Combine into item (3 or 4 lines depending on context)
