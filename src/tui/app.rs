@@ -151,6 +151,8 @@ pub struct App {
     show_timing: bool,
     /// Whether the app is running in single file mode (direct input, no list)
     single_file_mode: bool,
+    /// When set, a search filter update is pending and should fire at this instant
+    filter_pending: Option<std::time::Instant>,
 }
 
 impl App {
@@ -181,6 +183,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
+            filter_pending: None,
         }
     }
 
@@ -206,6 +209,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
+            filter_pending: None,
         }
     }
 
@@ -262,6 +266,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: true,
+            filter_pending: None,
         }
     }
 
@@ -340,6 +345,28 @@ impl App {
         } else {
             Some(0)
         };
+        self.filter_pending = None;
+    }
+
+    /// Schedule a debounced filter update (300ms from now)
+    fn schedule_filter(&mut self) {
+        self.filter_pending = Some(std::time::Instant::now() + Duration::from_millis(300));
+    }
+
+    /// If a debounced filter is pending and its deadline has passed, apply it.
+    /// Returns the remaining time until the pending filter fires, if any.
+    fn flush_pending_filter(&mut self) -> Option<Duration> {
+        if let Some(deadline) = self.filter_pending {
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                self.update_filter();
+                None
+            } else {
+                Some(deadline - now)
+            }
+        } else {
+            None
+        }
     }
 
     /// Move selection up
@@ -1159,7 +1186,7 @@ impl App {
             }
             KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.delete_word_backwards() {
-                    self.update_filter();
+                    self.schedule_filter();
                 }
                 None
             }
@@ -1178,7 +1205,7 @@ impl App {
                     .unwrap_or(self.query.len());
                 self.query.insert(byte_pos, c);
                 self.cursor_pos += 1;
-                self.update_filter();
+                self.schedule_filter();
                 None
             }
             KeyCode::Backspace => {
@@ -1191,7 +1218,7 @@ impl App {
                     changed = true;
                 }
                 if changed {
-                    self.update_filter();
+                    self.schedule_filter();
                 }
                 None
             }
@@ -1205,7 +1232,7 @@ impl App {
                     changed = true;
                 }
                 if changed {
-                    self.update_filter();
+                    self.schedule_filter();
                 }
                 None
             }
@@ -1611,13 +1638,18 @@ pub fn run_with_loader(
         // Check for resize in view mode
         app.check_view_resize(content_width, viewport_height);
 
+        // Flush any pending debounced search filter
+        let debounce_remaining = app.flush_pending_filter();
+
         // Render current state
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Use short poll timeout while loading (to check for loader messages),
-        // otherwise block until input arrives (or until status message expires)
+        // otherwise block until input arrives (or until status/debounce deadline)
         let poll_timeout = if app.is_loading() {
             Duration::from_millis(50)
+        } else if let Some(remaining) = debounce_remaining {
+            remaining
         } else if let Some(remaining) = app.status_message_remaining() {
             remaining
         } else {
