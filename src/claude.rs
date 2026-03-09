@@ -137,16 +137,40 @@ pub enum ContentBlock {
     },
 }
 
-/// Extract text from content blocks, used for both user and assistant messages
+/// Extract text from content blocks, used for both user and assistant messages.
+/// Includes text from Text blocks and ToolResult content to make tool outputs searchable.
 pub fn extract_text_from_blocks(blocks: &[ContentBlock]) -> String {
-    blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut parts: Vec<&str> = Vec::new();
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => parts.push(text.as_str()),
+            ContentBlock::ToolResult { content, .. } => {
+                if let Some(content) = content {
+                    extract_tool_result_text(content, &mut parts);
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.join(" ")
+}
+
+/// Extract searchable text from a tool result's content value.
+/// Content can be a plain string or an array of content blocks.
+fn extract_tool_result_text<'a>(value: &'a serde_json::Value, parts: &mut Vec<&'a str>) {
+    match value {
+        serde_json::Value::String(s) => parts.push(s.as_str()),
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                        parts.push(text);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn extract_text_from_user(message: &UserMessage) -> String {
@@ -212,4 +236,50 @@ pub fn parse_agent_progress(data: &serde_json::Value) -> Option<AgentProgressDat
         return None;
     }
     serde_json::from_value(data.clone()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_text_includes_tool_result_string() {
+        let blocks = vec![
+            ContentBlock::Text {
+                text: "hello".into(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "id1".into(),
+                content: Some(serde_json::Value::String(
+                    "build completed in 180ms".into(),
+                )),
+            },
+        ];
+        let text = extract_text_from_blocks(&blocks);
+        assert!(text.contains("180ms"), "got: {text}");
+        assert!(text.contains("hello"), "got: {text}");
+    }
+
+    #[test]
+    fn extract_text_includes_tool_result_array() {
+        let blocks = vec![ContentBlock::ToolResult {
+            tool_use_id: "id1".into(),
+            content: Some(serde_json::json!([
+                {"type": "text", "text": "latency p99: 42ms"},
+                {"type": "image", "source": {}}
+            ])),
+        }];
+        let text = extract_text_from_blocks(&blocks);
+        assert!(text.contains("42ms"), "got: {text}");
+    }
+
+    #[test]
+    fn extract_text_skips_tool_result_without_content() {
+        let blocks = vec![ContentBlock::ToolResult {
+            tool_use_id: "id1".into(),
+            content: None,
+        }];
+        let text = extract_text_from_blocks(&blocks);
+        assert!(text.is_empty(), "got: {text}");
+    }
 }
