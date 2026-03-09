@@ -151,8 +151,8 @@ pub struct App {
     show_timing: bool,
     /// Whether the app is running in single file mode (direct input, no list)
     single_file_mode: bool,
-    /// When set, a search filter update is pending and should fire at this instant
-    filter_pending: Option<std::time::Instant>,
+    /// Debounce: when the query last changed (None = filter is up-to-date)
+    filter_pending_since: Option<std::time::Instant>,
 }
 
 impl App {
@@ -183,7 +183,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
-            filter_pending: None,
+            filter_pending_since: None,
         }
     }
 
@@ -209,7 +209,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: false,
-            filter_pending: None,
+            filter_pending_since: None,
         }
     }
 
@@ -266,7 +266,7 @@ impl App {
             show_thinking,
             show_timing: false,
             single_file_mode: true,
-            filter_pending: None,
+            filter_pending_since: None,
         }
     }
 
@@ -345,28 +345,32 @@ impl App {
         } else {
             Some(0)
         };
-        self.filter_pending = None;
+        self.filter_pending_since = None;
     }
 
-    /// Schedule a debounced filter update (300ms from now)
-    fn schedule_filter(&mut self) {
-        self.filter_pending = Some(std::time::Instant::now() + Duration::from_millis(300));
+    /// Mark the filter as needing a refresh (debounced)
+    fn mark_filter_dirty(&mut self) {
+        self.filter_pending_since = Some(std::time::Instant::now());
     }
 
-    /// If a debounced filter is pending and its deadline has passed, apply it.
-    /// Returns the remaining time until the pending filter fires, if any.
-    fn flush_pending_filter(&mut self) -> Option<Duration> {
-        if let Some(deadline) = self.filter_pending {
-            let now = std::time::Instant::now();
-            if now >= deadline {
+    /// Flush the pending filter if the debounce interval (300ms) has elapsed.
+    /// Returns true if the filter was flushed.
+    pub fn flush_filter_if_ready(&mut self) -> bool {
+        if let Some(since) = self.filter_pending_since {
+            if since.elapsed() >= Duration::from_millis(300) {
                 self.update_filter();
-                None
-            } else {
-                Some(deadline - now)
+                return true;
             }
-        } else {
-            None
         }
+        false
+    }
+
+    /// Duration until the next pending filter flush, if any.
+    pub fn filter_poll_timeout(&self) -> Option<Duration> {
+        self.filter_pending_since.map(|since| {
+            let debounce = Duration::from_millis(300);
+            debounce.saturating_sub(since.elapsed())
+        })
     }
 
     /// Move selection up
@@ -1186,7 +1190,7 @@ impl App {
             }
             KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
                 if self.delete_word_backwards() {
-                    self.schedule_filter();
+                    self.mark_filter_dirty();
                 }
                 None
             }
@@ -1205,7 +1209,7 @@ impl App {
                     .unwrap_or(self.query.len());
                 self.query.insert(byte_pos, c);
                 self.cursor_pos += 1;
-                self.schedule_filter();
+                self.mark_filter_dirty();
                 None
             }
             KeyCode::Backspace => {
@@ -1218,7 +1222,7 @@ impl App {
                     changed = true;
                 }
                 if changed {
-                    self.schedule_filter();
+                    self.mark_filter_dirty();
                 }
                 None
             }
@@ -1232,7 +1236,7 @@ impl App {
                     changed = true;
                 }
                 if changed {
-                    self.schedule_filter();
+                    self.mark_filter_dirty();
                 }
                 None
             }
@@ -1522,6 +1526,16 @@ pub fn run(
 
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
+        // Use poll with timeout to support debounced search
+        let poll_timeout = app
+            .filter_poll_timeout()
+            .unwrap_or(Duration::from_secs(60));
+        if !event::poll(poll_timeout).map_err(|e| AppError::Io(io::Error::other(e)))? {
+            // No event — flush pending filter if debounce interval elapsed
+            app.flush_filter_if_ready();
+            continue;
+        }
+
         if let Event::Key(key) = event::read().map_err(|e| AppError::Io(io::Error::other(e)))? {
             // Only handle key press events (not release)
             if key.kind == KeyEventKind::Press {
@@ -1638,64 +1652,66 @@ pub fn run_with_loader(
         // Check for resize in view mode
         app.check_view_resize(content_width, viewport_height);
 
-        // Flush any pending debounced search filter
-        let debounce_remaining = app.flush_pending_filter();
-
         // Render current state
         guard.terminal.draw(|frame| ui::render(frame, &app))?;
 
         // Use short poll timeout while loading (to check for loader messages),
-        // otherwise block until input arrives (or until status/debounce deadline)
+        // otherwise use debounce timeout or status message timeout
         let poll_timeout = if app.is_loading() {
             Duration::from_millis(50)
-        } else if let Some(remaining) = debounce_remaining {
-            remaining
+        } else if let Some(debounce) = app.filter_poll_timeout() {
+            debounce
         } else if let Some(remaining) = app.status_message_remaining() {
             remaining
         } else {
             Duration::from_secs(3600)
         };
 
-        if event::poll(poll_timeout).map_err(|e| AppError::Io(io::Error::other(e)))?
-            && let Event::Key(key) = event::read().map_err(|e| AppError::Io(io::Error::other(e)))?
-            && key.kind == KeyEventKind::Press
-        {
-            // Check for Enter in list mode - enter view mode (but not during dialogs)
-            if matches!(app.app_mode(), AppMode::List)
-                && *app.dialog_mode() == DialogMode::None
-                && key.code == KeyCode::Enter
-                && !app.is_loading()
-                && app.selected().is_some()
+        if event::poll(poll_timeout).map_err(|e| AppError::Io(io::Error::other(e)))? {
+            if let Event::Key(key) =
+                event::read().map_err(|e| AppError::Io(io::Error::other(e)))?
+                && key.kind == KeyEventKind::Press
             {
-                app.enter_view_mode(content_width);
-                continue;
-            }
+                // Check for Enter in list mode - enter view mode (but not during dialogs)
+                if matches!(app.app_mode(), AppMode::List)
+                    && *app.dialog_mode() == DialogMode::None
+                    && key.code == KeyCode::Enter
+                    && !app.is_loading()
+                    && app.selected().is_some()
+                {
+                    app.enter_view_mode(content_width);
+                    continue;
+                }
 
-            if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
-                match action {
-                    Action::Delete(ref path) => {
-                        // Delete the file from disk
-                        match std::fs::remove_file(path) {
-                            Ok(()) => {
-                                // Only remove from list if file deletion succeeded
-                                app.remove_selected_from_list();
-                                // If in view mode, return to list
-                                app.exit_view_mode();
+                if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
+                    match action {
+                        Action::Delete(ref path) => {
+                            // Delete the file from disk
+                            match std::fs::remove_file(path) {
+                                Ok(()) => {
+                                    // Only remove from list if file deletion succeeded
+                                    app.remove_selected_from_list();
+                                    // If in view mode, return to list
+                                    app.exit_view_mode();
+                                }
+                                Err(e) => {
+                                    let _ = debug_log::log_debug(&format!(
+                                        "Failed to delete {}: {}",
+                                        path.display(),
+                                        e
+                                    ));
+                                    // Keep item in list since file still exists
+                                }
                             }
-                            Err(e) => {
-                                let _ = debug_log::log_debug(&format!(
-                                    "Failed to delete {}: {}",
-                                    path.display(),
-                                    e
-                                ));
-                                // Keep item in list since file still exists
-                            }
+                            // Continue the loop (don't exit TUI)
                         }
-                        // Continue the loop (don't exit TUI)
+                        _ => return Ok((action, app.into_conversations())),
                     }
-                    _ => return Ok((action, app.into_conversations())),
                 }
             }
+        } else {
+            // No event — flush pending filter if debounce interval elapsed
+            app.flush_filter_if_ready();
         }
     }
 }
