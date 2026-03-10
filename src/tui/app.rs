@@ -1536,7 +1536,10 @@ pub fn run(
             continue;
         }
 
-        if let Event::Key(key) = event::read().map_err(|e| AppError::Io(io::Error::other(e)))? {
+        // Drain all pending key events before redrawing (handles paste)
+        loop {
+            let ev = event::read().map_err(|e| AppError::Io(io::Error::other(e)))?;
+            if let Event::Key(key) = ev {
             // Only handle key press events (not release)
             if key.kind == KeyEventKind::Press {
                 // Check for Enter in list mode - enter view mode (but not during dialogs)
@@ -1547,7 +1550,7 @@ pub fn run(
                     && app.selected().is_some()
                 {
                     app.enter_view_mode(content_width);
-                    continue;
+                    break;
                 }
 
                 if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
@@ -1583,6 +1586,11 @@ pub fn run(
                         Action::Quit => return Ok(action),
                     }
                 }
+            }
+            }
+            // Break drain loop if no more events are immediately available
+            if !event::poll(Duration::ZERO).map_err(|e| AppError::Io(io::Error::other(e)))? {
+                break;
             }
         }
     }
@@ -1668,45 +1676,52 @@ pub fn run_with_loader(
         };
 
         if event::poll(poll_timeout).map_err(|e| AppError::Io(io::Error::other(e)))? {
-            if let Event::Key(key) =
-                event::read().map_err(|e| AppError::Io(io::Error::other(e)))?
-                && key.kind == KeyEventKind::Press
-            {
-                // Check for Enter in list mode - enter view mode (but not during dialogs)
-                if matches!(app.app_mode(), AppMode::List)
-                    && *app.dialog_mode() == DialogMode::None
-                    && key.code == KeyCode::Enter
-                    && !app.is_loading()
-                    && app.selected().is_some()
+            // Drain all pending key events before redrawing (handles paste)
+            loop {
+                let ev = event::read().map_err(|e| AppError::Io(io::Error::other(e)))?;
+                if let Event::Key(key) = ev
+                    && key.kind == KeyEventKind::Press
                 {
-                    app.enter_view_mode(content_width);
-                    continue;
-                }
-
-                if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
-                    match action {
-                        Action::Delete(ref path) => {
-                            // Delete the file from disk
-                            match std::fs::remove_file(path) {
-                                Ok(()) => {
-                                    // Only remove from list if file deletion succeeded
-                                    app.remove_selected_from_list();
-                                    // If in view mode, return to list
-                                    app.exit_view_mode();
-                                }
-                                Err(e) => {
-                                    let _ = debug_log::log_debug(&format!(
-                                        "Failed to delete {}: {}",
-                                        path.display(),
-                                        e
-                                    ));
-                                    // Keep item in list since file still exists
-                                }
-                            }
-                            // Continue the loop (don't exit TUI)
-                        }
-                        _ => return Ok((action, app.into_conversations())),
+                    // Check for Enter in list mode - enter view mode (but not during dialogs)
+                    if matches!(app.app_mode(), AppMode::List)
+                        && *app.dialog_mode() == DialogMode::None
+                        && key.code == KeyCode::Enter
+                        && !app.is_loading()
+                        && app.selected().is_some()
+                    {
+                        app.enter_view_mode(content_width);
+                        break;
                     }
+
+                    if let Some(action) = app.handle_key(key.code, key.modifiers, viewport_height) {
+                        match action {
+                            Action::Delete(ref path) => {
+                                // Delete the file from disk
+                                match std::fs::remove_file(path) {
+                                    Ok(()) => {
+                                        // Only remove from list if file deletion succeeded
+                                        app.remove_selected_from_list();
+                                        // If in view mode, return to list
+                                        app.exit_view_mode();
+                                    }
+                                    Err(e) => {
+                                        let _ = debug_log::log_debug(&format!(
+                                            "Failed to delete {}: {}",
+                                            path.display(),
+                                            e
+                                        ));
+                                        // Keep item in list since file still exists
+                                    }
+                                }
+                                // Continue the loop (don't exit TUI)
+                            }
+                            _ => return Ok((action, app.into_conversations())),
+                        }
+                    }
+                }
+                // Break drain loop if no more events are immediately available
+                if !event::poll(Duration::ZERO).map_err(|e| AppError::Io(io::Error::other(e)))? {
+                    break;
                 }
             }
         } else {
