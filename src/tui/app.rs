@@ -943,10 +943,7 @@ impl App {
                             ));
                         }
                         Err(e) => {
-                            self.status_message = Some((
-                                e,
-                                std::time::Instant::now(),
-                            ));
+                            self.status_message = Some((e, std::time::Instant::now()));
                         }
                     }
                 }
@@ -966,10 +963,7 @@ impl App {
                             ));
                         }
                         Err(e) => {
-                            self.status_message = Some((
-                                e,
-                                std::time::Instant::now(),
-                            ));
+                            self.status_message = Some((e, std::time::Instant::now()));
                         }
                     }
                 }

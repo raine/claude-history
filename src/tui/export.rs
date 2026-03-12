@@ -13,8 +13,11 @@ use crate::claude::{self, ContentBlock, LogEntry, UserContent, UserMessage};
 use crate::tool_format;
 use chrono::Local;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Write as _};
+#[cfg(target_os = "linux")]
+use std::io::Write as _;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
+#[cfg(target_os = "linux")]
 use std::process::{Command, Stdio};
 
 /// Export format options
@@ -91,18 +94,21 @@ pub fn export_to_file(
 
 /// Copy text to the system clipboard.
 ///
-/// On Linux, pipes to `xclip` or `xsel` first (these persist the data
-/// independently of the calling process). Falls back to arboard if
-/// neither tool is available.
+/// On Linux, selects clipboard tools based on the display server: `wl-copy`
+/// for Wayland, `xclip`/`xsel` for X11. These persist clipboard data
+/// independently of the calling process (unlike arboard, which loses
+/// contents when the process exits). Falls back to arboard if no external
+/// tool is available.
 pub fn copy_to_system_clipboard(text: &str) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
-        // Try xclip first, then xsel
-        if let Ok(result) = copy_via_command("xclip", &["-selection", "clipboard"], text) {
-            return result;
-        }
-        if let Ok(result) = copy_via_command("xsel", &["--clipboard", "--input"], text) {
-            return result;
+        let candidates = linux_clipboard_candidates();
+        for (cmd, args) in &candidates {
+            match copy_via_command(cmd, args, text) {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(_)) => continue, // command found but failed, try next
+                Err(()) => continue,    // command not found, try next
+            }
         }
         // Fall through to arboard
     }
@@ -116,7 +122,24 @@ pub fn copy_to_system_clipboard(text: &str) -> Result<(), String> {
     }
 }
 
-/// Try to copy text via an external command (e.g. xclip, xsel).
+/// Return clipboard tool candidates based on the active display server.
+#[cfg(target_os = "linux")]
+fn linux_clipboard_candidates() -> Vec<(&'static str, &'static [&'static str])> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let x11 = std::env::var_os("DISPLAY").is_some();
+
+    let mut candidates = Vec::new();
+    if wayland {
+        candidates.push(("wl-copy", ["--type", "text/plain;charset=utf-8"].as_slice()));
+    }
+    if x11 {
+        candidates.push(("xclip", ["-selection", "clipboard"].as_slice()));
+        candidates.push(("xsel", ["--clipboard", "--input"].as_slice()));
+    }
+    candidates
+}
+
+/// Try to copy text via an external command (e.g. wl-copy, xclip, xsel).
 /// Returns `Ok(Ok(()))` on success, `Ok(Err(msg))` if the command ran but failed,
 /// or `Err(())` if the command was not found (caller should try next option).
 #[cfg(target_os = "linux")]
@@ -125,9 +148,9 @@ fn copy_via_command(cmd: &str, args: &[&str], text: &str) -> Result<Result<(), S
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::null())
         .spawn()
-        .map_err(|_| ())?; // command not found → try next
+        .map_err(|_| ())?; // command not available → try next
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes());
