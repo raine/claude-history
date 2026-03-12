@@ -11,11 +11,11 @@
 
 use crate::claude::{self, ContentBlock, LogEntry, UserContent, UserMessage};
 use crate::tool_format;
-use arboard::Clipboard;
 use chrono::Local;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// Export format options
 #[derive(Clone, Copy, Debug)]
@@ -89,6 +89,57 @@ pub fn export_to_file(
     }
 }
 
+/// Copy text to the system clipboard.
+///
+/// On Linux, pipes to `xclip` or `xsel` first (these persist the data
+/// independently of the calling process). Falls back to arboard if
+/// neither tool is available.
+pub fn copy_to_system_clipboard(text: &str) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // Try xclip first, then xsel
+        if let Ok(result) = copy_via_command("xclip", &["-selection", "clipboard"], text) {
+            return result;
+        }
+        if let Ok(result) = copy_via_command("xsel", &["--clipboard", "--input"], text) {
+            return result;
+        }
+        // Fall through to arboard
+    }
+
+    // arboard fallback (primary method on macOS/Windows)
+    match arboard::Clipboard::new() {
+        Ok(mut clipboard) => clipboard
+            .set_text(text)
+            .map_err(|e| format!("Clipboard error: {}", e)),
+        Err(e) => Err(format!("Clipboard unavailable: {}", e)),
+    }
+}
+
+/// Try to copy text via an external command (e.g. xclip, xsel).
+/// Returns `Ok(Ok(()))` on success, `Ok(Err(msg))` if the command ran but failed,
+/// or `Err(())` if the command was not found (caller should try next option).
+#[cfg(target_os = "linux")]
+fn copy_via_command(cmd: &str, args: &[&str], text: &str) -> Result<Result<(), String>, ()> {
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| ())?; // command not found → try next
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+
+    match child.wait() {
+        Ok(status) if status.success() => Ok(Ok(())),
+        Ok(status) => Ok(Err(format!("{} exited with {}", cmd, status))),
+        Err(e) => Ok(Err(format!("{} error: {}", cmd, e))),
+    }
+}
+
 /// Copy conversation to clipboard
 pub fn export_to_clipboard(
     source_path: &Path,
@@ -104,18 +155,11 @@ pub fn export_to_clipboard(
         }
     };
 
-    match Clipboard::new() {
-        Ok(mut clipboard) => match clipboard.set_text(&content) {
-            Ok(_) => ExportResult {
-                message: "Copied to clipboard".to_string(),
-            },
-            Err(e) => ExportResult {
-                message: format!("Clipboard error: {}", e),
-            },
+    match copy_to_system_clipboard(&content) {
+        Ok(()) => ExportResult {
+            message: "Copied to clipboard".to_string(),
         },
-        Err(e) => ExportResult {
-            message: format!("Clipboard unavailable: {}", e),
-        },
+        Err(e) => ExportResult { message: e },
     }
 }
 

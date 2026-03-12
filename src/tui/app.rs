@@ -935,7 +935,7 @@ impl App {
             KeyCode::Char('Y') => {
                 if let AppMode::View(ref state) = self.app_mode {
                     let path_str = state.conversation_path.display().to_string();
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(&path_str)) {
+                    match crate::tui::export::copy_to_system_clipboard(&path_str) {
                         Ok(()) => {
                             self.status_message = Some((
                                 "Path copied to clipboard".to_string(),
@@ -944,7 +944,7 @@ impl App {
                         }
                         Err(e) => {
                             self.status_message = Some((
-                                format!("Clipboard error: {}", e),
+                                e,
                                 std::time::Instant::now(),
                             ));
                         }
@@ -958,7 +958,7 @@ impl App {
                 if let AppMode::View(ref state) = self.app_mode
                     && let Some(id) = state.conversation_path.file_stem().and_then(|s| s.to_str())
                 {
-                    match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(id)) {
+                    match crate::tui::export::copy_to_system_clipboard(id) {
                         Ok(()) => {
                             self.status_message = Some((
                                 "Session ID copied to clipboard".to_string(),
@@ -967,7 +967,7 @@ impl App {
                         }
                         Err(e) => {
                             self.status_message = Some((
-                                format!("Clipboard error: {}", e),
+                                e,
                                 std::time::Instant::now(),
                             ));
                         }
