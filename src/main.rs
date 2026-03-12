@@ -318,55 +318,48 @@ fn resume_with_claude(
         })?
         .to_owned();
 
-    // Require a valid project directory to resume
-    let project_dir = match project_path {
-        Some(path) if path.exists() && path.is_dir() => path,
-        Some(path) => {
-            return Err(AppError::ClaudeExecutionError(format!(
-                "Project directory no longer exists: {}",
-                path.display()
-            )));
-        }
-        None => {
-            return Err(AppError::ClaudeExecutionError(
-                "Cannot determine project directory for this conversation".to_string(),
-            ));
-        }
+    let project_dir = project_path.filter(|p| p.exists() && p.is_dir());
+
+    let cwd = std::env::current_dir().map_err(|e| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("Failed to get current directory: {}", e),
+        ))
+    })?;
+
+    let conv_projects_dir = selected_path.parent().ok_or_else(|| {
+        AppError::ClaudeExecutionError(
+            "Cannot determine conversation's project directory".to_string(),
+        )
+    })?;
+
+    // When the original project directory is gone (e.g. deleted worktree) or when
+    // forking cross-project, copy session files to CWD's project directory and
+    // resume from there.
+    let needs_copy = if project_dir.is_none() {
+        true
+    } else if fork_session {
+        let cwd_projects_dir = history::get_claude_projects_dir(&cwd)?;
+        cwd_projects_dir != conv_projects_dir
+    } else {
+        false
     };
 
-    // Cross-project fork: if forking and CWD differs from conversation's project,
-    // copy the session files to CWD's project directory and resume there instead.
-    if fork_session {
-        let cwd = std::env::current_dir().map_err(|e| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Failed to get current directory: {}", e),
-            ))
-        })?;
-
+    if needs_copy {
         let cwd_projects_dir = history::get_claude_projects_dir(&cwd)?;
-        let conv_projects_dir = selected_path.parent().ok_or_else(|| {
-            AppError::ClaudeExecutionError(
-                "Cannot determine conversation's project directory".to_string(),
-            )
-        })?;
+        std::fs::create_dir_all(&cwd_projects_dir).map_err(AppError::Io)?;
+        copy_session_files(
+            selected_path,
+            &conversation_id,
+            conv_projects_dir,
+            &cwd_projects_dir,
+        )?;
 
-        if cwd_projects_dir != conv_projects_dir {
-            // Copy session to CWD's project
-            std::fs::create_dir_all(&cwd_projects_dir).map_err(AppError::Io)?;
-            copy_session_files(
-                selected_path,
-                &conversation_id,
-                conv_projects_dir,
-                &cwd_projects_dir,
-            )?;
-
-            let mut command = Command::new("claude");
-            command.args(["--resume", &conversation_id]);
-            command.args(default_args);
-            command.current_dir(&cwd);
-            return run_claude_command(command);
-        }
+        let mut command = Command::new("claude");
+        command.args(["--resume", &conversation_id]);
+        command.args(default_args);
+        command.current_dir(&cwd);
+        return run_claude_command(command);
     }
 
     let mut command = Command::new("claude");
@@ -375,7 +368,7 @@ fn resume_with_claude(
         command.arg("--fork-session");
     }
     command.args(default_args);
-    command.current_dir(project_dir);
+    command.current_dir(project_dir.unwrap());
 
     run_claude_command(command)
 }
