@@ -6,10 +6,9 @@ use std::path::PathBuf;
 
 /// Get the debug log file path (~/.local/state/claude-history/debug.log)
 fn get_debug_log_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
+    let home = home::home_dir()?;
     Some(
-        PathBuf::from(home)
-            .join(".local")
+        home.join(".local")
             .join("state")
             .join("claude-history")
             .join("debug.log"),

@@ -88,13 +88,13 @@ pub fn get_claude_projects_root() -> Result<PathBuf> {
     let claude_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         PathBuf::from(config_dir)
     } else {
-        let home_dir = std::env::var("HOME").map_err(|_| {
+        let home_dir = home::home_dir().ok_or_else(|| {
             AppError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                "HOME environment variable not set",
+                "Could not determine home directory",
             ))
         })?;
-        PathBuf::from(home_dir).join(".claude")
+        home_dir.join(".claude")
     };
 
     Ok(claude_dir.join("projects"))

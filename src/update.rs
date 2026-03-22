@@ -148,8 +148,6 @@ fn verify_checksum(file: &Path, expected_line: &str) -> Result<()> {
 
 /// Replace the current binary with the new one, with rollback on failure.
 fn replace_binary(new_binary: &Path, current_exe: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
     let exe_dir = current_exe
         .parent()
         .ok_or_else(|| AppError::UpdateError("Could not determine binary directory".to_string()))?;
@@ -158,8 +156,13 @@ fn replace_binary(new_binary: &Path, current_exe: &Path) -> Result<()> {
     let staged = exe_dir.join(format!(".{BIN_NAME}.new"));
     std::fs::copy(new_binary, &staged)
         .map_err(|e| AppError::UpdateError(format!("Failed to copy new binary: {e}")))?;
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| AppError::UpdateError(format!("Failed to set permissions: {e}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| AppError::UpdateError(format!("Failed to set permissions: {e}")))?;
+    }
 
     // Rename current -> .old, then staged -> current
     let backup = exe_dir.join(format!(".{BIN_NAME}.old"));
