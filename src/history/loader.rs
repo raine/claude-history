@@ -243,6 +243,14 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
                 return None;
             }
 
+            let name = path.file_name()?.to_string_lossy().to_string();
+
+            // Skip claude-mem observer session directories — these contain
+            // automated observation logs, not real user conversations.
+            if name.contains("claude-mem-observer-sessions") {
+                return None;
+            }
+
             // Check if project has any non-agent .jsonl files
             let has_conversations = read_dir(&path).ok()?.any(|e| {
                 e.ok()
@@ -259,7 +267,6 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
                 return None;
             }
 
-            let name = path.file_name()?.to_string_lossy().to_string();
             // Heuristic decode: convert encoded directory name back to readable path
             // The encoding replaces non-alphanumeric chars (except -) with -
             // So / becomes -, but _ also becomes -, and __ becomes --

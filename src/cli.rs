@@ -99,6 +99,10 @@ pub struct Args {
     #[arg(long, help = "Fork the session when resuming", requires = "resume")]
     pub fork_session: bool,
 
+    /// Resume in the current directory instead of the original project directory
+    #[arg(long, help = "Resume in the current working directory (keep workspace here)")]
+    pub here: bool,
+
     /// Print the selected conversation's file path and exit
     #[arg(long, short = 'p', help = "Print the selected conversation file path")]
     pub show_path: bool,

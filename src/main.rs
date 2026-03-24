@@ -207,13 +207,19 @@ fn run() -> Result<()> {
         (tui::Action::Resume(path), convs) => {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
-            resume_with_claude(&path, project_path, default_args, false)?;
+            resume_with_claude(&path, project_path, default_args, false, false)?;
             return Ok(());
         }
         (tui::Action::ForkResume(path), convs) => {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
-            resume_with_claude(&path, project_path, default_args, true)?;
+            resume_with_claude(&path, project_path, default_args, true, false)?;
+            return Ok(());
+        }
+        (tui::Action::ResumeHere(path), convs) => {
+            let conv = convs.iter().find(|c| c.path == path);
+            let project_path = conv.and_then(|c| c.project_path.as_ref());
+            resume_with_claude(&path, project_path, default_args, false, true)?;
             return Ok(());
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
@@ -261,6 +267,7 @@ fn run() -> Result<()> {
             project_path,
             default_args,
             args.fork_session,
+            args.here,
         )?;
         return Ok(());
     }
@@ -308,6 +315,7 @@ fn resume_with_claude(
     project_path: Option<&PathBuf>,
     default_args: &[String],
     fork_session: bool,
+    resume_here: bool,
 ) -> Result<()> {
     let conversation_id = selected_path
         .file_stem()
@@ -332,10 +340,13 @@ fn resume_with_claude(
         )
     })?;
 
-    // When the original project directory is gone (e.g. deleted worktree) or when
-    // forking cross-project, copy session files to CWD's project directory and
-    // resume from there.
-    let needs_copy = if project_dir.is_none() {
+    // When the original project directory is gone (e.g. deleted worktree), when
+    // forking cross-project, or when resume_here is requested from a different project,
+    // copy session files to CWD's project directory and resume from there.
+    let needs_copy = if resume_here {
+        let cwd_projects_dir = history::get_claude_projects_dir(&cwd)?;
+        cwd_projects_dir != conv_projects_dir
+    } else if project_dir.is_none() {
         true
     } else if fork_session {
         let cwd_projects_dir = history::get_claude_projects_dir(&cwd)?;
@@ -354,6 +365,20 @@ fn resume_with_claude(
             &cwd_projects_dir,
         )?;
 
+        let mut command = Command::new("claude");
+        command.args(["--resume", &conversation_id]);
+        // Cross-project resume requires --fork-session: the original .jsonl
+        // contains cwd entries pointing to the source project, so Claude Code
+        // cannot continue the same session in a different project context.
+        // Forking creates a clean new session inheriting the conversation history.
+        command.arg("--fork-session");
+        command.args(default_args);
+        command.current_dir(&cwd);
+        return run_claude_command(command);
+    }
+
+    // resume_here but same project dir: no copy needed, just use CWD
+    if resume_here {
         let mut command = Command::new("claude");
         command.args(["--resume", &conversation_id]);
         command.args(default_args);

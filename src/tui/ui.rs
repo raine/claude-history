@@ -195,6 +195,8 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" resume  ", action_label),
         Span::styled(keys.fork.short_label(), action_key),
         Span::styled(" fork  ", action_label),
+        Span::styled(keys.resume_here.short_label(), action_key),
+        Span::styled(" here  ", action_label),
         Span::styled(keys.delete.short_label(), action_key),
         Span::styled(" delete  ", action_label),
     ];
@@ -673,6 +675,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled(" resume  ", label_style),
             Span::styled(app.keys().fork.short_label(), key_style),
             Span::styled(" fork  ", label_style),
+            Span::styled(app.keys().resume_here.short_label(), key_style),
+            Span::styled(" here  ", label_style),
             Span::styled(app.keys().delete.short_label(), key_style),
             Span::styled(" del  ", label_style),
             Span::styled("q", key_style),
@@ -1051,6 +1055,7 @@ fn render_help_overlay(
             ("I".into(), "Copy session ID"),
             (keys.resume.help_label(), "Resume"),
             (keys.fork.help_label(), "Fork resume"),
+            (keys.resume_here.help_label(), "Resume here (CWD)"),
             (keys.delete.help_label(), "Delete"),
             ("q / Esc".into(), exit_text),
         ]
@@ -1070,6 +1075,7 @@ fn render_help_overlay(
             ("Ctrl+W".into(), "Delete word"),
             (keys.resume.help_label(), "Resume"),
             (keys.fork.help_label(), "Fork resume"),
+            (keys.resume_here.help_label(), "Resume here (CWD)"),
             (keys.delete.help_label(), "Delete"),
             ("Esc".into(), "Quit"),
         ]
