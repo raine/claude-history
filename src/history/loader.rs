@@ -10,13 +10,14 @@ use super::path::{
 };
 use super::{Conversation, LoaderMessage, Project};
 use crate::agent::transcript::content_blocks_count_as_agent_message;
+use crate::ccs::{self, CcsInfo};
 use crate::claude::{LogEntry, extract_search_text_from_user, parse_agent_progress};
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::{AppError, Result};
 use crate::time_filter::TimeFilter;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{File, read_dir};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -46,37 +47,72 @@ pub struct DeleteEmptySummary {
     pub deleted: usize,
 }
 
-/// Load conversations from ALL projects globally
+/// Load conversations from ALL projects globally (across all CCS roots)
 #[allow(dead_code)]
 pub fn load_all_conversations(
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    ccs_info: Option<&CcsInfo>,
 ) -> Result<Vec<Conversation>> {
-    let root = super::get_claude_projects_root()?;
-    let projects = list_projects(&root)?;
+    let roots = ccs::get_all_project_roots(ccs_info)?;
+
+    // Build session UUID → profile name mapping from CCS session-env directories
+    let session_profile_map = ccs_info
+        .map(|info| info.build_session_profile_map())
+        .unwrap_or_default();
+
+    // Collect all projects from all roots, deduplicating by canonical project dir
+    let mut seen_canonical = HashSet::new();
+    let mut all_projects: Vec<(PathBuf, Project, String)> = Vec::new();
+
+    for root in &roots {
+        if !root.path.exists() {
+            continue;
+        }
+        if let Ok(projects) = list_projects(&root.path) {
+            for project in projects {
+                let project_dir = root.path.join(&project.name);
+                let canonical =
+                    std::fs::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
+                if seen_canonical.insert(canonical) {
+                    all_projects.push((root.path.clone(), project, root.cache_key.clone()));
+                }
+            }
+        }
+    }
 
     debug::info(
         debug_level,
-        &format!("Loading global history from {} projects", projects.len()),
+        &format!(
+            "Loading global history from {} projects across {} roots",
+            all_projects.len(),
+            roots.len()
+        ),
     );
 
     // Load conversations from all projects in parallel
-    let mut all_conversations: Vec<Conversation> = projects
+    let mut all_conversations: Vec<Conversation> = all_projects
         .par_iter()
-        .flat_map(|project| {
+        .flat_map(|(root, project, cache_key)| {
             let project_dir = root.join(&project.name);
-            match load_conversations(&project_dir, show_last, &project.name, debug_level) {
+            match load_conversations_keyed(
+                &project_dir,
+                show_last,
+                &project.name,
+                debug_level,
+                cache_key,
+            ) {
                 Ok(mut convs) => {
-                    // Fallback path for old JSONL files without cwd field
                     let fallback_path = decode_project_dir_name_to_path(&project.name);
-
-                    // Inject project info into each conversation
                     for conv in &mut convs {
-                        // Prefer the cwd extracted from the JSONL file (accurate), fall back to decoded path
                         let project_path =
                             conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
                         conv.project_name = Some(format_short_name_from_path(&project_path));
                         conv.project_path = Some(project_path);
+                        // Look up session UUID in CCS session-env mapping
+                        if let Some(uuid) = conv.path.file_stem().and_then(|s| s.to_str()) {
+                            conv.source_label = session_profile_map.get(uuid).cloned();
+                        }
                     }
                     convs
                 }
@@ -110,17 +146,18 @@ pub fn load_all_conversations(
     Ok(all_conversations)
 }
 
-/// Start loading all conversations in the background
+/// Start loading all conversations in the background (across all CCS roots)
 /// Returns a receiver that will receive LoaderMessage updates
 pub fn load_all_conversations_streaming(
     show_last: bool,
     debug_level: Option<DebugLevel>,
     time: TimeFilter,
+    ccs_info: Option<CcsInfo>,
 ) -> Receiver<LoaderMessage> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        load_all_streaming_inner(tx, show_last, debug_level, time);
+        load_all_streaming_inner(tx, show_last, debug_level, time, ccs_info.as_ref());
     });
 
     rx
@@ -131,9 +168,9 @@ fn load_all_streaming_inner(
     show_last: bool,
     debug_level: Option<DebugLevel>,
     time: TimeFilter,
+    ccs_info: Option<&CcsInfo>,
 ) {
-    // First, validate that the projects root exists (fatal if not)
-    let root = match super::get_claude_projects_root() {
+    let roots = match ccs::get_all_project_roots(ccs_info) {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(LoaderMessage::Fatal(e));
@@ -141,99 +178,155 @@ fn load_all_streaming_inner(
         }
     };
 
-    if !root.exists() {
-        let _ = tx.send(LoaderMessage::Fatal(AppError::ProjectsDirNotFound(
-            root.display().to_string(),
-        )));
-        return;
-    }
+    // Build session UUID → profile name mapping from CCS session-env directories
+    let session_profile_map = ccs_info
+        .map(|info| info.build_session_profile_map())
+        .unwrap_or_default();
 
-    // List projects (fatal if this fails)
-    let projects = match list_projects(&root) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = tx.send(LoaderMessage::Fatal(e));
-            return;
+    // Collect all projects from all roots, deduplicating by canonical project dir
+    let mut seen_canonical = HashSet::new();
+    let mut all_projects: Vec<(PathBuf, Project, String)> = Vec::new();
+
+    for root in &roots {
+        if !root.path.exists() {
+            debug::warn(
+                debug_level,
+                &format!("Projects root does not exist: {}", root.path.display()),
+            );
+            continue;
         }
-    };
 
-    debug::info(
-        debug_level,
-        &format!("Loading global history from {} projects", projects.len()),
-    );
-
-    // Process projects in parallel and send batches as they complete
-    projects.par_iter().for_each(|project| {
-        let project_dir = root.join(&project.name);
-
-        match load_conversations(&project_dir, show_last, &project.name, debug_level) {
-            Ok(mut convs) => {
-                if convs.is_empty() {
-                    return;
-                }
-
-                let fallback_path = decode_project_dir_name_to_path(&project.name);
-
-                for conv in &mut convs {
-                    let project_path = conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
-                    conv.project_name = Some(format_short_name_from_path(&project_path));
-                    conv.project_path = Some(project_path);
-                }
-
-                // Filtered here rather than inside load_conversations, whose
-                // per-project cache is rebuilt from the vec it returns —
-                // dropping conversations earlier would evict their cache
-                // entries and force a re-parse on every later run.
-                if time.is_active() {
-                    convs.retain(|conv| time.matches(conv.timestamp));
-                    if convs.is_empty() {
-                        return;
+        match list_projects(&root.path) {
+            Ok(projects) => {
+                for project in projects {
+                    let project_dir = root.path.join(&project.name);
+                    let canonical =
+                        std::fs::canonicalize(&project_dir).unwrap_or_else(|_| project_dir.clone());
+                    if seen_canonical.insert(canonical) {
+                        all_projects.push((root.path.clone(), project, root.cache_key.clone()));
                     }
                 }
-
-                // Send batch, ignore error if receiver dropped
-                let _ = tx.send(LoaderMessage::Batch(convs));
             }
             Err(e) => {
                 debug::warn(
                     debug_level,
-                    &format!("Failed to load project {}: {}", project.display_name, e),
+                    &format!("Failed to list projects in {}: {}", root.path.display(), e),
                 );
-                let _ = tx.send(LoaderMessage::ProjectError);
             }
         }
-    });
+    }
+
+    if all_projects.is_empty() {
+        let root_paths: Vec<String> = roots.iter().map(|r| r.path.display().to_string()).collect();
+        let _ = tx.send(LoaderMessage::Fatal(AppError::ProjectsDirNotFound(
+            root_paths.join(", "),
+        )));
+        return;
+    }
+
+    debug::info(
+        debug_level,
+        &format!(
+            "Loading global history from {} projects across {} roots",
+            all_projects.len(),
+            roots.len()
+        ),
+    );
+
+    // Process projects in parallel and send batches as they complete
+    all_projects
+        .par_iter()
+        .for_each(|(root, project, cache_key)| {
+            let project_dir = root.join(&project.name);
+
+            match load_conversations_keyed(
+                &project_dir,
+                show_last,
+                &project.name,
+                debug_level,
+                cache_key,
+            ) {
+                Ok(mut convs) => {
+                    if convs.is_empty() {
+                        return;
+                    }
+
+                    let fallback_path = decode_project_dir_name_to_path(&project.name);
+
+                    for conv in &mut convs {
+                        let project_path =
+                            conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
+                        conv.project_name = Some(format_short_name_from_path(&project_path));
+                        conv.project_path = Some(project_path);
+                        if let Some(uuid) = conv.path.file_stem().and_then(|s| s.to_str()) {
+                            conv.source_label = session_profile_map.get(uuid).cloned();
+                        }
+                    }
+
+                    // Filtered here rather than inside load_conversations, whose
+                    // per-project cache is rebuilt from the vec it returns —
+                    // dropping conversations earlier would evict their cache
+                    // entries and force a re-parse on every later run.
+                    if time.is_active() {
+                        convs.retain(|conv| time.matches(conv.timestamp));
+                        if convs.is_empty() {
+                            return;
+                        }
+                    }
+
+                    // Send batch, ignore error if receiver dropped
+                    let _ = tx.send(LoaderMessage::Batch(convs));
+                }
+                Err(e) => {
+                    debug::warn(
+                        debug_level,
+                        &format!("Failed to load project {}: {}", project.display_name, e),
+                    );
+                    let _ = tx.send(LoaderMessage::ProjectError);
+                }
+            }
+        });
 
     let _ = tx.send(LoaderMessage::Done);
 }
 
-/// Find a session JSONL file by UUID across all projects.
+/// Find a session JSONL file by UUID across all projects and all roots.
 /// Returns the path to the `.jsonl` file if found.
 pub fn find_jsonl_by_uuid(uuid: &str) -> Result<Option<PathBuf>> {
     let matches = find_all_jsonl_by_uuid(uuid)?;
     Ok(matches.into_iter().next())
 }
 
-/// Find all session JSONL files by UUID across all projects.
+/// Find all session JSONL files by UUID across all projects and all roots.
 /// A session may exist in multiple project directories due to cross-project forking.
 fn find_all_jsonl_by_uuid(uuid: &str) -> Result<Vec<PathBuf>> {
-    let root = super::get_claude_projects_root()?;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
+    let ccs_info = ccs::discover_ccs();
+    let roots = ccs::get_all_project_roots(ccs_info.as_ref())?;
     let filename = format!("{}.jsonl", uuid);
     let mut matches = Vec::new();
+    let mut seen_canonical = HashSet::new();
 
-    for entry in read_dir(&root)? {
-        let entry = entry?;
-        let project_dir = entry.path();
-        if !project_dir.is_dir() {
+    for root in &roots {
+        if !root.path.exists() {
             continue;
         }
-        let candidate = project_dir.join(&filename);
-        if candidate.exists() {
-            matches.push(candidate);
+        let Ok(entries) = read_dir(&root.path) else {
+            continue;
+        };
+        for entry in entries {
+            let Ok(entry) = entry else { continue };
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let candidate = project_dir.join(&filename);
+            if candidate.exists() {
+                let canonical =
+                    std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+                if seen_canonical.insert(canonical) {
+                    matches.push(candidate);
+                }
+            }
         }
     }
 
@@ -478,14 +571,33 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
 }
 
 /// Find and process all conversation files in one pass, using per-project cache
+#[allow(dead_code)]
 pub fn load_conversations(
     projects_dir: &Path,
     show_last: bool,
     project_dir_name: &str,
     debug_level: Option<DebugLevel>,
 ) -> Result<Vec<Conversation>> {
+    load_conversations_keyed(
+        projects_dir,
+        show_last,
+        project_dir_name,
+        debug_level,
+        "default",
+    )
+}
+
+/// Find and process all conversation files in one pass, with explicit cache key
+fn load_conversations_keyed(
+    projects_dir: &Path,
+    show_last: bool,
+    project_dir_name: &str,
+    debug_level: Option<DebugLevel>,
+    cache_key: &str,
+) -> Result<Vec<Conversation>> {
     // Load existing cache for this project
-    let cached_entries = cache::read_project_cache(project_dir_name).unwrap_or_default();
+    let cached_entries =
+        cache::read_project_cache_keyed(project_dir_name, Some(cache_key)).unwrap_or_default();
 
     // Find all JSONL files and capture metadata in one pass
     let mut files_with_meta = Vec::new();
@@ -666,7 +778,7 @@ pub fn load_conversations(
             }
         }
 
-        cache::write_project_cache(project_dir_name, new_cache);
+        cache::write_project_cache_keyed(project_dir_name, new_cache, Some(cache_key));
     }
 
     debug::info(

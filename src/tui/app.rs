@@ -1,3 +1,4 @@
+use crate::ccs::CcsInfo;
 use crate::config::KeyBindings;
 use crate::history::{Conversation, format_short_name_from_path, process_conversation_file};
 use crate::search::{self, SearchableConversation};
@@ -83,6 +84,10 @@ pub struct App {
     workspace_filter: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
+    /// CCS discovery result (None if CCS not installed)
+    pub ccs_info: Option<CcsInfo>,
+    /// CLI override profile (from --profile flag)
+    pub override_profile: Option<String>,
     /// Exact project names hidden from list-mode display
     excluded_projects: HashSet<String>,
     /// Channel to send commands to the background search worker
@@ -116,6 +121,8 @@ struct AppParts {
     keys: KeyBindings,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
+    ccs_info: Option<CcsInfo>,
+    override_profile: Option<String>,
     excluded_projects: HashSet<String>,
     search_tx: mpsc::Sender<SearchCommand>,
     search_rx: mpsc::Receiver<SearchResponse>,
@@ -149,6 +156,8 @@ impl App {
             keys: parts.keys,
             workspace_filter: parts.workspace_filter,
             current_project_dir_name: parts.current_project_dir_name,
+            ccs_info: parts.ccs_info,
+            override_profile: parts.override_profile,
             excluded_projects: parts.excluded_projects,
             search_tx: parts.search_tx,
             search_rx: parts.search_rx,
@@ -248,6 +257,8 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            ccs_info: None,
+            override_profile: None,
             excluded_projects,
             search_tx,
             search_rx,
@@ -265,6 +276,8 @@ impl App {
         current_project_dir_name: Option<String>,
         exclude_projects: Vec<String>,
         search_options: TuiSearchOptions,
+        ccs_info: Option<CcsInfo>,
+        override_profile: Option<String>,
     ) -> Self {
         let conversations = Vec::new();
         let (search_tx, search_rx) = spawn_search_worker();
@@ -284,6 +297,8 @@ impl App {
             keys,
             workspace_filter,
             current_project_dir_name,
+            ccs_info,
+            override_profile,
             excluded_projects: exclude_projects.into_iter().collect(),
             search_tx,
             search_rx,
@@ -339,6 +354,8 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            ccs_info: None,
+            override_profile: None,
             excluded_projects: HashSet::new(),
             search_tx,
             search_rx,
@@ -349,6 +366,102 @@ impl App {
 
     pub fn keys(&self) -> &KeyBindings {
         &self.keys
+    }
+
+    pub fn ccs_info(&self) -> Option<&CcsInfo> {
+        self.ccs_info.as_ref()
+    }
+
+    /// Resolve resume/fork action, showing profile picker if needed.
+    /// Returns Some(Action) if profile is determined, None if picker dialog was opened.
+    fn resolve_resume_action(&mut self, is_fork: bool) -> Option<Action> {
+        let path = self.get_selected_path()?;
+
+        // Determine the profile to use
+        let profile = if let Some(ref name) = self.override_profile {
+            // CLI --profile override
+            Some(name.clone())
+        } else if let Some(ref info) = self.ccs_info {
+            if info.profiles.len() <= 1 {
+                // 0 or 1 profile: use default automatically
+                info.default_profile.clone()
+            } else {
+                // Multiple profiles: show picker
+                let default_idx = info
+                    .profiles
+                    .iter()
+                    .position(|p| Some(&p.name) == info.default_profile.as_ref())
+                    .unwrap_or(0);
+                let profile_names: Vec<String> =
+                    info.profiles.iter().map(|p| p.name.clone()).collect();
+                self.dialog_mode = DialogMode::ProfilePicker {
+                    selected: default_idx,
+                    profiles: profile_names,
+                    is_fork,
+                };
+                return None; // picker will handle the action
+            }
+        } else {
+            None // No CCS
+        };
+
+        if is_fork {
+            Some(Action::ForkResume(path, profile))
+        } else {
+            Some(Action::Resume(path, profile))
+        }
+    }
+
+    fn handle_profile_picker_key(&mut self, code: KeyCode) -> Option<Action> {
+        let (selected, profiles, is_fork) = match &mut self.dialog_mode {
+            DialogMode::ProfilePicker {
+                selected,
+                profiles,
+                is_fork,
+            } => (selected, profiles.clone(), *is_fork),
+            _ => return None,
+        };
+
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if *selected > 0 {
+                    *selected -= 1;
+                }
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if *selected < profiles.len() - 1 {
+                    *selected += 1;
+                }
+                None
+            }
+            KeyCode::Enter => {
+                let profile_name = profiles[*selected].clone();
+                self.dialog_mode = DialogMode::None;
+                let path = self.get_selected_path()?;
+                if is_fork {
+                    Some(Action::ForkResume(path, Some(profile_name)))
+                } else {
+                    Some(Action::Resume(path, Some(profile_name)))
+                }
+            }
+            KeyCode::Char(c @ '1'..='9') => {
+                let idx = (c as usize - '1' as usize).min(profiles.len() - 1);
+                let profile_name = profiles[idx].clone();
+                self.dialog_mode = DialogMode::None;
+                let path = self.get_selected_path()?;
+                if is_fork {
+                    Some(Action::ForkResume(path, Some(profile_name)))
+                } else {
+                    Some(Action::Resume(path, Some(profile_name)))
+                }
+            }
+            KeyCode::Esc => {
+                self.dialog_mode = DialogMode::None;
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Append a batch of conversations during loading

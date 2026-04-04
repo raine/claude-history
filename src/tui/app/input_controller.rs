@@ -132,6 +132,7 @@ impl App {
                 return None;
             }
             DialogMode::Rename { .. } => return self.handle_rename_key(code, modifiers),
+            DialogMode::ProfilePicker { .. } => return self.handle_profile_picker_key(code),
             DialogMode::None => {}
         }
 
@@ -169,18 +170,16 @@ impl App {
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
-            return if self.single_file_mode {
-                None
-            } else {
-                self.get_selected_path().map(Action::Resume)
-            };
+            if !self.single_file_mode {
+                return self.resolve_resume_action(false);
+            }
+            return None;
         }
         if self.keys.fork.matches(code, modifiers) {
-            return if self.single_file_mode {
-                None
-            } else {
-                self.get_selected_path().map(Action::ForkResume)
-            };
+            if !self.single_file_mode {
+                return self.resolve_resume_action(true);
+            }
+            return None;
         }
 
         let state = match &mut self.app_mode {
@@ -448,10 +447,10 @@ impl App {
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
-            return self.get_selected_path().map(Action::Resume);
+            return self.resolve_resume_action(false);
         }
         if self.keys.fork.matches(code, modifiers) {
-            return self.get_selected_path().map(Action::ForkResume);
+            return self.resolve_resume_action(true);
         }
 
         match code {

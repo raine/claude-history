@@ -41,5 +41,6 @@ pub fn one_message_conversation(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        source_label: None,
     }
 }

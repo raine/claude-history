@@ -79,6 +79,8 @@ pub struct Conversation {
     pub total_tokens: u64,
     /// Conversation duration in minutes (from first to last message)
     pub duration_minutes: Option<u64>,
+    /// Source label indicating where this conversation was loaded from (e.g., CCS profile name)
+    pub source_label: Option<String>,
 }
 
 pub struct Project {
