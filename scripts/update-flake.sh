@@ -22,7 +22,8 @@ git add "$FLAKE_FILE"
 
 # Get the correct hash from the build error
 echo "Calculating new cargoHash..."
-HASH=$(nix build --no-link 2>&1 | grep "got:" | awk '{print $2}')
+BUILD_OUTPUT=$(nix build --no-link 2>&1 || true)
+HASH=$(echo "$BUILD_OUTPUT" | grep "got:" | awk '{print $2}')
 
 if [ -z "$HASH" ]; then
   echo "ERROR: Could not determine cargoHash. Build may have succeeded with empty hash or failed unexpectedly."
