@@ -399,6 +399,13 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+/// Return the CLI binary name to use when resuming a conversation.
+/// Respects the `CLAUDE_CLI_NAME` environment variable so that custom
+/// installations (e.g. `claude-internal`) work correctly.
+fn claude_cli_name() -> String {
+    std::env::var("CLAUDE_CLI_NAME").unwrap_or_else(|_| "claude".to_string())
+}
+
 fn resume_with_claude(
     selected_path: &Path,
     project_path: Option<&PathBuf>,
@@ -450,14 +457,14 @@ fn resume_with_claude(
             &cwd_projects_dir,
         )?;
 
-        let mut command = Command::new("claude");
+        let mut command = Command::new(claude_cli_name());
         command.args(["--resume", &conversation_id]);
         command.args(default_args);
         command.current_dir(&cwd);
         return run_claude_command(command);
     }
 
-    let mut command = Command::new("claude");
+    let mut command = Command::new(claude_cli_name());
     command.args(["--resume", &conversation_id]);
     if fork_session {
         command.arg("--fork-session");
