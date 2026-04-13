@@ -19,6 +19,22 @@ This will:
 3. Open editor to review changelog
 4. Commit, publish to crates.io, tag, and push
 
+## Updating flake.nix
+
+After a release, update the Nix flake to match the new version:
+
+```bash
+./scripts/update-flake.sh
+```
+
+This will:
+
+1. Read the version from Cargo.toml and update flake.nix
+2. Recalculate the `cargoHash` for the new dependencies
+3. Update `flake.lock`
+4. Verify the build and binary
+5. Stage the changes for commit
+
 ## Backfilling changelog
 
 To generate changelog entries for all git tags missing from CHANGELOG.md:
