@@ -92,6 +92,22 @@ pub fn export_to_file(
     }
 }
 
+/// Export pre-generated text to a file (for orphan sessions that have no JSONL file)
+pub fn export_text_to_file(text: &str, format: ExportFormat) -> ExportResult {
+    let timestamp = Local::now().format("%Y-%m-%d-%H%M%S");
+    let ext = format.extension();
+    let filename = format!("conversation-{}.{}", timestamp, ext);
+
+    match fs::write(&filename, text) {
+        Ok(_) => ExportResult {
+            message: format!("Exported to {}", filename),
+        },
+        Err(e) => ExportResult {
+            message: format!("Failed to write: {}", e),
+        },
+    }
+}
+
 /// Copy text to the system clipboard.
 ///
 /// On Linux, selects clipboard tools based on the display server: `wl-copy`

@@ -1,5 +1,15 @@
 use serde::Deserialize;
 
+/// An entry from ~/.claude/history.jsonl (the global prompt log)
+#[derive(Debug, Deserialize)]
+pub struct HistoryEntry {
+    pub display: String,
+    pub timestamp: u64,
+    pub project: String,
+    #[serde(rename = "sessionId")]
+    pub session_id: String,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "lowercase")]
