@@ -215,6 +215,22 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ]);
     }
 
+    // Orphan sessions toggle (only when history.jsonl has orphans)
+    if app.orphans_available() {
+        let orphan_label = if app.include_orphans() { "On" } else { "Off" };
+        let orphan_val_style = if app.include_orphans() {
+            Style::default().fg(rgb(th().accent)).bold()
+        } else {
+            label_style
+        };
+        spans.extend([
+            Span::styled("^G", key_style),
+            Span::styled("\u{b7}", label_style),
+            Span::styled(orphan_label, orphan_val_style),
+            Span::raw("  "),
+        ]);
+    }
+
     spans.extend([
         Span::styled("?", key_style),
         Span::styled("help  ", label_style),
@@ -250,7 +266,9 @@ fn header_fits_single_line(conv: &crate::history::Conversation, terminal_width: 
         .map(|m| format_model_name(m).len() + 3) // + " · "
         .unwrap_or(0);
 
-    let msg_count_len = if conv.message_count == 1 {
+    let msg_count_len = if conv.is_orphan() {
+        if conv.message_count == 1 { "1 prompt".len() } else { format!("{} prompts", conv.message_count).len() }
+    } else if conv.message_count == 1 {
         "1 message".len()
     } else {
         format!("{} messages", conv.message_count).len()
@@ -367,7 +385,13 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         let project = conv.project_name.as_deref().unwrap_or("Unknown");
         let custom_title = conv.custom_title.clone();
         let model = conv.model.as_ref().map(|m| format_model_name(m));
-        let msg_count = if conv.message_count == 1 {
+        let msg_count = if conv.is_orphan() {
+            if conv.message_count == 1 {
+                "1 prompt".to_string()
+            } else {
+                format!("{} prompts", conv.message_count)
+            }
+        } else if conv.message_count == 1 {
             "1 message".to_string()
         } else {
             format!("{} messages", conv.message_count)
@@ -630,25 +654,32 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
     let key_style = Style::default().fg(rgb(th().accent));
     let label_style = Style::default().fg(rgb(th().text_muted));
 
-    // Fixed-width status labels to prevent jumping when toggling
-    let tools_status = state.tool_display.status_label();
-    let thinking_status = if state.show_thinking { "on " } else { "off" };
-    let timing_status = if state.show_timing { "on " } else { "off" };
+    let is_orphan = state.conversation_path.as_os_str().is_empty();
 
     let mut spans = vec![
         Span::raw("  "),
         Span::styled(scroll_pos, Style::default().fg(rgb(th().text_secondary))),
         Span::raw("  "),
-        Span::styled("t", key_style),
-        Span::styled(format!("ools·{} ", tools_status), label_style),
-        Span::styled("T", key_style),
-        Span::styled(format!("hink·{} ", thinking_status), label_style),
-        Span::styled("i", key_style),
-        Span::styled(format!("nfo·{}", timing_status), label_style),
-        Span::raw("  "),
-        Span::styled("│", label_style),
-        Span::raw("  "),
     ];
+
+    // Tools/Think/Info toggles are not relevant for orphan sessions (prompts only)
+    if !is_orphan {
+        let tools_status = state.tool_display.status_label();
+        let thinking_status = if state.show_thinking { "on " } else { "off" };
+        let timing_status = if state.show_timing { "on " } else { "off" };
+
+        spans.extend([
+            Span::styled("t", key_style),
+            Span::styled(format!("ools·{} ", tools_status), label_style),
+            Span::styled("T", key_style),
+            Span::styled(format!("hink·{} ", thinking_status), label_style),
+            Span::styled("i", key_style),
+            Span::styled(format!("nfo·{}", timing_status), label_style),
+            Span::raw("  "),
+            Span::styled("│", label_style),
+            Span::raw("  "),
+        ]);
+    }
 
     if state.search_mode == ViewSearchMode::Active {
         spans.extend([
@@ -669,12 +700,19 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled("xport  ", label_style),
             Span::styled("y", key_style),
             Span::styled("ank  ", label_style),
-            Span::styled(app.keys().resume.short_label(), key_style),
-            Span::styled(" resume  ", label_style),
-            Span::styled(app.keys().fork.short_label(), key_style),
-            Span::styled(" fork  ", label_style),
-            Span::styled(app.keys().delete.short_label(), key_style),
-            Span::styled(" del  ", label_style),
+        ]);
+        // Resume/fork/delete not available for orphan sessions
+        if !is_orphan {
+            spans.extend([
+                Span::styled(app.keys().resume.short_label(), key_style),
+                Span::styled(" resume  ", label_style),
+                Span::styled(app.keys().fork.short_label(), key_style),
+                Span::styled(" fork  ", label_style),
+                Span::styled(app.keys().delete.short_label(), key_style),
+                Span::styled(" del  ", label_style),
+            ]);
+        }
+        spans.extend([
             Span::styled("q", key_style),
             Span::styled("uit", label_style),
         ]);
@@ -1065,6 +1103,7 @@ fn render_help_overlay(
             ("PgUp / PgDn".into(), "Jump by page"),
             ("Home / End".into(), "Jump to first/last"),
             ("Tab".into(), "Toggle scope (All/Project)"),
+            ("Ctrl+G".into(), "Toggle orphan sessions"),
             ("Enter".into(), "Open viewer"),
             ("Ctrl+O".into(), "Select and exit"),
             ("Ctrl+W".into(), "Delete word"),
@@ -1185,8 +1224,14 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             // Format timestamp (hybrid: relative for recent, absolute for older)
             let (timestamp, recency) = format_timestamp(conv.timestamp, now);
 
-            // Format message count
-            let msg_count = if conv.message_count == 1 {
+            // Format message count — use "prompts" for orphan sessions
+            let msg_count = if conv.is_orphan() {
+                if conv.message_count == 1 {
+                    "1 prompt".to_string()
+                } else {
+                    format!("{} prompts", conv.message_count)
+                }
+            } else if conv.message_count == 1 {
                 "1 msg".to_string()
             } else {
                 format!("{} msgs", conv.message_count)

@@ -133,6 +133,10 @@ pub struct Args {
     )]
     pub local: bool,
 
+    /// Include orphan sessions from history.jsonl (sessions whose data has been cleaned up)
+    #[arg(long, help = "Include orphan sessions from history.jsonl")]
+    pub include_orphans: bool,
+
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
     pub pager: bool,
