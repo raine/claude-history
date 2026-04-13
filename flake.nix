@@ -22,7 +22,7 @@
 
             src = ./.;
 
-            cargoHash = "";
+            cargoHash = "sha256-dIaKrngvzQDIejKq61oqp5N8xJmnOHbgZFsm+aDlk2U=";
 
             # Some tests require filesystem access not available in Nix sandbox
             doCheck = false;
