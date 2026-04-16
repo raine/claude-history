@@ -1,3 +1,9 @@
+## Unreleased
+
+- Fixed the viewport jumping to unrelated content when cycling tool output
+  (t), thinking, or timing display, or on terminal resize — the view now
+  stays anchored to the message you were reading
+
 ## v0.1.51 (2026-03-29)
 
 - Improved search ranking — results now score matches by where they appear

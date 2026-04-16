@@ -2019,7 +2019,9 @@ impl App {
 
                 state.total_lines = rendered.lines.len();
                 state.rendered_lines = rendered.lines;
-                state.message_ranges = rendered.messages;
+                // Take the old message_ranges so we can use them to anchor
+                // the scroll position after the new ranges are installed.
+                let old_messages = std::mem::replace(&mut state.message_ranges, rendered.messages);
 
                 // Restore focused message by entry_index
                 state.focused_message = old_entry_index.and_then(|old_idx| {
@@ -2033,9 +2035,15 @@ impl App {
                     state.focused_message = Some(0);
                 }
 
-                // Clamp scroll offset to new content bounds
-                let max_scroll = state.total_lines.saturating_sub(viewport_height);
-                state.scroll_offset = old_scroll.min(max_scroll);
+                // Anchor scroll to the message that contained the top of the
+                // old viewport, preserving offset within that message.
+                state.scroll_offset = anchor_scroll(
+                    old_scroll,
+                    &old_messages,
+                    &state.message_ranges,
+                    state.total_lines,
+                    viewport_height,
+                );
 
                 // Recompute search matches for new content
                 if state.search_mode == ViewSearchMode::Active && !state.search_query.is_empty() {
@@ -2474,5 +2482,191 @@ pub fn run_single_file(
                 return Ok(());
             }
         }
+    }
+}
+
+/// Given the scroll position and message ranges from before a re-render,
+/// plus the new message ranges and total line count, compute the new
+/// scroll offset so that the message at the top of the viewport stays
+/// anchored and the offset within that message is preserved as much as
+/// possible.
+///
+/// Fallback chain when the anchor message cannot be preserved:
+/// 1. If old scroll is not inside any old message (e.g. top-of-file
+///    header), clamp `old_scroll` to the new max.
+/// 2. If the anchor entry exists in the new rendering, preserve the
+///    offset within that message.
+/// 3. If the anchor entry has disappeared (e.g. a tool_result that
+///    renders zero lines once tool_display is Hidden), snap to the next
+///    surviving entry's start.
+/// 4. If there is no following surviving entry, snap to the end of the
+///    previous surviving entry.
+fn anchor_scroll(
+    old_scroll: usize,
+    old_messages: &[MessageRange],
+    new_messages: &[MessageRange],
+    new_total_lines: usize,
+    viewport_height: usize,
+) -> usize {
+    let max_scroll = new_total_lines.saturating_sub(viewport_height);
+
+    let anchor = old_messages
+        .iter()
+        .find(|m| m.start_line <= old_scroll && old_scroll < m.end_line);
+
+    if let Some(old_msg) = anchor {
+        if let Some(new_msg) = new_messages
+            .iter()
+            .find(|m| m.entry_index == old_msg.entry_index)
+        {
+            let offset = old_scroll - old_msg.start_line;
+            // end_line is exclusive; capped_end is the last line still inside
+            // the message. `.max(start_line)` defends against a zero-width
+            // message (start_line == end_line) which shouldn't occur but
+            // would underflow without it.
+            let capped_end = new_msg.end_line.saturating_sub(1).max(new_msg.start_line);
+            let target = new_msg.start_line.saturating_add(offset).min(capped_end);
+            return target.min(max_scroll);
+        }
+        // The anchor entry was removed from the render. Snap to the
+        // nearest surviving neighbor so reading context is preserved
+        // instead of falling back to absolute line numbers.
+        if let Some(new_msg) = new_messages
+            .iter()
+            .find(|m| m.entry_index > old_msg.entry_index)
+        {
+            return new_msg.start_line.min(max_scroll);
+        }
+        if let Some(new_msg) = new_messages
+            .iter()
+            .rev()
+            .find(|m| m.entry_index < old_msg.entry_index)
+        {
+            let last_line = new_msg.end_line.saturating_sub(1).max(new_msg.start_line);
+            return last_line.min(max_scroll);
+        }
+    }
+
+    old_scroll.min(max_scroll)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mr(entry_index: usize, start_line: usize, end_line: usize) -> MessageRange {
+        MessageRange {
+            entry_index,
+            start_line,
+            end_line,
+        }
+    }
+
+    // trn -> all: the anchor message (entry_index 1) expands AND shifts
+    // because entry_index 0 also grew. Viewport was 5 lines into the
+    // anchor; expect scroll to follow the shift and preserve the offset.
+    #[test]
+    fn anchor_scroll_preserves_offset_when_message_expands() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 20), mr(2, 20, 30)];
+        let new_messages = vec![mr(0, 0, 12), mr(1, 12, 62), mr(2, 62, 70)];
+        let old_scroll = 15; // offset 5 within old entry_index 1 (starts at 10)
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 70, 24);
+
+        // new entry_index 1 starts at line 12, offset 5 -> line 17.
+        // max_scroll = 70 - 24 = 46, so .min(46) leaves 17.
+        assert_eq!(new_scroll, 17);
+    }
+
+    // all -> trn: msg #1 shrinks from 50 lines to 10. User was 40 lines in.
+    // Expect scroll to clamp to the last line of the new msg #1.
+    #[test]
+    fn anchor_scroll_clamps_to_message_end_when_shrinking() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 60), mr(2, 60, 70)];
+        let new_messages = vec![mr(0, 0, 10), mr(1, 10, 20), mr(2, 20, 30)];
+        let old_scroll = 50; // offset 40 within old msg #1
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 30, 24);
+
+        // new msg #1 is lines 10..20 -> last inside line is 19.
+        // max_scroll = 30 - 24 = 6, so final .min(max_scroll) pins to 6.
+        assert_eq!(new_scroll, 6);
+    }
+
+    // Scroll position is before any message (header region). Expect
+    // absolute clamp fallback.
+    #[test]
+    fn anchor_scroll_falls_back_when_no_anchor_found() {
+        let old_messages = vec![mr(0, 5, 15), mr(1, 15, 25)];
+        let new_messages = vec![mr(0, 5, 30), mr(1, 30, 50)];
+        let old_scroll = 2; // before first message
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 50, 24);
+
+        // max_scroll = 50 - 24 = 26; old_scroll.min(26) = 2.
+        assert_eq!(new_scroll, 2);
+    }
+
+    // Earlier messages grew in the new rendering, shifting msg #2 down.
+    // Viewport was at the start of msg #2; expect it to follow.
+    #[test]
+    fn anchor_scroll_follows_shifted_message() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 20), mr(2, 20, 30)];
+        let new_messages = vec![mr(0, 0, 30), mr(1, 30, 40), mr(2, 40, 50)];
+        let old_scroll = 20; // start of old msg #2 (entry_index 2)
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 50, 24);
+
+        // new msg #2 starts at line 40, offset was 0.
+        // max_scroll = 50 - 24 = 26, so .min(26) pins to 26.
+        assert_eq!(new_scroll, 26);
+    }
+
+    // After toggling off tools, total_lines < viewport_height. Expect scroll 0.
+    #[test]
+    fn anchor_scroll_pins_to_zero_when_content_shorter_than_viewport() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 40)];
+        let new_messages = vec![mr(0, 0, 5), mr(1, 5, 10)];
+        let old_scroll = 15;
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 10, 24);
+
+        // max_scroll = 10.saturating_sub(24) = 0.
+        assert_eq!(new_scroll, 0);
+    }
+
+    // Full -> Hidden: a tool_result entry renders 0 lines in Hidden mode, so
+    // its MessageRange disappears. Viewport was inside it; expect anchor to
+    // the next surviving entry rather than the old absolute line.
+    #[test]
+    fn anchor_scroll_snaps_to_next_entry_when_anchor_disappears() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 60), mr(2, 60, 100)];
+        let new_messages = vec![mr(0, 0, 10), mr(2, 10, 50)];
+        let old_scroll = 30; // inside the vanishing entry_index 1
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 50, 10);
+
+        // max_scroll = 50 - 10 = 40. Next surviving after entry_index 1 is
+        // entry_index 2, starting at line 10. min(40) = 10.
+        assert_eq!(new_scroll, 10);
+    }
+
+    // Anchor entry vanished and there is no later surviving entry. Snap to
+    // the end of the previous surviving entry rather than the old absolute
+    // line — the new content must be long enough that the two strategies
+    // differ, otherwise `max_scroll` clamping hides the bug.
+    #[test]
+    fn anchor_scroll_snaps_to_previous_entry_when_no_following() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 60)];
+        // New rendering has only entry_index 0, but it's long.
+        let new_messages = vec![mr(0, 0, 100)];
+        let old_scroll = 30; // inside the vanishing entry_index 1
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 100, 10);
+
+        // max_scroll = 100 - 10 = 90. Previous surviving is entry_index 0;
+        // its last included line is 99. 99.min(90) = 90.
+        // (Without the fix, fallback would give 30.min(90) = 30.)
+        assert_eq!(new_scroll, 90);
     }
 }
