@@ -110,7 +110,6 @@ pub fn render_conversation(
     let mut lines = Vec::new();
     let mut messages = Vec::new();
     let mut entry_index: usize = 0;
-
     for line_result in reader.lines() {
         let line = line_result?;
         if line.trim().is_empty() {
@@ -1414,7 +1413,39 @@ fn render_tool_body(lines: &mut Vec<RenderedLine>, text: &str, dimmed: bool, sho
     }
 }
 
-/// Render tool result with arrow indicator and markdown
+/// Wrap plain text to fit the available width while preserving existing line breaks.
+fn wrap_plain_text_lines(text: &str, max_width: usize) -> Vec<String> {
+    if max_width == 0 {
+        return text.lines().map(|line| line.to_string()).collect();
+    }
+
+    let mut wrapped = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+
+        let pieces: Vec<String> = textwrap::wrap(line, max_width)
+            .into_iter()
+            .map(|piece| piece.into_owned())
+            .collect();
+
+        if pieces.is_empty() {
+            wrapped.push(String::new());
+        } else {
+            wrapped.extend(pieces);
+        }
+    }
+
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+
+    wrapped
+}
+
+/// Render tool result with arrow indicator using plain-text wrapping.
 fn render_tool_result(
     lines: &mut Vec<RenderedLine>,
     text: &str,
@@ -1422,17 +1453,15 @@ fn render_tool_result(
     timestamp: Option<&str>,
     tool_display: ToolDisplayMode,
 ) {
-    // Render markdown
-    let styled_lines = render_markdown_to_lines(text, content_width);
-
-    let total = styled_lines.len();
+    let wrapped_lines = wrap_plain_text_lines(text, content_width);
+    let total = wrapped_lines.len();
     let limit = if tool_display == ToolDisplayMode::Truncated && total > TRUNCATED_RESULT_LINES {
         TRUNCATED_RESULT_LINES
     } else {
         total
     };
 
-    for (i, styled_line) in styled_lines.iter().take(limit).enumerate() {
+    for (i, line_text) in wrapped_lines.iter().take(limit).enumerate() {
         let mut spans = Vec::new();
 
         // Timestamp prefix (only on first line if provided)
@@ -1475,10 +1504,7 @@ fn render_tool_result(
             },
         ));
 
-        // Content spans from markdown rendering
-        for (text, style) in &styled_line.spans {
-            spans.push((text.clone(), style.clone()));
-        }
+        spans.push((line_text.clone(), LineStyle::default()));
 
         lines.push(RenderedLine { spans });
     }
@@ -1875,6 +1901,18 @@ fn process_command_message(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::LineStyle;
+
+    fn lines_to_text(lines: &[RenderedLine]) -> Vec<String> {
+        lines.iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|(text, _style): &(String, LineStyle)| text.as_str())
+                    .collect::<String>()
+            })
+            .collect()
+    }
 
     /// Helper to render markdown and extract just the content text (without styling)
     fn render_to_text(input: &str, width: usize) -> String {
@@ -1889,6 +1927,26 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn test_render_tool_result_preserves_plain_multiline_text() {
+        let mut lines = Vec::new();
+        let text = "2034 }\n2035     let max_scroll = state.total_lines.saturating_sub(viewport_height);\n2036     state.scroll_offset = old_scroll.min(max_scroll);";
+
+        render_tool_result(&mut lines, text, 120, None, ToolDisplayMode::Full);
+
+        let rendered = lines_to_text(&lines);
+        assert_eq!(rendered.len(), 3, "Expected 3 lines, got:\n{rendered:#?}");
+        assert!(rendered[0].contains("2034 }"), "missing first line: {rendered:#?}");
+        assert!(
+            rendered[1].contains("2035     let max_scroll"),
+            "missing second line: {rendered:#?}"
+        );
+        assert!(
+            rendered[2].contains("2036     state.scroll_offset"),
+            "missing third line: {rendered:#?}"
+        );
     }
 
     #[test]

@@ -218,14 +218,12 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
     }
 
     fn format_tool_result(&mut self, content: Option<&serde_json::Value>) {
-        // Render markdown for string content, otherwise format as JSON
-        let rendered = match content {
-            Some(serde_json::Value::String(s)) => render_markdown(s, self.content_width),
-            _ => format_tool_content(content),
-        };
-
-        // Print with ↳ Result label
-        self.print_markdown("↳ Result", |s| s.custom_color(tool_text()), &rendered);
+        if let Some(text) = extract_tool_result_text(content) {
+            self.print_lines("↳ Result", |s| s.custom_color(tool_text()), &text);
+        } else {
+            let rendered = format_tool_content(content);
+            self.print_markdown("↳ Result", |s| s.custom_color(tool_text()), &rendered);
+        }
     }
 
     fn format_thinking(&mut self, thought: &str) {
@@ -276,7 +274,8 @@ impl<W: Write + ?Sized> OutputFormatter for LedgerFormatter<'_, W> {
             |s| s.custom_color(dim_teal()).dimmed(),
             "<Result>",
         );
-        let content_str = format_tool_content(content);
+        let content_str =
+            extract_tool_result_text(content).unwrap_or_else(|| format_tool_content(content));
         self.print_continuation(&content_str);
     }
 }
@@ -310,7 +309,8 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
 
     fn format_tool_result(&mut self, content: Option<&serde_json::Value>) {
         let _ = writeln!(self.writer, "Tool: <Result>");
-        let content_str = format_tool_content(content);
+        let content_str =
+            extract_tool_result_text(content).unwrap_or_else(|| format_tool_content(content));
         let _ = writeln!(self.writer, "{}", content_str);
     }
 
@@ -357,7 +357,8 @@ impl<'a, W: Write + ?Sized> OutputFormatter for PlainFormatter<'a, W> {
 
     fn format_agent_tool_result(&mut self, _agent_id: &str, content: Option<&serde_json::Value>) {
         let _ = writeln!(self.writer, "    Tool: <Result>");
-        let content_str = format_tool_content(content);
+        let content_str =
+            extract_tool_result_text(content).unwrap_or_else(|| format_tool_content(content));
         for line in content_str.lines() {
             let _ = writeln!(self.writer, "    {}", line);
         }
@@ -377,6 +378,51 @@ fn format_tool_content(content: Option<&serde_json::Value>) -> String {
             }
         }
         None => "<no content>".to_string(),
+    }
+}
+
+/// Extract plain text from tool result content for display.
+///
+/// Strings and arrays of text blocks should render as plain text, while
+/// structured data falls back to pretty-printed JSON.
+fn extract_tool_result_text(content: Option<&serde_json::Value>) -> Option<String> {
+    match content {
+        Some(serde_json::Value::String(s)) => {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        Some(serde_json::Value::Array(items)) => {
+            let parts: Vec<&str> = items
+                .iter()
+                .filter_map(|item| match item {
+                    serde_json::Value::Object(map) => {
+                        let ty = map.get("type").and_then(|value| value.as_str());
+                        if ty.is_none() || ty == Some("text") {
+                            map.get("text").and_then(|value| value.as_str())
+                        } else {
+                            None
+                        }
+                    }
+                    serde_json::Value::String(s) => Some(s.as_str()),
+                    _ => None,
+                })
+                .collect();
+
+            if parts.is_empty() {
+                None
+            } else {
+                let joined = parts.join("\n\n");
+                if joined.trim().is_empty() {
+                    None
+                } else {
+                    Some(joined)
+                }
+            }
+        }
+        _ => None,
     }
 }
 
@@ -963,6 +1009,101 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn wrap_text_preserves_existing_newlines() {
+        let wrapped = wrap_text("line one\nline two\nline three", 80);
+        assert_eq!(wrapped, vec!["line one", "line two", "line three"]);
+    }
+
+    #[test]
+    fn ledger_tool_result_renders_text_blocks_as_plain_lines() {
+        let mut output = Vec::new();
+        let mut formatter = LedgerFormatter::new(&mut output, 80);
+        let content = json!([
+            {"type": "text", "text": "line one\nline two"},
+            {"type": "text", "text": "line three"}
+        ]);
+
+        formatter.format_tool_result(Some(&content));
+
+        let rendered = String::from_utf8(output).expect("formatter should emit utf-8");
+        assert!(rendered.contains("line one"), "missing first line: {rendered}");
+        assert!(rendered.contains("line two"), "missing second line: {rendered}");
+        assert!(rendered.contains("line three"), "missing third line: {rendered}");
+        assert!(
+            !rendered.contains("\"type\""),
+            "tool result should render text content, not raw JSON: {rendered}"
+        );
+    }
+
+    #[test]
+    fn ledger_agent_tool_result_renders_text_blocks_as_plain_lines() {
+        let mut output = Vec::new();
+        let mut formatter = LedgerFormatter::new(&mut output, 80);
+        let content = json!([
+            {"type": "text", "text": "agent line one\nagent line two"},
+            {"type": "text", "text": "agent line three"}
+        ]);
+
+        formatter.format_agent_tool_result("agent123", Some(&content));
+
+        let rendered = String::from_utf8(output).expect("formatter should emit utf-8");
+        assert!(rendered.contains("agent line one"), "missing first line: {rendered}");
+        assert!(rendered.contains("agent line two"), "missing second line: {rendered}");
+        assert!(rendered.contains("agent line three"), "missing third line: {rendered}");
+        assert!(
+            !rendered.contains("\"type\""),
+            "agent tool result should render text content, not raw JSON: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plain_tool_result_renders_text_blocks_as_plain_lines() {
+        let mut output = Vec::new();
+        let mut formatter = PlainFormatter {
+            writer: &mut output,
+        };
+        let content = json!([
+            {"type": "text", "text": "line one\nline two"},
+            {"type": "text", "text": "line three"}
+        ]);
+
+        formatter.format_tool_result(Some(&content));
+
+        let rendered = String::from_utf8(output).expect("formatter should emit utf-8");
+        assert!(rendered.contains("line one"), "missing first line: {rendered}");
+        assert!(rendered.contains("line two"), "missing second line: {rendered}");
+        assert!(rendered.contains("line three"), "missing third line: {rendered}");
+        assert!(
+            !rendered.contains("\"type\""),
+            "plain tool result should render text content, not raw JSON: {rendered}"
+        );
+    }
+
+    #[test]
+    fn plain_agent_tool_result_renders_text_blocks_as_plain_lines() {
+        let mut output = Vec::new();
+        let mut formatter = PlainFormatter {
+            writer: &mut output,
+        };
+        let content = json!([
+            {"type": "text", "text": "agent line one\nagent line two"},
+            {"type": "text", "text": "agent line three"}
+        ]);
+
+        formatter.format_agent_tool_result("agent123", Some(&content));
+
+        let rendered = String::from_utf8(output).expect("formatter should emit utf-8");
+        assert!(rendered.contains("agent line one"), "missing first line: {rendered}");
+        assert!(rendered.contains("agent line two"), "missing second line: {rendered}");
+        assert!(rendered.contains("agent line three"), "missing third line: {rendered}");
+        assert!(
+            !rendered.contains("\"type\""),
+            "plain agent tool result should render text content, not raw JSON: {rendered}"
+        );
+    }
 
     #[test]
     fn process_command_message_skips_local_command_caveat() {
