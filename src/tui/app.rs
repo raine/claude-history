@@ -2011,11 +2011,15 @@ impl App {
 
             if let Ok(rendered) = render_conversation(&state.conversation_path, &options) {
                 let old_scroll = state.scroll_offset;
-                // Preserve focus across re-render by saving the entry_index
-                let old_entry_index = state
+                let nav_active = state.message_nav_active;
+                // Snapshot the focused range (cheap: three `usize`s) before
+                // we overwrite `state.message_ranges`. `old_entry_index` is
+                // derived from it so the two never disagree.
+                let old_focused_range = state
                     .focused_message
                     .and_then(|i| state.message_ranges.get(i))
-                    .map(|m| m.entry_index);
+                    .cloned();
+                let old_entry_index = old_focused_range.as_ref().map(|m| m.entry_index);
 
                 state.total_lines = rendered.lines.len();
                 state.rendered_lines = rendered.lines;
@@ -2023,27 +2027,51 @@ impl App {
                 // the scroll position after the new ranges are installed.
                 let old_messages = std::mem::replace(&mut state.message_ranges, rendered.messages);
 
-                // Restore focused message by entry_index
-                state.focused_message = old_entry_index.and_then(|old_idx| {
-                    state
-                        .message_ranges
-                        .iter()
-                        .position(|m| m.entry_index == old_idx)
-                });
-                // If old focus not found, default to first message
-                if state.focused_message.is_none() && !state.message_ranges.is_empty() {
-                    state.focused_message = Some(0);
-                }
+                // In nav mode with a focused range, try to pin the focused
+                // message's top to the same screen row. If it succeeds it
+                // also gives us the new focused index; on None we fall
+                // through to the free-scroll anchor.
+                let nav_anchor = if nav_active {
+                    old_focused_range.as_ref().and_then(|focused| {
+                        anchor_scroll_nav(
+                            old_scroll,
+                            focused,
+                            &state.message_ranges,
+                            state.total_lines,
+                            viewport_height,
+                        )
+                    })
+                } else {
+                    None
+                };
 
-                // Anchor scroll to the message that contained the top of the
-                // old viewport, preserving offset within that message.
-                state.scroll_offset = anchor_scroll(
-                    old_scroll,
-                    &old_messages,
-                    &state.message_ranges,
-                    state.total_lines,
-                    viewport_height,
-                );
+                if let Some((new_scroll, new_focused_idx)) = nav_anchor {
+                    state.scroll_offset = new_scroll;
+                    state.focused_message = Some(new_focused_idx);
+                } else {
+                    // Restore focused message by entry_index (free-scroll
+                    // path, or nav path when anchor_scroll_nav returned None).
+                    state.focused_message = old_entry_index.and_then(|old_idx| {
+                        state
+                            .message_ranges
+                            .iter()
+                            .position(|m| m.entry_index == old_idx)
+                    });
+                    // If old focus not found, default to first message
+                    if state.focused_message.is_none() && !state.message_ranges.is_empty() {
+                        state.focused_message = Some(0);
+                    }
+
+                    // Anchor scroll to the message that contained the top of the
+                    // old viewport, preserving offset within that message.
+                    state.scroll_offset = anchor_scroll(
+                        old_scroll,
+                        &old_messages,
+                        &state.message_ranges,
+                        state.total_lines,
+                        viewport_height,
+                    );
+                }
 
                 // Recompute search matches for new content
                 if state.search_mode == ViewSearchMode::Active && !state.search_query.is_empty() {
@@ -2485,6 +2513,55 @@ pub fn run_single_file(
     }
 }
 
+/// Re-anchor for message-navigation mode: pin the focused message's top
+/// to the same screen row across the re-render so the `▌` marker does
+/// not visually jump. Falls back to the nearest surviving entry
+/// (previous first, then next) if the focused entry vanished in the
+/// new rendering, still preserving the cursor's screen row.
+///
+/// Returns `None` if no anchor target can be chosen (e.g. the new
+/// rendering has no message ranges at all). Callers should fall
+/// through to `anchor_scroll` in that case.
+fn anchor_scroll_nav(
+    old_scroll: usize,
+    old_focused: &MessageRange,
+    new_messages: &[MessageRange],
+    new_total_lines: usize,
+    viewport_height: usize,
+) -> Option<(usize, usize)> {
+    let max_scroll = new_total_lines.saturating_sub(viewport_height);
+    // Screen row (0-indexed from top of viewport) where the focused
+    // message's top line currently renders. If the focused entry's
+    // top was scrolled above the viewport (`start_line < old_scroll`),
+    // `saturating_sub` yields 0, which deliberately snaps the new
+    // focused entry to the top of the viewport — acceptable degenerate
+    // behavior (see spec §Edge cases).
+    let cursor_row = old_focused.start_line.saturating_sub(old_scroll);
+
+    // Prefer the exact entry, then the previous surviving, then the
+    // next surviving. Mirrors `anchor_scroll`'s fallback order.
+    let new_focused_idx = new_messages
+        .iter()
+        .position(|m| m.entry_index == old_focused.entry_index)
+        .or_else(|| {
+            new_messages
+                .iter()
+                .rposition(|m| m.entry_index < old_focused.entry_index)
+        })
+        .or_else(|| {
+            new_messages
+                .iter()
+                .position(|m| m.entry_index > old_focused.entry_index)
+        })?;
+
+    let new_msg = &new_messages[new_focused_idx];
+    let new_scroll = new_msg
+        .start_line
+        .saturating_sub(cursor_row)
+        .min(max_scroll);
+    Some((new_scroll, new_focused_idx))
+}
+
 /// Given the scroll position and message ranges from before a re-render,
 /// plus the new message ranges and total line count, compute the new
 /// scroll offset so that the message at the top of the viewport stays
@@ -2497,10 +2574,11 @@ pub fn run_single_file(
 /// 2. If the anchor entry exists in the new rendering, preserve the
 ///    offset within that message.
 /// 3. If the anchor entry has disappeared (e.g. a tool_result that
-///    renders zero lines once tool_display is Hidden), snap to the next
+///    renders zero lines once tool_display is Hidden), snap to the end
+///    of the previous surviving entry — this keeps the reader beside
+///    the context they came from rather than scrolling forward.
+/// 4. If there is no previous surviving entry, snap to the next
 ///    surviving entry's start.
-/// 4. If there is no following surviving entry, snap to the end of the
-///    previous surviving entry.
 fn anchor_scroll(
     old_scroll: usize,
     old_messages: &[MessageRange],
@@ -2530,13 +2608,10 @@ fn anchor_scroll(
         }
         // The anchor entry was removed from the render. Snap to the
         // nearest surviving neighbor so reading context is preserved
-        // instead of falling back to absolute line numbers.
-        if let Some(new_msg) = new_messages
-            .iter()
-            .find(|m| m.entry_index > old_msg.entry_index)
-        {
-            return new_msg.start_line.min(max_scroll);
-        }
+        // instead of falling back to absolute line numbers. Prefer the
+        // previous surviving entry — it keeps the user beside the
+        // context they came from instead of scrolling forward past
+        // unread content.
         if let Some(new_msg) = new_messages
             .iter()
             .rev()
@@ -2544,6 +2619,12 @@ fn anchor_scroll(
         {
             let last_line = new_msg.end_line.saturating_sub(1).max(new_msg.start_line);
             return last_line.min(max_scroll);
+        }
+        if let Some(new_msg) = new_messages
+            .iter()
+            .find(|m| m.entry_index > old_msg.entry_index)
+        {
+            return new_msg.start_line.min(max_scroll);
         }
     }
 
@@ -2636,19 +2717,21 @@ mod tests {
     }
 
     // Full -> Hidden: a tool_result entry renders 0 lines in Hidden mode, so
-    // its MessageRange disappears. Viewport was inside it; expect anchor to
-    // the next surviving entry rather than the old absolute line.
+    // its MessageRange disappears. Viewport was inside it. With the
+    // previous-first fallback, we now snap to the last line of the
+    // previous surviving entry (keeps the reader next to prior context)
+    // rather than jumping forward to the next entry.
     #[test]
-    fn anchor_scroll_snaps_to_next_entry_when_anchor_disappears() {
+    fn anchor_scroll_snaps_to_previous_when_both_neighbors_exist() {
         let old_messages = vec![mr(0, 0, 10), mr(1, 10, 60), mr(2, 60, 100)];
         let new_messages = vec![mr(0, 0, 10), mr(2, 10, 50)];
         let old_scroll = 30; // inside the vanishing entry_index 1
 
         let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 50, 10);
 
-        // max_scroll = 50 - 10 = 40. Next surviving after entry_index 1 is
-        // entry_index 2, starting at line 10. min(40) = 10.
-        assert_eq!(new_scroll, 10);
+        // max_scroll = 50 - 10 = 40. Previous surviving is entry_index 0;
+        // its last included line is 9. 9.min(40) = 9.
+        assert_eq!(new_scroll, 9);
     }
 
     // Anchor entry vanished and there is no later surviving entry. Snap to
@@ -2668,5 +2751,109 @@ mod tests {
         // its last included line is 99. 99.min(90) = 90.
         // (Without the fix, fallback would give 30.min(90) = 30.)
         assert_eq!(new_scroll, 90);
+    }
+
+    // Anchor entry vanished and there is no previous surviving entry —
+    // fall through to the next entry. Guards the branch that would
+    // otherwise be dead code after flipping to previous-first.
+    #[test]
+    fn anchor_scroll_uses_next_when_no_previous() {
+        let old_messages = vec![mr(0, 0, 10), mr(1, 10, 20)];
+        // New rendering: entry_index 0 disappeared, only entry_index 1 remains.
+        let new_messages = vec![mr(1, 0, 20)];
+        let old_scroll = 5; // inside the vanishing entry_index 0
+
+        let new_scroll = anchor_scroll(old_scroll, &old_messages, &new_messages, 20, 10);
+
+        // max_scroll = 20 - 10 = 10. No previous (entry_index < 0 is empty),
+        // so fall through to next: entry_index 1 starts at line 0. min(10) = 0.
+        assert_eq!(new_scroll, 0);
+    }
+
+    // Nav mode: focused entry survives. Old focused starts at line 15,
+    // old_scroll is 7 => cursor_row = 8. After re-render the focused
+    // entry has shifted to start at line 10; new_scroll should place it
+    // so that start - new_scroll == 8, i.e. new_scroll = 2.
+    #[test]
+    fn anchor_scroll_nav_preserves_cursor_row_when_entry_survives() {
+        let old_focused = mr(1, 15, 30);
+        let new_messages = vec![mr(0, 0, 10), mr(1, 10, 80), mr(2, 80, 100)];
+        let old_scroll = 7;
+
+        let result = anchor_scroll_nav(old_scroll, &old_focused, &new_messages, 100, 24);
+
+        // cursor_row = 15 - 7 = 8. new_msg.start_line = 10.
+        // new_scroll = 10 - 8 = 2. max_scroll = 100 - 24 = 76. 2.min(76) = 2.
+        // Focused index in new_messages is 1.
+        assert_eq!(result, Some((2, 1)));
+    }
+
+    // Nav mode: focused entry_index 2 is gone from new_messages, but
+    // both a previous surviving entry (entry_index 1) AND a next
+    // surviving entry (entry_index 3) exist. Snapping to the previous
+    // entry (not the next) proves the preference order in nav mode.
+    #[test]
+    fn anchor_scroll_nav_falls_back_to_previous_when_focused_vanishes() {
+        let old_focused = mr(2, 20, 40);
+        // entry_index 2 missing; entries 0, 1, and 3 remain.
+        let new_messages = vec![mr(0, 0, 10), mr(1, 10, 50), mr(3, 50, 60)];
+        let old_scroll = 15; // cursor_row = 20 - 15 = 5
+
+        let result = anchor_scroll_nav(old_scroll, &old_focused, &new_messages, 60, 24);
+
+        // Previous surviving = entry_index 1, start_line 10.
+        // new_scroll = 10 - 5 = 5. max_scroll = 60 - 24 = 36. 5.min(36) = 5.
+        // Focused index of entry 1 in new_messages is 1.
+        // (If the preference were next-first, entry 3 at start 50 would
+        // give new_scroll = 50 - 5 = 45, clamped to 36, with focused
+        // index 2 — so this assertion discriminates the two orderings.)
+        assert_eq!(result, Some((5, 1)));
+    }
+
+    // Nav mode: focused entry_index 0 is gone, no previous possible,
+    // next surviving (entry_index 1) exists.
+    #[test]
+    fn anchor_scroll_nav_falls_back_to_next_when_no_previous() {
+        let old_focused = mr(0, 0, 20);
+        let new_messages = vec![mr(1, 0, 30), mr(2, 30, 60)];
+        let old_scroll = 0; // cursor_row = 0 - 0 = 0
+
+        let result = anchor_scroll_nav(old_scroll, &old_focused, &new_messages, 60, 24);
+
+        // Next surviving = entry_index 1, start_line 0.
+        // new_scroll = 0 - 0 = 0. max_scroll = 60 - 24 = 36. 0.min(36) = 0.
+        // Focused index of entry 1 in new_messages is 0.
+        assert_eq!(result, Some((0, 0)));
+    }
+
+    // Nav mode: new rendering has no messages at all (degenerate, but
+    // possible if the conversation renders empty for some reason).
+    // Caller must fall through to the free-scroll anchor.
+    #[test]
+    fn anchor_scroll_nav_returns_none_when_no_messages() {
+        let old_focused = mr(1, 10, 20);
+        let new_messages: Vec<MessageRange> = vec![];
+        let old_scroll = 12;
+
+        let result = anchor_scroll_nav(old_scroll, &old_focused, &new_messages, 0, 24);
+
+        assert_eq!(result, None);
+    }
+
+    // Nav mode: the focused entry sits so far down in the new
+    // rendering that pinning cursor_row would require scrolling past
+    // max_scroll. Expect clamping to max_scroll.
+    #[test]
+    fn anchor_scroll_nav_clamps_to_max_scroll() {
+        let old_focused = mr(1, 0, 10);
+        // cursor_row = 0 - 0 = 0. new focused start = 100 means
+        // naive new_scroll = 100, but max_scroll is smaller.
+        let new_messages = vec![mr(0, 0, 100), mr(1, 100, 110)];
+        let old_scroll = 0;
+
+        let result = anchor_scroll_nav(old_scroll, &old_focused, &new_messages, 110, 24);
+
+        // max_scroll = 110 - 24 = 86. 100.min(86) = 86.
+        assert_eq!(result, Some((86, 1)));
     }
 }

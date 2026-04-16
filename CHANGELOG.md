@@ -3,6 +3,12 @@
 - Fixed the viewport jumping to unrelated content when cycling tool output
   (t), thinking, or timing display, or on terminal resize — the view now
   stays anchored to the message you were reading
+- In message-navigation mode (J/K), the focus marker ▌ now keeps its
+  screen row when tool output, thinking, or timing display toggles —
+  previously it could jump to a different row after the re-render
+- When a focused message disappears on toggle (e.g. a tool_result
+  collapsing to zero lines), the view now snaps to the previous
+  surviving message instead of scrolling forward past unread content
 
 ## v0.1.51 (2026-03-29)
 
