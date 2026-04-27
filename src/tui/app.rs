@@ -272,6 +272,12 @@ pub struct App {
     workspace_filter: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
+    /// Whether orphan sessions (from history.jsonl) are shown
+    include_orphans: bool,
+    /// Loaded orphan conversations, held separately for toggle
+    orphan_conversations: Vec<Conversation>,
+    /// Whether history.jsonl exists (to show/hide keybind indicator)
+    orphans_available: bool,
     /// Channel to send commands to the background search worker
     search_tx: mpsc::Sender<SearchCommand>,
     /// Channel to receive results from the background search worker
@@ -320,6 +326,9 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            include_orphans: false,
+            orphan_conversations: Vec::new(),
+            orphans_available: false,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -334,8 +343,14 @@ impl App {
         keys: KeyBindings,
         workspace_filter: bool,
         current_project_dir_name: Option<String>,
+        include_orphans: bool,
     ) -> Self {
         let (search_tx, search_rx) = spawn_search_worker();
+
+        // Check if history.jsonl exists (cheap stat, no parsing)
+        let orphans_available = crate::history::get_history_jsonl_path()
+            .map(|p| p.exists())
+            .unwrap_or(false);
 
         Self {
             conversations: Vec::new(),
@@ -355,6 +370,9 @@ impl App {
             keys,
             workspace_filter,
             current_project_dir_name,
+            include_orphans,
+            orphan_conversations: Vec::new(),
+            orphans_available,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -422,6 +440,9 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            include_orphans: false,
+            orphan_conversations: Vec::new(),
+            orphans_available: false,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -475,6 +496,30 @@ impl App {
 
     /// Mark loading as complete: sort, precompute search, and transition to Ready
     pub fn finish_loading(&mut self) {
+        // If --include-orphans was set, load orphans now that we have all session IDs
+        if self.include_orphans && self.orphans_available {
+            let known_ids: std::collections::HashSet<String> = self
+                .conversations
+                .iter()
+                .filter_map(|c| {
+                    c.path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+
+            match crate::history::load_orphan_conversations(&known_ids) {
+                Ok(orphans) => {
+                    self.orphan_conversations = orphans.clone();
+                    self.conversations.extend(orphans);
+                }
+                Err(_) => {
+                    self.include_orphans = false;
+                }
+            }
+        }
+
         // Sort all conversations by timestamp (newest first)
         self.conversations
             .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
@@ -786,6 +831,104 @@ impl App {
         self.current_project_dir_name.is_some()
     }
 
+    pub fn include_orphans(&self) -> bool {
+        self.include_orphans
+    }
+
+    pub fn orphans_available(&self) -> bool {
+        self.orphans_available
+    }
+
+    /// Get the currently selected conversation (if any)
+    fn get_selected_conversation(&self) -> Option<&Conversation> {
+        self.selected
+            .and_then(|sel| self.filtered.get(sel))
+            .map(|&idx| &self.conversations[idx])
+    }
+
+    /// Toggle orphan sessions visibility
+    fn toggle_include_orphans(&mut self) {
+        if !self.orphans_available {
+            return;
+        }
+
+        self.include_orphans = !self.include_orphans;
+
+        if self.include_orphans && self.orphan_conversations.is_empty() {
+            // Lazy-load orphans on first enable
+            let known_ids: std::collections::HashSet<String> = self
+                .conversations
+                .iter()
+                .filter_map(|c| {
+                    c.path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s.to_string())
+                })
+                .collect();
+
+            match crate::history::load_orphan_conversations(&known_ids) {
+                Ok(orphans) => {
+                    self.orphan_conversations = orphans;
+                    if self.orphan_conversations.is_empty() {
+                        self.orphans_available = false;
+                        self.include_orphans = false;
+                        self.status_message = Some((
+                            "No orphan sessions found".to_string(),
+                            std::time::Instant::now(),
+                        ));
+                        return;
+                    }
+                }
+                Err(_) => {
+                    self.include_orphans = false;
+                    self.status_message = Some((
+                        "Failed to load history.jsonl".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        if self.include_orphans {
+            // Merge orphans into conversations
+            self.conversations
+                .extend(self.orphan_conversations.clone());
+
+            // Re-sort and reindex
+            self.conversations
+                .sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+            for (idx, conv) in self.conversations.iter_mut().enumerate() {
+                conv.index = idx;
+            }
+
+            // Rebuild search index
+            self.searchable = search::precompute_search_text(&self.conversations);
+            let _ = self.search_tx.send(SearchCommand::UpdateData {
+                conversations: Arc::new(self.conversations.clone()),
+                searchable: Arc::new(self.searchable.clone()),
+            });
+        } else {
+            // Remove orphans from conversations
+            self.conversations.retain(|c| !c.is_orphan());
+
+            // Reindex
+            for (idx, conv) in self.conversations.iter_mut().enumerate() {
+                conv.index = idx;
+            }
+
+            // Rebuild search index
+            self.searchable = search::precompute_search_text(&self.conversations);
+            let _ = self.search_tx.send(SearchCommand::UpdateData {
+                conversations: Arc::new(self.conversations.clone()),
+                searchable: Arc::new(self.searchable.clone()),
+            });
+        }
+
+        self.update_filter();
+    }
+
     /// Toggle between global and workspace-only view
     fn toggle_workspace_filter(&mut self) {
         // Only toggle if we have a workspace context
@@ -1081,6 +1224,23 @@ impl App {
             None => return,
         };
 
+        // Orphan sessions: export from in-memory text
+        if path.as_os_str().is_empty() {
+            let text = self.get_orphan_export_text();
+            let result = if to_clipboard {
+                match crate::tui::export::copy_to_system_clipboard(&text) {
+                    Ok(()) => crate::tui::export::ExportResult {
+                        message: "Copied to clipboard".to_string(),
+                    },
+                    Err(e) => crate::tui::export::ExportResult { message: e },
+                }
+            } else {
+                crate::tui::export::export_text_to_file(&text, format)
+            };
+            self.status_message = Some((result.message, std::time::Instant::now()));
+            return;
+        }
+
         let result = if to_clipboard {
             crate::tui::export::export_to_clipboard(&path, format, options)
         } else {
@@ -1088,6 +1248,26 @@ impl App {
         };
 
         self.status_message = Some((result.message, std::time::Instant::now()));
+    }
+
+    /// Get export text for orphan session from the selected conversation's full_text
+    fn get_orphan_export_text(&self) -> String {
+        let conv_idx = self
+            .selected
+            .and_then(|sel| self.filtered.get(sel))
+            .copied();
+        if let Some(idx) = conv_idx {
+            let conv = &self.conversations[idx];
+            // Format each prompt with "You: " prefix
+            conv.full_text
+                .split('\n')
+                .filter(|s| !s.is_empty())
+                .map(|prompt| format!("You: {}", prompt))
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        } else {
+            String::new()
+        }
     }
 
     /// Handle a key event, returns Some(Action) if the app should exit
@@ -1132,11 +1312,25 @@ impl App {
         // Check configurable keybindings before the match block
         if self.keys.delete.matches(code, modifiers) {
             if !self.single_file_mode {
-                self.dialog_mode = DialogMode::ConfirmDelete;
+                if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                    self.status_message = Some((
+                        "Cannot delete: no session file exists".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                } else {
+                    self.dialog_mode = DialogMode::ConfirmDelete;
+                }
             }
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
+            if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                self.status_message = Some((
+                    "Cannot resume: session data no longer exists".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return None;
+            }
             return if self.single_file_mode {
                 None
             } else {
@@ -1144,6 +1338,13 @@ impl App {
             };
         }
         if self.keys.fork.matches(code, modifiers) {
+            if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                self.status_message = Some((
+                    "Cannot fork: session data no longer exists".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return None;
+            }
             return if self.single_file_mode {
                 None
             } else {
@@ -1310,10 +1511,12 @@ impl App {
             // Show path
             KeyCode::Char('p') => {
                 if let AppMode::View(ref state) = self.app_mode {
-                    self.status_message = Some((
-                        state.conversation_path.display().to_string(),
-                        std::time::Instant::now(),
-                    ));
+                    let msg = if state.conversation_path.as_os_str().is_empty() {
+                        "Orphan session: no file path".to_string()
+                    } else {
+                        state.conversation_path.display().to_string()
+                    };
+                    self.status_message = Some((msg, std::time::Instant::now()));
                 }
                 None
             }
@@ -1506,6 +1709,11 @@ impl App {
                 KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
                     Some(Action::Quit)
                 }
+                // Ctrl+G: toggle orphan sessions
+                KeyCode::Char('g') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.toggle_include_orphans();
+                    None
+                }
                 // Ctrl+Left: move cursor one word left
                 KeyCode::Left if modifiers.contains(KeyModifiers::CONTROL) => {
                     self.cursor_word_left();
@@ -1640,16 +1848,40 @@ impl App {
 
         // Check configurable keybindings before the match block
         if self.keys.delete.matches(code, modifiers) {
-            if self.get_selected_path().is_some() {
+            if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                self.status_message = Some((
+                    "Cannot delete: no session file exists".to_string(),
+                    std::time::Instant::now(),
+                ));
+            } else if self.get_selected_path().is_some() {
                 self.dialog_mode = DialogMode::ConfirmDelete;
             }
             return None;
         }
         if self.keys.resume.matches(code, modifiers) {
+            if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                self.status_message = Some((
+                    "Cannot resume: session data no longer exists".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return None;
+            }
             return self.get_selected_path().map(Action::Resume);
         }
         if self.keys.fork.matches(code, modifiers) {
+            if self.get_selected_conversation().is_some_and(|c| c.is_orphan()) {
+                self.status_message = Some((
+                    "Cannot fork: session data no longer exists".to_string(),
+                    std::time::Instant::now(),
+                ));
+                return None;
+            }
             return self.get_selected_path().map(Action::ForkResume);
+        }
+        // Ctrl+G: toggle orphan sessions
+        if code == KeyCode::Char('g') && modifiers.contains(KeyModifiers::CONTROL) {
+            self.toggle_include_orphans();
+            return None;
         }
 
         // Normal handling when ready
@@ -1841,8 +2073,38 @@ impl App {
         let Some(&conv_idx) = self.filtered.get(selected) else {
             return;
         };
-        let path = self.conversations[conv_idx].path.clone();
+        let conv = &self.conversations[conv_idx];
 
+        if conv.is_orphan() {
+            // Build view in-memory from prompt text for orphan sessions
+            let (lines, messages) = Self::render_orphan_prompts(conv, content_width);
+            let total_lines = lines.len();
+            let first_msg = if messages.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
+            self.app_mode = AppMode::View(ViewState {
+                conversation_path: PathBuf::new(),
+                scroll_offset: 0,
+                rendered_lines: lines,
+                total_lines,
+                tool_display: self.tool_display,
+                show_thinking: self.show_thinking,
+                show_timing: self.show_timing,
+                content_width,
+                search_mode: ViewSearchMode::Off,
+                search_query: String::new(),
+                search_matches: Vec::new(),
+                current_match: 0,
+                message_ranges: messages,
+                focused_message: first_msg,
+                message_nav_active: false,
+            });
+            return;
+        }
+
+        let path = conv.path.clone();
         let options = RenderOptions {
             tool_display: self.tool_display,
             show_thinking: self.show_thinking,
@@ -1881,6 +2143,92 @@ impl App {
                     Some((format!("Failed to open: {}", e), std::time::Instant::now()));
             }
         }
+    }
+
+    /// Render orphan session prompts as in-memory RenderedLines
+    fn render_orphan_prompts(
+        conv: &Conversation,
+        content_width: usize,
+    ) -> (Vec<RenderedLine>, Vec<crate::tui::viewer::MessageRange>) {
+        use crate::tui::viewer::MessageRange;
+
+        let th = crate::tui::theme::detect_theme();
+        let name_width = 9; // matches viewer::NAME_WIDTH
+
+        let mut lines = Vec::new();
+        let mut messages = Vec::new();
+
+        // Header line: "Orphan session — prompts only (no conversation data)"
+        lines.push(RenderedLine {
+            spans: vec![
+                (
+                    " ".repeat(name_width),
+                    LineStyle::default(),
+                ),
+                (
+                    " Orphan session — prompts only (no conversation data)".to_string(),
+                    LineStyle {
+                        fg: Some((140, 140, 140)),
+                        dimmed: true,
+                        ..Default::default()
+                    },
+                ),
+            ],
+        });
+        lines.push(RenderedLine { spans: vec![] });
+
+        for prompt_text in conv.full_text.split('\n') {
+            if prompt_text.is_empty() {
+                continue;
+            }
+
+            let start_line = lines.len();
+
+            // Wrap text to content_width
+            let wrapped = textwrap::wrap(prompt_text, content_width);
+
+            for (i, line_text) in wrapped.iter().enumerate() {
+                let mut spans = Vec::new();
+
+                // Name label on first line, padding on continuation
+                let name_text = if i == 0 {
+                    format!("{:>width$}", "You", width = name_width)
+                } else {
+                    " ".repeat(name_width)
+                };
+
+                spans.push((
+                    name_text,
+                    LineStyle {
+                        fg: Some(th.text_primary),
+                        bold: true,
+                        ..Default::default()
+                    },
+                ));
+
+                spans.push((
+                    format!(" {}", line_text),
+                    LineStyle {
+                        fg: Some(th.text_primary),
+                        ..Default::default()
+                    },
+                ));
+
+                lines.push(RenderedLine { spans });
+            }
+
+            let end_line = lines.len();
+            messages.push(MessageRange {
+                entry_index: messages.len(),
+                start_line,
+                end_line,
+            });
+
+            // Blank line between prompts
+            lines.push(RenderedLine { spans: vec![] });
+        }
+
+        (lines, messages)
     }
 
     /// Exit view mode and return to list
@@ -1996,6 +2344,23 @@ impl App {
         use crate::tui::viewer::{RenderOptions, render_conversation};
 
         if let AppMode::View(ref mut state) = self.app_mode {
+            // Orphan sessions: re-render from in-memory data
+            if state.conversation_path.as_os_str().is_empty() {
+                let conv_idx = self
+                    .selected
+                    .and_then(|sel| self.filtered.get(sel))
+                    .copied();
+                if let Some(idx) = conv_idx {
+                    let conv = &self.conversations[idx];
+                    let (lines, messages) =
+                        Self::render_orphan_prompts(conv, state.content_width);
+                    state.total_lines = lines.len();
+                    state.rendered_lines = lines;
+                    state.message_ranges = messages;
+                }
+                return;
+            }
+
             let options = RenderOptions {
                 tool_display: state.tool_display,
                 show_thinking: state.show_thinking,
@@ -2269,6 +2634,48 @@ impl App {
             return;
         };
 
+        // Orphan sessions: copy prompt text directly from rendered lines
+        if path.as_os_str().is_empty() {
+            if let AppMode::View(ref state) = self.app_mode
+                && let Some(idx) = state.focused_message
+                && let Some(msg) = state.message_ranges.get(idx)
+            {
+                // Extract text from the rendered lines for this message
+                let text: String = state.rendered_lines[msg.start_line..msg.end_line]
+                    .iter()
+                    .map(|line| {
+                        line.spans
+                            .iter()
+                            .map(|(text, _)| text.as_str())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    .trim()
+                    .to_string();
+
+                if text.is_empty() {
+                    self.status_message = Some((
+                        "No text content in this message".to_string(),
+                        std::time::Instant::now(),
+                    ));
+                } else {
+                    match crate::tui::export::copy_to_system_clipboard(&text) {
+                        Ok(()) => {
+                            self.status_message = Some((
+                                "Message copied to clipboard".to_string(),
+                                std::time::Instant::now(),
+                            ));
+                        }
+                        Err(e) => {
+                            self.status_message = Some((e, std::time::Instant::now()));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+
         let options = if let AppMode::View(ref state) = self.app_mode {
             crate::tui::export::ExportOptions {
                 show_tools: state.tool_display.is_visible(),
@@ -2453,6 +2860,7 @@ pub fn run_with_loader(
     keys: KeyBindings,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
+    include_orphans: bool,
 ) -> Result<(Action, Vec<Conversation>)> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -2469,6 +2877,7 @@ pub fn run_with_loader(
         keys,
         workspace_filter,
         current_project_dir_name,
+        include_orphans,
     );
 
     loop {

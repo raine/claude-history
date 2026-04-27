@@ -9,12 +9,16 @@ use super::path::{
     decode_project_dir_name, decode_project_dir_name_to_path, format_short_name_from_path,
 };
 use super::{Conversation, LoaderMessage, Project};
+use crate::claude::HistoryEntry;
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::{AppError, Result};
+use crate::tui::search::normalize_for_search;
+use chrono::{DateTime, Local, TimeZone};
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::read_dir;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -484,6 +488,100 @@ pub fn load_conversations(
         debug_level,
         &format!("Total conversations loaded: {}", conversations.len()),
     );
+
+    Ok(conversations)
+}
+
+/// Load orphan conversations from history.jsonl.
+///
+/// Reads the global prompt log, groups entries by sessionId,
+/// excludes sessions that already exist in the provided set of known IDs,
+/// and returns thin Conversation objects for the orphans.
+pub fn load_orphan_conversations(known_session_ids: &HashSet<String>) -> Result<Vec<Conversation>> {
+    let history_path = super::get_history_jsonl_path()?;
+    if !history_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let file = std::fs::File::open(&history_path)?;
+    let reader = std::io::BufReader::new(file);
+
+    // Group entries by sessionId
+    let mut sessions: HashMap<String, Vec<HistoryEntry>> = HashMap::new();
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        match serde_json::from_str::<HistoryEntry>(trimmed) {
+            Ok(entry) => {
+                if !known_session_ids.contains(&entry.session_id) {
+                    sessions
+                        .entry(entry.session_id.clone())
+                        .or_default()
+                        .push(entry);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let mut conversations: Vec<Conversation> = sessions
+        .into_values()
+        .map(|mut entries| {
+            // Sort by timestamp ascending
+            entries.sort_by_key(|e| e.timestamp);
+
+            let last_ts = entries.last().map(|e| e.timestamp).unwrap_or(0);
+            let timestamp: DateTime<Local> = Local
+                .timestamp_millis_opt(last_ts as i64)
+                .single()
+                .unwrap_or_else(Local::now);
+
+            let project_path_str = &entries[0].project;
+            let project_path = PathBuf::from(project_path_str);
+            let project_name = project_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| format_short_name_from_path(&project_path));
+
+            let prompts: Vec<&str> = entries.iter().map(|e| e.display.as_str()).collect();
+            let all_prompts = prompts.join("\n");
+            let search_text_lower = normalize_for_search(&format!(
+                "{} {}",
+                project_name, all_prompts
+            ));
+
+            Conversation {
+                path: PathBuf::new(), // empty = orphan sentinel
+                index: 0,
+                timestamp,
+                preview: all_prompts.clone(),
+                preview_first: all_prompts.clone(),
+                preview_last: all_prompts.clone(),
+                full_text: all_prompts,
+                search_text_lower,
+                project_name: Some(project_name),
+                project_path: Some(project_path),
+                cwd: None,
+                message_count: entries.len(),
+                parse_errors: vec![],
+                summary: None,
+                custom_title: None,
+                model: None,
+                total_tokens: 0,
+                duration_minutes: None,
+            }
+        })
+        .collect();
+
+    // Sort by timestamp (newest first)
+    conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
     Ok(conversations)
 }

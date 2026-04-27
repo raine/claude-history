@@ -31,6 +31,7 @@ pub struct DisplayConfig {
     pub show_thinking: Option<bool>,
     pub plain: Option<bool>,
     pub pager: Option<bool>,
+    pub include_orphans: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Default)]

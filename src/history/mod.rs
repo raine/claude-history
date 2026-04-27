@@ -24,7 +24,7 @@ use std::time::SystemTime;
 // Re-export public API
 pub use loader::{
     delete_session_by_uuid, find_jsonl_by_uuid, load_all_conversations,
-    load_all_conversations_streaming,
+    load_all_conversations_streaming, load_orphan_conversations,
 };
 pub use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
@@ -74,6 +74,13 @@ pub struct Conversation {
     pub duration_minutes: Option<u64>,
 }
 
+impl Conversation {
+    /// Returns true if this is an orphan session (from history.jsonl, no conversation file exists)
+    pub fn is_orphan(&self) -> bool {
+        self.path.as_os_str().is_empty()
+    }
+}
+
 pub struct Project {
     pub name: String,         // directory name (encoded)
     pub display_name: String, // heuristic decoded path
@@ -92,11 +99,10 @@ pub enum LoaderMessage {
     Done,
 }
 
-/// Get the root Claude projects directory (~/.claude/projects)
-/// Respects CLAUDE_CONFIG_DIR env variable if set.
-pub fn get_claude_projects_root() -> Result<PathBuf> {
-    let claude_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        PathBuf::from(config_dir)
+/// Get the Claude config directory (~/.claude or $CLAUDE_CONFIG_DIR)
+fn get_claude_config_dir() -> Result<PathBuf> {
+    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(PathBuf::from(config_dir))
     } else {
         let home_dir = home::home_dir().ok_or_else(|| {
             AppError::Io(std::io::Error::new(
@@ -104,10 +110,20 @@ pub fn get_claude_projects_root() -> Result<PathBuf> {
                 "Could not determine home directory",
             ))
         })?;
-        home_dir.join(".claude")
-    };
+        Ok(home_dir.join(".claude"))
+    }
+}
 
-    Ok(claude_dir.join("projects"))
+/// Get the root Claude projects directory (~/.claude/projects)
+/// Respects CLAUDE_CONFIG_DIR env variable if set.
+pub fn get_claude_projects_root() -> Result<PathBuf> {
+    Ok(get_claude_config_dir()?.join("projects"))
+}
+
+/// Get the path to history.jsonl (~/.claude/history.jsonl)
+/// Respects CLAUDE_CONFIG_DIR env variable if set.
+pub(crate) fn get_history_jsonl_path() -> Result<PathBuf> {
+    Ok(get_claude_config_dir()?.join("history.jsonl"))
 }
 
 /// Get the Claude projects directory for the current working directory

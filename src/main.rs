@@ -297,6 +297,13 @@ fn run() -> Result<()> {
     // Always use streaming global loader for all conversations
     let rx = history::load_all_conversations_streaming(show_last, args.debug);
 
+    let include_orphans = resolve_bool_setting(
+        args.include_orphans,
+        false,
+        display_config.include_orphans,
+        false,
+    );
+
     let (conversations, selected_path) = match tui::run_with_loader(
         rx,
         tool_display,
@@ -304,6 +311,7 @@ fn run() -> Result<()> {
         keys,
         workspace_filter,
         current_project_dir_name,
+        include_orphans,
     )? {
         (tui::Action::Select(path), convs) => (convs, path),
         (tui::Action::Resume(path), convs) => {
