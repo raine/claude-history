@@ -26,6 +26,7 @@ pub enum Action {
     Delete(PathBuf),
     Resume(PathBuf),
     ForkResume(PathBuf),
+    ResumeHere(PathBuf),
     Quit,
 }
 
@@ -270,6 +271,8 @@ pub struct App {
     keys: KeyBindings,
     /// Whether workspace filter is active (only show current project's conversations)
     workspace_filter: bool,
+    /// Whether to hide automated single-turn sessions
+    hide_auto: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
     /// Channel to send commands to the background search worker
@@ -319,6 +322,7 @@ impl App {
             single_file_mode: false,
             keys,
             workspace_filter: false,
+            hide_auto: false,
             current_project_dir_name: None,
             search_tx,
             search_rx,
@@ -333,6 +337,7 @@ impl App {
         show_thinking: bool,
         keys: KeyBindings,
         workspace_filter: bool,
+        hide_auto: bool,
         current_project_dir_name: Option<String>,
     ) -> Self {
         let (search_tx, search_rx) = spawn_search_worker();
@@ -354,6 +359,7 @@ impl App {
             single_file_mode: false,
             keys,
             workspace_filter,
+            hide_auto,
             current_project_dir_name,
             search_tx,
             search_rx,
@@ -421,6 +427,7 @@ impl App {
             single_file_mode: true,
             keys,
             workspace_filter: false,
+            hide_auto: false,
             current_project_dir_name: None,
             search_tx,
             search_rx,
@@ -457,6 +464,9 @@ impl App {
                         )
                     })
             {
+                continue;
+            }
+            if self.hide_auto && self.conversations[idx].user_turn_count <= 1 {
                 continue;
             }
             self.filtered.push(idx);
@@ -496,7 +506,7 @@ impl App {
         self.loading_state = LoadingState::Ready;
 
         // Apply filter (handles both query and workspace filter)
-        if self.query.is_empty() && !self.workspace_filter {
+        if self.query.is_empty() && !self.workspace_filter && !self.hide_auto {
             // No query and no workspace filter - show all
             self.filtered = (0..self.conversations.len()).collect();
             self.selected = if self.filtered.is_empty() {
@@ -556,6 +566,11 @@ impl App {
                         )
                     })
             });
+        }
+
+        // Apply hide_auto filter if active
+        if self.hide_auto {
+            filtered.retain(|&idx| self.conversations[idx].user_turn_count > 1);
         }
 
         self.filtered = filtered;
@@ -782,6 +797,10 @@ impl App {
         self.workspace_filter
     }
 
+    pub fn hide_auto(&self) -> bool {
+        self.hide_auto
+    }
+
     pub fn has_project_context(&self) -> bool {
         self.current_project_dir_name.is_some()
     }
@@ -793,6 +812,12 @@ impl App {
             self.workspace_filter = !self.workspace_filter;
             self.update_filter();
         }
+    }
+
+    /// Toggle hiding of automated single-turn sessions
+    fn toggle_hide_auto(&mut self) {
+        self.hide_auto = !self.hide_auto;
+        self.update_filter();
     }
 
     /// Move cursor left by one character
@@ -1148,6 +1173,13 @@ impl App {
                 None
             } else {
                 self.get_selected_path().map(Action::ForkResume)
+            };
+        }
+        if self.keys.resume_here.matches(code, modifiers) {
+            return if self.single_file_mode {
+                None
+            } else {
+                self.get_selected_path().map(Action::ResumeHere)
             };
         }
 
@@ -1597,6 +1629,11 @@ impl App {
                     self.toggle_workspace_filter();
                     None
                 }
+                // BackTab: toggle hide automated sessions
+                KeyCode::BackTab => {
+                    self.toggle_hide_auto();
+                    None
+                }
                 // Open help overlay
                 KeyCode::Char('?') => {
                     self.dialog_mode = DialogMode::Help;
@@ -1650,6 +1687,9 @@ impl App {
         }
         if self.keys.fork.matches(code, modifiers) {
             return self.get_selected_path().map(Action::ForkResume);
+        }
+        if self.keys.resume_here.matches(code, modifiers) {
+            return self.get_selected_path().map(Action::ResumeHere);
         }
 
         // Normal handling when ready
@@ -1779,6 +1819,11 @@ impl App {
             // Tab: toggle workspace/global filter
             KeyCode::Tab => {
                 self.toggle_workspace_filter();
+                None
+            }
+            // BackTab: toggle hide automated sessions
+            KeyCode::BackTab => {
+                self.toggle_hide_auto();
                 None
             }
             // Open help overlay
@@ -2452,6 +2497,7 @@ pub fn run_with_loader(
     show_thinking: bool,
     keys: KeyBindings,
     workspace_filter: bool,
+    hide_auto: bool,
     current_project_dir_name: Option<String>,
 ) -> Result<(Action, Vec<Conversation>)> {
     // Set up panic hook to restore terminal
@@ -2468,6 +2514,7 @@ pub fn run_with_loader(
         show_thinking,
         keys,
         workspace_filter,
+        hide_auto,
         current_project_dir_name,
     );
 

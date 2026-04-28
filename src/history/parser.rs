@@ -67,6 +67,7 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
     let mut skip_next_assistant = false;
     let mut extracted_cwd: Option<PathBuf> = None;
     let mut message_count: usize = 0;
+    let mut user_turn_count: usize = 0;
     let mut parse_errors: Vec<ParseError> = Vec::new();
     let mut extracted_summary: Option<String> = None;
     let mut extracted_custom_title: Option<String> = None;
@@ -163,6 +164,7 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
                             skip_next_assistant = true;
                         } else if !effective_preview.is_empty() {
                             message_count += 1;
+                            user_turn_count += 1;
                             preview_parts.push(effective_preview);
                             seen_real_user_message = true;
                         }
@@ -367,6 +369,7 @@ pub(crate) fn process_conversation_reader<R: BufRead>(
         project_path: None,
         cwd: extracted_cwd,
         message_count,
+        user_turn_count,
         parse_errors,
         summary: extracted_summary,
         custom_title: extracted_custom_title,

@@ -99,6 +99,10 @@ pub struct Args {
     #[arg(long, help = "Fork the session when resuming", requires = "resume")]
     pub fork_session: bool,
 
+    /// Resume in the current directory instead of the original project directory
+    #[arg(long, help = "Resume in the current working directory (keep workspace here)")]
+    pub here: bool,
+
     /// Print the selected conversation's file path and exit
     #[arg(long, short = 'p', help = "Print the selected conversation file path")]
     pub show_path: bool,
@@ -132,6 +136,14 @@ pub struct Args {
         help = "Show only conversations from the current workspace directory"
     )]
     pub local: bool,
+
+    /// Hide automated/single-turn sessions (e.g. from claude -p, subagent spawns)
+    #[arg(
+        long,
+        short = 'H',
+        help = "Hide automated sessions (single user turn, typically from claude -p)"
+    )]
+    pub hide_auto: bool,
 
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]

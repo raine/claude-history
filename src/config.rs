@@ -44,6 +44,7 @@ pub struct ResumeConfig {
 pub struct KeysConfig {
     pub resume: Option<KeyBinding>,
     pub fork: Option<KeyBinding>,
+    pub resume_here: Option<KeyBinding>,
     pub delete: Option<KeyBinding>,
 }
 
@@ -133,6 +134,7 @@ fn parse_key_binding(s: &str) -> std::result::Result<KeyBinding, String> {
 pub struct KeyBindings {
     pub resume: KeyBinding,
     pub fork: KeyBinding,
+    pub resume_here: KeyBinding,
     pub delete: KeyBinding,
 }
 
@@ -145,6 +147,10 @@ impl Default for KeyBindings {
             },
             fork: KeyBinding {
                 code: KeyCode::Char('f'),
+                modifiers: KeyModifiers::CONTROL,
+            },
+            resume_here: KeyBinding {
+                code: KeyCode::Char('h'),
                 modifiers: KeyModifiers::CONTROL,
             },
             delete: KeyBinding {
@@ -163,6 +169,7 @@ impl KeyBindings {
             Some(cfg) => Self {
                 resume: cfg.resume.unwrap_or(defaults.resume),
                 fork: cfg.fork.unwrap_or(defaults.fork),
+                resume_here: cfg.resume_here.unwrap_or(defaults.resume_here),
                 delete: cfg.delete.unwrap_or(defaults.delete),
             },
         }

@@ -60,6 +60,9 @@ pub struct Conversation {
     pub cwd: Option<PathBuf>,
     /// Number of user and assistant messages in the conversation
     pub message_count: usize,
+    /// Number of interactive user turns (excluding warmup and metadata).
+    /// Automated sessions (claude -p) typically have exactly 1 user turn.
+    pub user_turn_count: usize,
     /// Parse errors encountered while processing this conversation file
     pub parse_errors: Vec<ParseError>,
     /// Summary/title of the conversation (from type=summary JSONL entry)

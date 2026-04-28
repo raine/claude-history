@@ -440,6 +440,7 @@ mod tests {
             project_path: None,
             cwd: None,
             message_count: 1,
+            user_turn_count: 1,
             parse_errors: vec![],
             summary: summary.map(|s| s.to_string()),
             custom_title: title.map(|s| s.to_string()),

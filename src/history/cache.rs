@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct ProjectCache {
@@ -39,6 +39,7 @@ pub struct CacheEntry {
     pub search_text_lower: String,
     pub cwd: Option<PathBuf>,
     pub message_count: usize,
+    pub user_turn_count: usize,
     pub parse_errors: Vec<CachedParseError>,
     pub summary: Option<String>,
     pub custom_title: Option<String>,
@@ -137,6 +138,7 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         search_text_lower: String::new(),
         cwd: None,
         message_count: 0,
+        user_turn_count: 0,
         parse_errors: Vec::new(),
         summary: None,
         custom_title: None,
@@ -165,6 +167,7 @@ pub fn entry_from_conversation(
         search_text_lower: conv.search_text_lower.clone(),
         cwd: conv.cwd.clone(),
         message_count: conv.message_count,
+        user_turn_count: conv.user_turn_count,
         parse_errors: conv
             .parse_errors
             .iter()
@@ -209,6 +212,7 @@ pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: boo
         project_path: None,
         cwd: entry.cwd.clone(),
         message_count: entry.message_count,
+        user_turn_count: entry.user_turn_count,
         parse_errors: entry
             .parse_errors
             .iter()
@@ -257,6 +261,7 @@ mod tests {
             project_path: Some(PathBuf::from("/test/project")),
             cwd: Some(PathBuf::from("/test/cwd")),
             message_count: 2,
+            user_turn_count: 1,
             parse_errors: vec![],
             summary: Some("Test summary".to_string()),
             custom_title: Some("My Session".to_string()),
