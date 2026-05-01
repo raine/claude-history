@@ -84,6 +84,17 @@ fn run() -> Result<()> {
     // Resolve keybindings
     let keys = config::KeyBindings::from_config(config.keys);
 
+    // Materialize excluded project names into a hash set for O(1) lookup
+    let excluded_projects: std::sync::Arc<std::collections::HashSet<String>> = std::sync::Arc::new(
+        config
+            .filter
+            .as_ref()
+            .and_then(|f| f.exclude_projects.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .collect(),
+    );
+
     // Use positive names internally for clarity
     let show_tools = resolve_bool_setting(
         args.show_tools,
@@ -304,6 +315,7 @@ fn run() -> Result<()> {
         keys,
         workspace_filter,
         current_project_dir_name,
+        excluded_projects,
     )? {
         (tui::Action::Select(path), convs) => (convs, path),
         (tui::Action::Resume(path), convs) => {
