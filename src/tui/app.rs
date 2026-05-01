@@ -2298,21 +2298,17 @@ where
                 .is_none_or(|name| !project_is_excluded(name, excluded_projects))
         })
         .filter(|&idx| {
-            if !workspace_filter {
+            let Some(project_dir_name) = current_project_dir_name.filter(|_| workspace_filter)
+            else {
                 return true;
-            }
-            current_project_dir_name.is_some_and(|project_dir_name| {
-                conversations[idx]
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_some_and(|name| {
-                        crate::history::path::is_same_project(
-                            &name.to_string_lossy(),
-                            project_dir_name,
-                        )
-                    })
-            })
+            };
+            conversations[idx]
+                .path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|name| {
+                    crate::history::path::is_same_project(&name.to_string_lossy(), project_dir_name)
+                })
         })
         .collect()
 }
@@ -2621,6 +2617,27 @@ mod tests {
         .unwrap();
 
         app.receive_search_results();
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+    }
+
+    #[test]
+    fn workspace_filter_without_project_context_keeps_rows() {
+        let mut app = App::new_loading(
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            true,
+            None,
+            vec![],
+        );
+
+        app.append_conversations(vec![conversation(
+            Some("Visible"),
+            "-tmp-visible",
+            "22222222-2222-4222-8222-222222222222",
+            "needle",
+        )]);
+
         assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
     }
 
