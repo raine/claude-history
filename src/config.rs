@@ -17,6 +17,47 @@ pub struct ConfigFile {
     pub display: Option<DisplayConfig>,
     pub resume: Option<ResumeConfig>,
     pub keys: Option<KeysConfig>,
+    pub tui: Option<TuiConfig>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct TuiConfig {
+    #[serde(default)]
+    pub exclude_projects: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_without_tui_defaults_to_no_excluded_projects() {
+        let config: ConfigFile = toml::from_str("").unwrap();
+        assert!(config.tui.unwrap_or_default().exclude_projects.is_empty());
+    }
+
+    #[test]
+    fn empty_tui_table_defaults_to_no_excluded_projects() {
+        let config: ConfigFile = toml::from_str("[tui]\n").unwrap();
+        assert!(config.tui.unwrap_or_default().exclude_projects.is_empty());
+    }
+
+    #[test]
+    fn tui_exclude_projects_preserves_exact_strings() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+[tui]
+exclude_projects = ["Hidden", "hidden", " spaced "]
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.tui.unwrap().exclude_projects,
+            vec!["Hidden", "hidden", " spaced "]
+        );
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]

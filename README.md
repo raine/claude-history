@@ -419,6 +419,10 @@ pager = true
 # Supports ctrl+<key> and alt+<key> combinations
 # fork = "alt+f"
 
+[tui]
+# Hide exact project names from TUI browse/search lists
+# exclude_projects = ["project-name", "repo/worktree"]
+
 EOF
 ```
 
@@ -453,6 +457,13 @@ combinations like `"ctrl+r"` or `"alt+f"`. Only single-character keys with
 - `resume` (string): Resume conversation (default: `"ctrl+r"`)
 - `fork` (string): Fork and resume conversation (default: `"ctrl+f"`)
 - `delete` (string): Delete conversation (default: `"ctrl+x"`)
+
+#### TUI options
+
+- `exclude_projects` (array of strings): Exact, case-sensitive project names to
+  hide from TUI browse/search lists. Match against the project name shown in the
+  leftmost column. Excluded conversations remain on disk and can still be opened
+  by pasting their full UUID or by passing the JSONL file path directly.
 
 ### Overriding config
 

@@ -14,6 +14,7 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
+use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -139,12 +140,7 @@ enum SearchCommand {
         searchable: Arc<Vec<SearchableConversation>>,
     },
     /// Run a search query
-    Search {
-        query: String,
-        generation: u64,
-        workspace_filter: bool,
-        project_dir_name: Option<String>,
-    },
+    Search { query: String, generation: u64 },
 }
 
 /// Result returned from the background search worker
@@ -177,8 +173,6 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchR
                     SearchCommand::Search {
                         mut query,
                         mut generation,
-                        mut workspace_filter,
-                        mut project_dir_name,
                     } => {
                         // Drain pending commands: apply all data updates,
                         // keep only the latest search request
@@ -194,34 +188,15 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchR
                                 SearchCommand::Search {
                                     query: q,
                                     generation: g,
-                                    workspace_filter: wf,
-                                    project_dir_name: pdn,
                                 } => {
                                     query = q;
                                     generation = g;
-                                    workspace_filter = wf;
-                                    project_dir_name = pdn;
                                 }
                             }
                         }
 
                         let now = chrono::Local::now();
-                        let mut filtered = search::search(&conversations, &searchable, &query, now);
-
-                        if workspace_filter && let Some(ref dir_name) = project_dir_name {
-                            filtered.retain(|&idx| {
-                                conversations[idx]
-                                    .path
-                                    .parent()
-                                    .and_then(|p| p.file_name())
-                                    .is_some_and(|name| {
-                                        crate::history::path::is_same_project(
-                                            &name.to_string_lossy(),
-                                            dir_name,
-                                        )
-                                    })
-                            });
-                        }
+                        let filtered = search::search(&conversations, &searchable, &query, now);
 
                         let _ = res_tx.send(SearchResponse {
                             filtered,
@@ -272,6 +247,8 @@ pub struct App {
     workspace_filter: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
+    /// Exact project names hidden from list-mode display
+    excluded_projects: HashSet<String>,
     /// Channel to send commands to the background search worker
     search_tx: mpsc::Sender<SearchCommand>,
     /// Channel to receive results from the background search worker
@@ -290,9 +267,17 @@ impl App {
         tool_display: ToolDisplayMode,
         show_thinking: bool,
         keys: KeyBindings,
+        exclude_projects: Vec<String>,
     ) -> Self {
         let searchable = search::precompute_search_text(&conversations);
-        let filtered: Vec<usize> = (0..conversations.len()).collect();
+        let excluded_projects = exclude_projects.into_iter().collect();
+        let filtered = filter_conversation_indices(
+            0..conversations.len(),
+            &conversations,
+            &excluded_projects,
+            false,
+            None,
+        );
         let selected = if filtered.is_empty() { None } else { Some(0) };
         let (search_tx, search_rx) = spawn_search_worker();
 
@@ -320,6 +305,7 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            excluded_projects,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -334,8 +320,10 @@ impl App {
         keys: KeyBindings,
         workspace_filter: bool,
         current_project_dir_name: Option<String>,
+        exclude_projects: Vec<String>,
     ) -> Self {
         let (search_tx, search_rx) = spawn_search_worker();
+        let excluded_projects = exclude_projects.into_iter().collect();
 
         Self {
             conversations: Vec::new(),
@@ -355,6 +343,7 @@ impl App {
             keys,
             workspace_filter,
             current_project_dir_name,
+            excluded_projects,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -422,6 +411,7 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
+            excluded_projects: HashSet::new(),
             search_tx,
             search_rx,
             search_generation: 0,
@@ -440,27 +430,8 @@ impl App {
         self.conversations.extend(new_convs);
         let end_idx = self.conversations.len();
 
-        // Update filtered so items appear in the list during loading
-        // (Items shown in arrival order initially, will be re-sorted in finish_loading)
-        // Apply workspace filter during loading too
-        for idx in start_idx..end_idx {
-            if self.workspace_filter
-                && let Some(ref project_dir_name) = self.current_project_dir_name
-                && self.conversations[idx]
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_none_or(|name| {
-                        !crate::history::path::is_same_project(
-                            &name.to_string_lossy(),
-                            project_dir_name,
-                        )
-                    })
-            {
-                continue;
-            }
-            self.filtered.push(idx);
-        }
+        let new_filtered = self.filter_indices(start_idx..end_idx);
+        self.filtered.extend(new_filtered);
 
         // Select first item if nothing selected yet
         if self.selected.is_none() && !self.filtered.is_empty() {
@@ -495,19 +466,11 @@ impl App {
 
         self.loading_state = LoadingState::Ready;
 
-        // Apply filter (handles both query and workspace filter)
-        if self.query.is_empty() && !self.workspace_filter {
-            // No query and no workspace filter - show all
-            self.filtered = (0..self.conversations.len()).collect();
-            self.selected = if self.filtered.is_empty() {
-                None
-            } else {
-                Some(0)
-            };
-        } else {
-            // Has query or workspace filter active - apply full filter
-            self.update_filter();
-        }
+        self.search_generation += 1;
+        self.search_in_flight = false;
+
+        // Apply filter (handles query, exclusions, and workspace filter)
+        self.update_filter();
     }
 
     /// Consume the app and return its conversations
@@ -521,6 +484,28 @@ impl App {
 
     pub fn is_loading(&self) -> bool {
         matches!(self.loading_state, LoadingState::Loading { .. })
+    }
+
+    fn filter_indices<I>(&self, indices: I) -> Vec<usize>
+    where
+        I: IntoIterator<Item = usize>,
+    {
+        filter_conversation_indices(
+            indices,
+            &self.conversations,
+            &self.excluded_projects,
+            self.workspace_filter,
+            self.current_project_dir_name.as_deref(),
+        )
+    }
+
+    fn apply_filtered(&mut self, filtered: Vec<usize>) {
+        self.filtered = filtered;
+        self.selected = if self.filtered.is_empty() {
+            None
+        } else {
+            Some(0)
+        };
     }
 
     /// Update filtered results based on current query
@@ -537,33 +522,9 @@ impl App {
         }
 
         let now = Local::now();
-        let mut filtered = search::search(&self.conversations, &self.searchable, &self.query, now);
-
-        // Apply workspace filter if active
-        // Matches conversations from the same project, including workmux worktrees
-        if self.workspace_filter
-            && let Some(ref project_dir_name) = self.current_project_dir_name
-        {
-            filtered.retain(|&idx| {
-                self.conversations[idx]
-                    .path
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .is_some_and(|name| {
-                        crate::history::path::is_same_project(
-                            &name.to_string_lossy(),
-                            project_dir_name,
-                        )
-                    })
-            });
-        }
-
-        self.filtered = filtered;
-        self.selected = if self.filtered.is_empty() {
-            None
-        } else {
-            Some(0)
-        };
+        let filtered = search::search(&self.conversations, &self.searchable, &self.query, now);
+        let filtered = self.filter_indices(filtered);
+        self.apply_filtered(filtered);
     }
 
     /// Dispatch a search to the background worker.
@@ -573,6 +534,8 @@ impl App {
 
         // UUID search: synchronous (rare, needs to modify conversations)
         if search::is_uuid(&query) {
+            self.search_generation += 1;
+            self.search_in_flight = false;
             if let Some(idx) = self.find_or_load_uuid(&query) {
                 self.filtered = vec![idx];
                 self.selected = Some(0);
@@ -585,8 +548,6 @@ impl App {
         let _ = self.search_tx.send(SearchCommand::Search {
             query,
             generation: self.search_generation,
-            workspace_filter: self.workspace_filter,
-            project_dir_name: self.current_project_dir_name.clone(),
         });
     }
 
@@ -597,12 +558,8 @@ impl App {
         while let Ok(response) = self.search_rx.try_recv() {
             // Only apply the result if it matches the latest generation
             if response.generation == self.search_generation {
-                self.filtered = response.filtered;
-                self.selected = if self.filtered.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
+                let filtered = self.filter_indices(response.filtered);
+                self.apply_filtered(filtered);
                 self.search_in_flight = false;
                 applied = true;
             }
@@ -791,6 +748,8 @@ impl App {
         // Only toggle if we have a workspace context
         if self.current_project_dir_name.is_some() {
             self.workspace_filter = !self.workspace_filter;
+            self.search_generation += 1;
+            self.search_in_flight = false;
             self.update_filter();
         }
     }
@@ -2313,6 +2272,44 @@ impl App {
     }
 }
 
+fn filter_conversation_indices<I>(
+    indices: I,
+    conversations: &[Conversation],
+    excluded_projects: &HashSet<String>,
+    workspace_filter: bool,
+    current_project_dir_name: Option<&str>,
+) -> Vec<usize>
+where
+    I: IntoIterator<Item = usize>,
+{
+    indices
+        .into_iter()
+        .filter(|&idx| {
+            conversations[idx]
+                .project_name
+                .as_deref()
+                .is_none_or(|name| !excluded_projects.contains(name))
+        })
+        .filter(|&idx| {
+            if !workspace_filter {
+                return true;
+            }
+            current_project_dir_name.is_some_and(|project_dir_name| {
+                conversations[idx]
+                    .path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|name| {
+                        crate::history::path::is_same_project(
+                            &name.to_string_lossy(),
+                            project_dir_name,
+                        )
+                    })
+            })
+        })
+        .collect()
+}
+
 /// Stable reference point for preserving scroll position across re-renders.
 /// `entry_index` survives re-renders (it's the JSONL line index), and
 /// `relative_row` is the message's screen row (`start_line - scroll_offset`)
@@ -2365,6 +2362,313 @@ fn find_message_idx_or_prev(ranges: &[MessageRange], entry_index: usize) -> Opti
         Ok(idx) => Some(idx),
         Err(0) => Some(0),
         Err(idx) => Some(idx - 1),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::Conversation;
+    use chrono::{Local, TimeZone};
+    use std::path::PathBuf;
+
+    fn conversation(
+        project: Option<&str>,
+        project_dir: &str,
+        uuid: &str,
+        text: &str,
+    ) -> Conversation {
+        Conversation {
+            path: PathBuf::from(format!("/tmp/claude-projects/{project_dir}/{uuid}.jsonl")),
+            index: 0,
+            timestamp: Local.with_ymd_and_hms(2026, 5, 1, 12, 0, 0).unwrap(),
+            preview: text.to_string(),
+            preview_first: text.to_string(),
+            preview_last: text.to_string(),
+            full_text: text.to_string(),
+            search_text_lower: search::normalize_for_search(text),
+            project_name: project.map(str::to_string),
+            project_path: None,
+            cwd: None,
+            message_count: 1,
+            parse_errors: Vec::new(),
+            summary: None,
+            custom_title: None,
+            model: None,
+            total_tokens: 0,
+            duration_minutes: None,
+        }
+    }
+
+    fn app(conversations: Vec<Conversation>, excluded: Vec<&str>) -> App {
+        App::new(
+            conversations,
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            excluded.into_iter().map(str::to_string).collect(),
+        )
+    }
+
+    fn filtered_projects(app: &App) -> Vec<Option<&str>> {
+        app.filtered()
+            .iter()
+            .map(|&idx| app.conversations()[idx].project_name.as_deref())
+            .collect()
+    }
+
+    #[test]
+    fn exclude_projects_filters_browse_list_exactly() {
+        let app = app(
+            vec![
+                conversation(
+                    Some("Hidden"),
+                    "-tmp-hidden",
+                    "11111111-1111-4111-8111-111111111111",
+                    "needle",
+                ),
+                conversation(
+                    Some("Visible"),
+                    "-tmp-visible",
+                    "22222222-2222-4222-8222-222222222222",
+                    "needle",
+                ),
+                conversation(
+                    Some("hidden"),
+                    "-tmp-lower",
+                    "33333333-3333-4333-8333-333333333333",
+                    "needle",
+                ),
+            ],
+            vec!["Hidden"],
+        );
+
+        assert_eq!(
+            filtered_projects(&app),
+            vec![Some("Visible"), Some("hidden")]
+        );
+    }
+
+    #[test]
+    fn exclude_projects_filters_search_results() {
+        let mut app = app(
+            vec![
+                conversation(
+                    Some("Hidden"),
+                    "-tmp-hidden",
+                    "11111111-1111-4111-8111-111111111111",
+                    "shared needle",
+                ),
+                conversation(
+                    Some("Visible"),
+                    "-tmp-visible",
+                    "22222222-2222-4222-8222-222222222222",
+                    "shared needle",
+                ),
+            ],
+            vec!["Hidden"],
+        );
+
+        app.query = "needle".to_string();
+        app.update_filter();
+
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+    }
+
+    #[test]
+    fn exclude_projects_apply_before_workspace_filter() {
+        let mut app = app(
+            vec![
+                conversation(
+                    Some("Hidden"),
+                    "-tmp-project--worktrees-a",
+                    "11111111-1111-4111-8111-111111111111",
+                    "needle",
+                ),
+                conversation(
+                    Some("Visible"),
+                    "-tmp-project",
+                    "22222222-2222-4222-8222-222222222222",
+                    "needle",
+                ),
+            ],
+            vec!["Hidden"],
+        );
+        app.workspace_filter = true;
+        app.current_project_dir_name = Some("-tmp-project".to_string());
+        app.update_filter();
+
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+    }
+
+    #[test]
+    fn uuid_lookup_bypasses_excluded_projects() {
+        let uuid = "11111111-1111-4111-8111-111111111111";
+        let mut app = app(
+            vec![conversation(Some("Hidden"), "-tmp-hidden", uuid, "needle")],
+            vec!["Hidden"],
+        );
+        assert!(app.filtered().is_empty());
+
+        app.query = uuid.to_string();
+        app.update_filter();
+        assert_eq!(filtered_projects(&app), vec![Some("Hidden")]);
+
+        app.query.clear();
+        app.update_filter();
+        assert!(app.filtered().is_empty());
+        assert_eq!(app.conversations().len(), 1);
+        assert_eq!(app.searchable.len(), 1);
+    }
+
+    #[test]
+    fn uuid_dispatch_invalidates_stale_search_response() {
+        let uuid = "11111111-1111-4111-8111-111111111111";
+        let mut app = app(
+            vec![
+                conversation(Some("Hidden"), "-tmp-hidden", uuid, "needle"),
+                conversation(
+                    Some("Visible"),
+                    "-tmp-visible",
+                    "22222222-2222-4222-8222-222222222222",
+                    "needle",
+                ),
+            ],
+            vec!["Hidden"],
+        );
+
+        let (tx, rx) = mpsc::channel();
+        app.search_rx = rx;
+        app.search_generation = 1;
+        app.search_in_flight = true;
+
+        app.query = uuid.to_string();
+        app.dispatch_search();
+        assert_eq!(filtered_projects(&app), vec![Some("Hidden")]);
+
+        tx.send(SearchResponse {
+            filtered: vec![1],
+            generation: 1,
+        })
+        .unwrap();
+
+        app.receive_search_results();
+        assert_eq!(filtered_projects(&app), vec![Some("Hidden")]);
+    }
+
+    #[test]
+    fn finish_loading_invalidates_stale_loading_search_response() {
+        let mut app = App::new_loading(
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            false,
+            None,
+            vec![],
+        );
+
+        let (tx, rx) = mpsc::channel();
+        app.search_rx = rx;
+        app.search_generation = 1;
+        app.search_in_flight = true;
+
+        app.append_conversations(vec![conversation(
+            Some("Visible"),
+            "-tmp-visible",
+            "22222222-2222-4222-8222-222222222222",
+            "needle",
+        )]);
+        app.finish_loading();
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+
+        tx.send(SearchResponse {
+            filtered: vec![],
+            generation: 1,
+        })
+        .unwrap();
+
+        app.receive_search_results();
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+    }
+
+    #[test]
+    fn exclude_projects_filters_incremental_loading() {
+        let mut app = App::new_loading(
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            false,
+            None,
+            vec!["Hidden".to_string()],
+        );
+
+        app.append_conversations(vec![
+            conversation(
+                Some("Hidden"),
+                "-tmp-hidden",
+                "11111111-1111-4111-8111-111111111111",
+                "needle",
+            ),
+            conversation(
+                Some("Visible"),
+                "-tmp-visible",
+                "22222222-2222-4222-8222-222222222222",
+                "needle",
+            ),
+        ]);
+
+        assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+    }
+
+    #[test]
+    fn empty_exclusions_preserve_browse_results() {
+        let app = app(
+            vec![
+                conversation(
+                    Some("Hidden"),
+                    "-tmp-hidden",
+                    "11111111-1111-4111-8111-111111111111",
+                    "needle",
+                ),
+                conversation(
+                    None,
+                    "-tmp-none",
+                    "22222222-2222-4222-8222-222222222222",
+                    "needle",
+                ),
+            ],
+            vec![],
+        );
+
+        assert_eq!(filtered_projects(&app), vec![Some("Hidden"), None]);
+    }
+
+    #[test]
+    fn project_without_name_is_never_excluded() {
+        let app = app(
+            vec![conversation(
+                None,
+                "-tmp-none",
+                "11111111-1111-4111-8111-111111111111",
+                "needle",
+            )],
+            vec![""],
+        );
+
+        assert_eq!(filtered_projects(&app), vec![None]);
+    }
+
+    #[test]
+    fn single_file_mode_has_no_project_exclusions() {
+        let app = App::new_single_file(
+            PathBuf::from("/tmp/hidden.jsonl"),
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+        );
+
+        assert!(app.excluded_projects.is_empty());
+        assert!(app.is_single_file_mode());
     }
 }
 
@@ -2453,6 +2757,7 @@ pub fn run_with_loader(
     keys: KeyBindings,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
+    exclude_projects: Vec<String>,
 ) -> Result<(Action, Vec<Conversation>)> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -2469,6 +2774,7 @@ pub fn run_with_loader(
         keys,
         workspace_filter,
         current_project_dir_name,
+        exclude_projects,
     );
 
     loop {

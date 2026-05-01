@@ -76,6 +76,8 @@ fn run() -> Result<()> {
     let resume_config = config.resume.unwrap_or_default();
     let default_args = resume_config.default_args.as_deref().unwrap_or(&[]);
 
+    let exclude_projects = config.tui.unwrap_or_default().exclude_projects;
+
     // Disable colors globally when --no-color is passed
     if args.no_color {
         colored::control::set_override(false);
@@ -304,6 +306,7 @@ fn run() -> Result<()> {
         keys,
         workspace_filter,
         current_project_dir_name,
+        exclude_projects,
     )? {
         (tui::Action::Select(path), convs) => (convs, path),
         (tui::Action::Resume(path), convs) => {
