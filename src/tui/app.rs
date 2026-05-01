@@ -2272,6 +2272,13 @@ impl App {
     }
 }
 
+fn project_is_excluded(project_name: &str, excluded_projects: &HashSet<String>) -> bool {
+    excluded_projects.contains(project_name)
+        || project_name
+            .split_once('/')
+            .is_some_and(|(parent, _)| excluded_projects.contains(parent))
+}
+
 fn filter_conversation_indices<I>(
     indices: I,
     conversations: &[Conversation],
@@ -2288,7 +2295,7 @@ where
             conversations[idx]
                 .project_name
                 .as_deref()
-                .is_none_or(|name| !excluded_projects.contains(name))
+                .is_none_or(|name| !project_is_excluded(name, excluded_projects))
         })
         .filter(|&idx| {
             if !workspace_filter {
@@ -2446,6 +2453,32 @@ mod tests {
         assert_eq!(
             filtered_projects(&app),
             vec![Some("Visible"), Some("hidden")]
+        );
+    }
+
+    #[test]
+    fn exclude_projects_filters_worktrees_by_parent_project() {
+        let app = app(
+            vec![
+                conversation(
+                    Some("claude-history/exclude-projects"),
+                    "-tmp-claude-history--worktrees-exclude-projects",
+                    "11111111-1111-4111-8111-111111111111",
+                    "needle",
+                ),
+                conversation(
+                    Some("other/exclude-projects"),
+                    "-tmp-other--worktrees-exclude-projects",
+                    "22222222-2222-4222-8222-222222222222",
+                    "needle",
+                ),
+            ],
+            vec!["claude-history"],
+        );
+
+        assert_eq!(
+            filtered_projects(&app),
+            vec![Some("other/exclude-projects")]
         );
     }
 

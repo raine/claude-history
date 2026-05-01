@@ -460,10 +460,12 @@ combinations like `"ctrl+r"` or `"alt+f"`. Only single-character keys with
 
 #### TUI options
 
-- `exclude_projects` (array of strings): Exact, case-sensitive project names to
-  hide from TUI browse/search lists. Match against the project name shown in the
-  leftmost column. Excluded conversations remain on disk and can still be opened
-  by pasting their full UUID or by passing the JSONL file path directly.
+- `exclude_projects` (array of strings): Case-sensitive project names to hide
+  from TUI browse/search lists. Match against the project name shown in the
+  leftmost column; a parent entry like `"repo"` also hides displayed worktree
+  rows like `"repo/feature"`. Excluded conversations remain on disk and can
+  still be opened by pasting their full UUID or by passing the JSONL file path
+  directly.
 
 ### Overriding config
 
