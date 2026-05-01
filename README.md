@@ -419,12 +419,6 @@ pager = true
 # Supports ctrl+<key> and alt+<key> combinations
 # fork = "alt+f"
 
-[filter]
-# Hide named projects from the TUI conversation list.
-# Match is exact and case-sensitive against the project name shown
-# on the left of each TUI row.
-# exclude_projects = ["observer-sessions", "scratch"]
-
 EOF
 ```
 
@@ -460,22 +454,6 @@ combinations like `"ctrl+r"` or `"alt+f"`. Only single-character keys with
 - `fork` (string): Fork and resume conversation (default: `"ctrl+f"`)
 - `delete` (string): Delete conversation (default: `"ctrl+x"`)
 
-#### Filter options
-
-Set under a `[filter]` section in `config.toml`.
-
-- `exclude_projects` (array of strings): Project names to hide from the TUI
-  conversation list. Match is exact and case-sensitive against the project
-  name shown in the leftmost column of each row. Excluded sessions are still
-  reachable via UUID lookup (paste a UUID into the search box) and direct
-  file input (`claude-history /path/to/file.jsonl`); only the browse list
-  hides them.
-
-  ```toml
-  [filter]
-  exclude_projects = ["observer-sessions"]
-  ```
-
 ### Overriding config
 
 Each display option has opposing flags for explicit override:
@@ -503,8 +481,6 @@ only see transcripts that are likely to matter for your recent work.
 - Skips the "Warmup / I'm Claude Code…" exchanges that are sometimes injected
   without user interaction
 - Skips conversations that only contain the `/clear` terminal command
-- Hides any project listed under `exclude_projects` in your config (see
-  [Configuration](#configuration))
 
 ## Development
 

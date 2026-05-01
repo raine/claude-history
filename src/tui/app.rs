@@ -14,25 +14,11 @@ use crossterm::event::{
 };
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
-use std::collections::HashSet;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
-
-/// Returns true if the conversation's project_name is in the excluded set.
-/// Match is exact and case-sensitive. A conversation with no project_name is
-/// never excluded (defensive: keep showing data we can't classify).
-pub(crate) fn is_project_excluded(conv: &Conversation, excluded: &HashSet<String>) -> bool {
-    if excluded.is_empty() {
-        return false;
-    }
-    match conv.project_name.as_deref() {
-        Some(name) => excluded.contains(name),
-        None => false,
-    }
-}
 
 /// Result of running the TUI
 pub enum Action {
@@ -151,7 +137,6 @@ enum SearchCommand {
     UpdateData {
         conversations: Arc<Vec<Conversation>>,
         searchable: Arc<Vec<SearchableConversation>>,
-        excluded_projects: Arc<HashSet<String>>,
     },
     /// Run a search query
     Search {
@@ -179,18 +164,15 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchR
         .spawn(move || {
             let mut conversations: Arc<Vec<Conversation>> = Arc::new(Vec::new());
             let mut searchable: Arc<Vec<SearchableConversation>> = Arc::new(Vec::new());
-            let mut excluded_projects: Arc<HashSet<String>> = Arc::new(HashSet::new());
 
             while let Ok(cmd) = cmd_rx.recv() {
                 match cmd {
                     SearchCommand::UpdateData {
                         conversations: c,
                         searchable: s,
-                        excluded_projects: e,
                     } => {
                         conversations = c;
                         searchable = s;
-                        excluded_projects = e;
                     }
                     SearchCommand::Search {
                         mut query,
@@ -205,11 +187,9 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchR
                                 SearchCommand::UpdateData {
                                     conversations: c,
                                     searchable: s,
-                                    excluded_projects: e,
                                 } => {
                                     conversations = c;
                                     searchable = s;
-                                    excluded_projects = e;
                                 }
                                 SearchCommand::Search {
                                     query: q,
@@ -227,12 +207,6 @@ fn spawn_search_worker() -> (mpsc::Sender<SearchCommand>, mpsc::Receiver<SearchR
 
                         let now = chrono::Local::now();
                         let mut filtered = search::search(&conversations, &searchable, &query, now);
-
-                        if !excluded_projects.is_empty() {
-                            filtered.retain(|&idx| {
-                                !is_project_excluded(&conversations[idx], &excluded_projects)
-                            });
-                        }
 
                         if workspace_filter && let Some(ref dir_name) = project_dir_name {
                             filtered.retain(|&idx| {
@@ -298,8 +272,6 @@ pub struct App {
     workspace_filter: bool,
     /// The encoded project directory name for the current workspace (for filtering)
     current_project_dir_name: Option<String>,
-    /// Project names to exclude from the TUI list. Loaded once from config at startup.
-    excluded_projects: Arc<HashSet<String>>,
     /// Channel to send commands to the background search worker
     search_tx: mpsc::Sender<SearchCommand>,
     /// Channel to receive results from the background search worker
@@ -328,7 +300,6 @@ impl App {
         let _ = search_tx.send(SearchCommand::UpdateData {
             conversations: Arc::new(conversations.clone()),
             searchable: Arc::new(searchable.clone()),
-            excluded_projects: Arc::new(HashSet::new()),
         });
 
         Self {
@@ -349,7 +320,6 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
-            excluded_projects: Arc::new(HashSet::new()),
             search_tx,
             search_rx,
             search_generation: 0,
@@ -364,7 +334,6 @@ impl App {
         keys: KeyBindings,
         workspace_filter: bool,
         current_project_dir_name: Option<String>,
-        excluded_projects: Arc<HashSet<String>>,
     ) -> Self {
         let (search_tx, search_rx) = spawn_search_worker();
 
@@ -386,7 +355,6 @@ impl App {
             keys,
             workspace_filter,
             current_project_dir_name,
-            excluded_projects,
             search_tx,
             search_rx,
             search_generation: 0,
@@ -454,7 +422,6 @@ impl App {
             keys,
             workspace_filter: false,
             current_project_dir_name: None,
-            excluded_projects: Arc::new(HashSet::new()),
             search_tx,
             search_rx,
             search_generation: 0,
@@ -477,11 +444,6 @@ impl App {
         // (Items shown in arrival order initially, will be re-sorted in finish_loading)
         // Apply workspace filter during loading too
         for idx in start_idx..end_idx {
-            // Hide projects listed in config exclude_projects
-            if is_project_excluded(&self.conversations[idx], &self.excluded_projects) {
-                continue;
-            }
-            // Apply workspace filter during loading too
             if self.workspace_filter
                 && let Some(ref project_dir_name) = self.current_project_dir_name
                 && self.conversations[idx]
@@ -529,14 +491,13 @@ impl App {
         let _ = self.search_tx.send(SearchCommand::UpdateData {
             conversations: Arc::new(self.conversations.clone()),
             searchable: Arc::new(self.searchable.clone()),
-            excluded_projects: Arc::clone(&self.excluded_projects),
         });
 
         self.loading_state = LoadingState::Ready;
 
-        // Apply filter (handles query, workspace filter, and exclusions)
-        if self.query.is_empty() && !self.workspace_filter && self.excluded_projects.is_empty() {
-            // No query, no workspace filter, no exclusions - show all
+        // Apply filter (handles both query and workspace filter)
+        if self.query.is_empty() && !self.workspace_filter {
+            // No query and no workspace filter - show all
             self.filtered = (0..self.conversations.len()).collect();
             self.selected = if self.filtered.is_empty() {
                 None
@@ -544,7 +505,7 @@ impl App {
                 Some(0)
             };
         } else {
-            // Has query, workspace filter, or exclusions active - apply full filter
+            // Has query or workspace filter active - apply full filter
             self.update_filter();
         }
     }
@@ -577,14 +538,6 @@ impl App {
 
         let now = Local::now();
         let mut filtered = search::search(&self.conversations, &self.searchable, &self.query, now);
-
-        // Hide projects listed in config exclude_projects.
-        // `&self.excluded_projects` deref-coerces from `&Arc<HashSet<_>>` to `&HashSet<_>`.
-        if !self.excluded_projects.is_empty() {
-            filtered.retain(|&idx| {
-                !is_project_excluded(&self.conversations[idx], &self.excluded_projects)
-            });
-        }
 
         // Apply workspace filter if active
         // Matches conversations from the same project, including workmux worktrees
@@ -697,7 +650,6 @@ impl App {
         let _ = self.search_tx.send(SearchCommand::UpdateData {
             conversations: Arc::new(self.conversations.clone()),
             searchable: Arc::new(self.searchable.clone()),
-            excluded_projects: Arc::clone(&self.excluded_projects),
         });
 
         Some(idx)
@@ -1025,7 +977,6 @@ impl App {
         let _ = self.search_tx.send(SearchCommand::UpdateData {
             conversations: Arc::new(self.conversations.clone()),
             searchable: Arc::new(self.searchable.clone()),
-            excluded_projects: Arc::clone(&self.excluded_projects),
         });
         self.search_generation += 1;
     }
@@ -2502,7 +2453,6 @@ pub fn run_with_loader(
     keys: KeyBindings,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
-    excluded_projects: Arc<HashSet<String>>,
 ) -> Result<(Action, Vec<Conversation>)> {
     // Set up panic hook to restore terminal
     let original_hook = std::panic::take_hook();
@@ -2519,7 +2469,6 @@ pub fn run_with_loader(
         keys,
         workspace_filter,
         current_project_dir_name,
-        excluded_projects,
     );
 
     loop {
@@ -2706,76 +2655,5 @@ pub fn run_single_file(
                 return Ok(());
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::history::Conversation;
-    use chrono::Local;
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-
-    fn make_conv(project_name: Option<&str>) -> Conversation {
-        Conversation {
-            path: PathBuf::from("/tmp/x.jsonl"),
-            index: 0,
-            timestamp: Local::now(),
-            preview: String::new(),
-            preview_first: String::new(),
-            preview_last: String::new(),
-            full_text: String::new(),
-            search_text_lower: String::new(),
-            project_name: project_name.map(String::from),
-            project_path: None,
-            cwd: None,
-            message_count: 0,
-            parse_errors: Vec::new(),
-            summary: None,
-            custom_title: None,
-            model: None,
-            total_tokens: 0,
-            duration_minutes: None,
-        }
-    }
-
-    #[test]
-    fn excluded_project_name_matches() {
-        let mut set = HashSet::new();
-        set.insert("observer-sessions".to_string());
-        let conv = make_conv(Some("observer-sessions"));
-        assert!(is_project_excluded(&conv, &set));
-    }
-
-    #[test]
-    fn non_matching_project_name_not_excluded() {
-        let mut set = HashSet::new();
-        set.insert("observer-sessions".to_string());
-        let conv = make_conv(Some("services"));
-        assert!(!is_project_excluded(&conv, &set));
-    }
-
-    #[test]
-    fn empty_set_excludes_nothing() {
-        let set = HashSet::new();
-        let conv = make_conv(Some("observer-sessions"));
-        assert!(!is_project_excluded(&conv, &set));
-    }
-
-    #[test]
-    fn missing_project_name_not_excluded() {
-        let mut set = HashSet::new();
-        set.insert("observer-sessions".to_string());
-        let conv = make_conv(None);
-        assert!(!is_project_excluded(&conv, &set));
-    }
-
-    #[test]
-    fn match_is_case_sensitive() {
-        let mut set = HashSet::new();
-        set.insert("observer-sessions".to_string());
-        let conv = make_conv(Some("Observer-Sessions"));
-        assert!(!is_project_excluded(&conv, &set));
     }
 }

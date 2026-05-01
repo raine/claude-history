@@ -17,15 +17,6 @@ pub struct ConfigFile {
     pub display: Option<DisplayConfig>,
     pub resume: Option<ResumeConfig>,
     pub keys: Option<KeysConfig>,
-    pub filter: Option<FilterConfig>,
-}
-
-#[derive(Deserialize, Debug, Default)]
-#[serde(deny_unknown_fields)]
-pub struct FilterConfig {
-    /// Project names (as shown in the TUI list) to hide from the conversation list.
-    /// Match is exact and case-sensitive against `Conversation::project_name`.
-    pub exclude_projects: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -218,50 +209,4 @@ pub fn load_config() -> Result<ConfigFile> {
             e
         ))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_exclude_projects_from_filter_section() {
-        let toml_text = r#"
-[filter]
-exclude_projects = ["observer-sessions", "scratch"]
-"#;
-        let cfg: ConfigFile = toml::from_str(toml_text).expect("toml parse failed");
-        let filter = cfg.filter.expect("filter section should be present");
-        assert_eq!(
-            filter.exclude_projects,
-            Some(vec!["observer-sessions".to_string(), "scratch".to_string()])
-        );
-    }
-
-    #[test]
-    fn filter_section_can_appear_after_other_sections() {
-        // TOML key/value pairs belong to whatever section header preceded them,
-        // so a top-level `exclude_projects` placed after `[keys]` would be
-        // parsed as `keys.exclude_projects`. Nesting under `[filter]` makes
-        // section ordering irrelevant.
-        let toml_text = r#"
-[keys]
-fork = "alt+f"
-
-[filter]
-exclude_projects = ["observer-sessions"]
-"#;
-        let cfg: ConfigFile = toml::from_str(toml_text).expect("toml parse failed");
-        let filter = cfg.filter.expect("filter section should be present");
-        assert_eq!(
-            filter.exclude_projects,
-            Some(vec!["observer-sessions".to_string()])
-        );
-    }
-
-    #[test]
-    fn filter_defaults_to_none() {
-        let cfg: ConfigFile = toml::from_str("").expect("toml parse failed");
-        assert!(cfg.filter.is_none());
-    }
 }
