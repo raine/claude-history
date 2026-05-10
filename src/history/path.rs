@@ -100,8 +100,27 @@ pub fn encoded_project_root(encoded: &str) -> &str {
 /// Two names are considered part of the same project if they share the same
 /// encoded project root (i.e., stripping any workmux `--worktrees-<branch>`
 /// suffix yields the same string).
+///
+/// On Windows the comparison is case-insensitive. NTFS is case-insensitive
+/// and case-preserving, so the same logical directory can be reached via
+/// differently-cased paths (e.g. `cd myproject` vs `cd MyProject`) and reported
+/// back as differently-cased cwd strings. Because the encoded form preserves
+/// the original casing, a case-sensitive compare causes the workspace filter
+/// (`-L` / `Tab`) to drop every conversation when the current shell's cwd
+/// casing differs from the casing recorded when the sessions were created.
+/// The encoded form contains only ASCII alphanumeric characters and `-`, so
+/// `eq_ignore_ascii_case` is sufficient.
 pub fn is_same_project(a: &str, b: &str) -> bool {
-    encoded_project_root(a) == encoded_project_root(b)
+    let root_a = encoded_project_root(a);
+    let root_b = encoded_project_root(b);
+    #[cfg(windows)]
+    {
+        root_a.eq_ignore_ascii_case(root_b)
+    }
+    #[cfg(not(windows))]
+    {
+        root_a == root_b
+    }
 }
 
 /// Decode a project directory name back to a path (simple heuristic fallback).
@@ -443,5 +462,35 @@ mod tests {
             "/Users/raine/code/myproject__worktrees/feature",
         ));
         assert!(is_same_project(&main, &worktree));
+    }
+
+    // === Platform-specific case sensitivity tests ===
+    //
+    // Windows filesystems are case-insensitive, so the same on-disk directory
+    // can be reached via differently-cased paths and the workspace filter must
+    // treat them as the same project. POSIX filesystems are typically
+    // case-sensitive, so differently-cased encoded names refer to genuinely
+    // distinct directories and must remain not-equal.
+
+    #[cfg(windows)]
+    #[test]
+    fn is_same_project_case_insensitive_on_windows() {
+        let lowercase = "-Users-Foo-myproject";
+        let mixed = "-Users-Foo-MyProject";
+        assert!(is_same_project(lowercase, mixed));
+        assert!(is_same_project(mixed, lowercase));
+
+        // Worktree on the lowercase variant matches main on the uppercase variant
+        let worktree_lower = "-Users-Foo-myproject--worktrees-feature";
+        let main_upper = "-Users-Foo-MyProject";
+        assert!(is_same_project(worktree_lower, main_upper));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn is_same_project_case_sensitive_on_unix() {
+        let lowercase = "-home-user-myproject";
+        let mixed = "-home-user-MyProject";
+        assert!(!is_same_project(lowercase, mixed));
     }
 }
