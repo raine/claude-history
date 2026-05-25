@@ -10,10 +10,15 @@ const EXPORT_OPTIONS: [&str; 4] = [
 
 impl App {
     pub(super) fn handle_confirm_key(&mut self, code: KeyCode) -> Option<Action> {
+        let current = self.dialog_mode.clone();
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 self.dialog_mode = DialogMode::None;
-                self.get_selected_path().map(Action::Delete)
+                match current {
+                    DialogMode::ConfirmDelete => self.get_selected_path().map(Action::Delete),
+                    DialogMode::ConfirmArchive => self.get_selected_path().map(Action::Archive),
+                    _ => None,
+                }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                 self.dialog_mode = DialogMode::None;

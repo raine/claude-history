@@ -223,6 +223,21 @@ pub fn run_with_loader(
                             }
                         }
                     }
+                    Action::Archive(ref path) => {
+                        let uuid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        match crate::history::archive_session_by_uuid(uuid) {
+                            Ok(_) => {
+                                app.remove_selected_from_list();
+                                app.exit_view_mode();
+                            }
+                            Err(e) => {
+                                let _ = debug_log::log_debug(&format!(
+                                    "Failed to archive session {}: {}",
+                                    uuid, e
+                                ));
+                            }
+                        }
+                    }
                     _ => return Ok((action, app.into_conversations())),
                 }
             }

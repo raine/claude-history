@@ -162,12 +162,21 @@ pub struct Args {
     )]
     pub delete: Option<String>,
 
+    /// Archive a session by its ID (moves to ~/.claude/archive/<project>/)
+    #[arg(
+        long,
+        value_name = "SESSION_ID",
+        help = "Archive a session by its UUID and exit",
+        conflicts_with_all = ["global", "show_dir", "resume", "show_path", "show_id", "plain", "render", "input_file", "delete"]
+    )]
+    pub archive: Option<String>,
+
     /// Debug search scoring for a query
     #[arg(
         long = "debug-search",
         value_name = "QUERY",
         help = "Debug search result scoring for a query",
-        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "input_file", "semantic_search"]
+        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive", "input_file", "semantic_search"]
     )]
     pub debug_search: Option<String>,
 
@@ -177,7 +186,7 @@ pub struct Args {
         value_name = "QUERY",
         value_parser = non_empty_string,
         hide = true,
-        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "input_file", "debug_search", "semantic_search", "generate_semantic_cache", "clear_semantic_cache"]
+        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive", "input_file", "debug_search", "semantic_search", "generate_semantic_cache", "clear_semantic_cache"]
     )]
     pub debug_semantic_search: Option<String>,
 
@@ -188,7 +197,7 @@ pub struct Args {
         help = "Run a local semantic search over conversations",
         value_parser = non_empty_string,
         hide = true,
-        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "input_file", "debug_search", "clear_semantic_cache"]
+        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive", "input_file", "debug_search", "clear_semantic_cache"]
     )]
     pub semantic_search: Option<String>,
 
@@ -206,7 +215,7 @@ pub struct Args {
     #[arg(
         long = "generate-semantic-cache",
         hide = true,
-        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "input_file", "debug_search", "semantic_search", "clear_semantic_cache"]
+        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive", "input_file", "debug_search", "semantic_search", "clear_semantic_cache"]
     )]
     pub generate_semantic_cache: bool,
 
@@ -214,7 +223,7 @@ pub struct Args {
     #[arg(
         long = "clear-semantic-cache",
         hide = true,
-        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "input_file", "debug_search", "semantic_search", "generate_semantic_cache", "debug_semantic_search"]
+        conflicts_with_all = ["show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive", "input_file", "debug_search", "semantic_search", "generate_semantic_cache", "debug_semantic_search"]
     )]
     pub clear_semantic_cache: bool,
 
@@ -222,7 +231,7 @@ pub struct Args {
     #[arg(
         value_name = "FILE",
         help = "JSONL conversation file to view directly",
-        conflicts_with_all = ["global", "local", "show_dir", "resume", "show_path", "show_id", "plain", "render", "delete"]
+        conflicts_with_all = ["global", "local", "show_dir", "resume", "show_path", "show_id", "plain", "render", "delete", "archive"]
     )]
     pub input_file: Option<PathBuf>,
 }

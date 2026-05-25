@@ -145,6 +145,24 @@ fn run() -> Result<()> {
         }
     }
 
+    // Handle --archive flag: archive a session by UUID and exit
+    if let Some(ref session_id) = args.archive {
+        match history::archive_session_by_uuid(session_id) {
+            Ok(count) => {
+                if count == 1 {
+                    eprintln!("Archived session {}", session_id);
+                } else {
+                    eprintln!(
+                        "Archived session {} ({} copies across projects)",
+                        session_id, count
+                    );
+                }
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
     // Handle --debug-search flag: debug search result scoring
     if let Some(ref query) = args.debug_search {
         let mut conversations = history::load_all_conversations(show_last, args.debug)?;
@@ -333,6 +351,7 @@ fn run() -> Result<()> {
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
         (tui::Action::Delete(_), _) => unreachable!("Delete is handled internally"),
+        (tui::Action::Archive(_), _) => unreachable!("Archive is handled internally"),
     };
 
     if args.show_path {
