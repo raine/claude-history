@@ -122,7 +122,9 @@ impl App {
         viewport_height: usize,
     ) -> Option<Action> {
         match self.dialog_mode {
-            DialogMode::ConfirmDelete => return self.handle_confirm_key(code),
+            DialogMode::ConfirmDelete | DialogMode::ConfirmArchive => {
+                return self.handle_confirm_key(code);
+            }
             DialogMode::ExportMenu { .. } | DialogMode::YankMenu { .. } => {
                 return self.handle_menu_key(code);
             }
@@ -165,6 +167,12 @@ impl App {
         if self.keys.delete.matches(code, modifiers) {
             if !self.single_file_mode {
                 self.dialog_mode = DialogMode::ConfirmDelete;
+            }
+            return None;
+        }
+        if self.keys.archive.matches(code, modifiers) {
+            if !self.single_file_mode {
+                self.dialog_mode = DialogMode::ConfirmArchive;
             }
             return None;
         }
@@ -549,6 +557,12 @@ impl App {
         if self.keys.delete.matches(code, modifiers) {
             if self.get_selected_path().is_some() {
                 self.dialog_mode = DialogMode::ConfirmDelete;
+            }
+            return None;
+        }
+        if self.keys.archive.matches(code, modifiers) {
+            if self.get_selected_path().is_some() {
+                self.dialog_mode = DialogMode::ConfirmArchive;
             }
             return None;
         }

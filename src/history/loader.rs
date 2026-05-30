@@ -231,6 +231,105 @@ pub fn delete_session_by_uuid(uuid: &str) -> Result<usize> {
     Ok(count)
 }
 
+/// Archive root: <claude-dir>/archive (sibling of projects/).
+fn get_claude_archive_root() -> Result<PathBuf> {
+    let projects = super::get_claude_projects_root()?;
+    let claude_dir = projects.parent().ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not determine Claude config directory",
+        ))
+    })?;
+    Ok(claude_dir.join("archive"))
+}
+
+/// Archive a session by UUID across all projects.
+/// Moves both the .jsonl file and the session subdirectory (if any) from
+/// `<claude>/projects/<project>/` to `<claude>/archive/<project>/`.
+/// Falls back to copy+remove when the source and destination are on different
+/// filesystems. Returns the number of sessions moved.
+pub fn archive_session_by_uuid(uuid: &str) -> Result<usize> {
+    if uuid.is_empty() || !uuid.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err(AppError::SessionNotFound(uuid.to_owned()));
+    }
+
+    let matches = find_all_jsonl_by_uuid(uuid)?;
+    if matches.is_empty() {
+        return Err(AppError::SessionNotFound(uuid.to_owned()));
+    }
+
+    let archive_root = get_claude_archive_root()?;
+    let count = matches.len();
+
+    for jsonl_path in &matches {
+        let project_dir = jsonl_path.parent().ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Session file has no parent directory",
+            ))
+        })?;
+        let project_name = project_dir.file_name().ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Could not read project directory name",
+            ))
+        })?;
+
+        let dest_project_dir = archive_root.join(project_name);
+        std::fs::create_dir_all(&dest_project_dir)?;
+
+        let filename = jsonl_path.file_name().ok_or_else(|| {
+            AppError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Session file has no name",
+            ))
+        })?;
+        let dest_jsonl = dest_project_dir.join(filename);
+        move_path(jsonl_path, &dest_jsonl)?;
+
+        let session_dir = project_dir.join(uuid);
+        if session_dir.is_dir() {
+            let dest_session_dir = dest_project_dir.join(uuid);
+            move_path(&session_dir, &dest_session_dir)?;
+        }
+    }
+
+    Ok(count)
+}
+
+/// Move a file or directory, preferring rename, falling back to copy+remove
+/// when the source and destination are on different filesystems.
+fn move_path(src: &Path, dst: &Path) -> Result<()> {
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            if src.is_dir() {
+                copy_dir_recursive(src, dst)?;
+                std::fs::remove_dir_all(src)?;
+            } else {
+                std::fs::copy(src, dst)?;
+                std::fs::remove_file(src)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
 /// List all projects that contain conversation files
 pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
     let entries = read_dir(root)?;

@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub enum Action {
     Select(PathBuf),
     Delete(PathBuf),
+    Archive(PathBuf),
     Resume(PathBuf),
     ForkResume(PathBuf),
     Quit,
@@ -23,6 +24,8 @@ pub enum DialogMode {
     None,
     /// Confirming deletion of the selected conversation
     ConfirmDelete,
+    /// Confirming archive (move to ~/.claude/archive/<project>/) of the selected conversation
+    ConfirmArchive,
     /// Export menu (save to file)
     ExportMenu { selected: usize },
     /// Yank menu (copy to clipboard)

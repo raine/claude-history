@@ -24,7 +24,7 @@ use std::time::SystemTime;
 
 // Re-export public API
 pub use loader::{
-    delete_session_by_uuid, find_jsonl_by_uuid, load_all_conversations,
+    archive_session_by_uuid, delete_session_by_uuid, find_jsonl_by_uuid, load_all_conversations,
     load_all_conversations_streaming,
 };
 pub(crate) use parser::{

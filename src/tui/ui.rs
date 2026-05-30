@@ -148,7 +148,9 @@ fn render_list_mode(frame: &mut Frame, app: &App) {
 
     // Render bottom bar: confirm dialog > status message > hotkeys
     if *app.dialog_mode() == DialogMode::ConfirmDelete {
-        render_confirm_dialog(frame, chunks[2]);
+        render_confirm_dialog(frame, chunks[2], ConfirmKind::Delete);
+    } else if *app.dialog_mode() == DialogMode::ConfirmArchive {
+        render_confirm_dialog(frame, chunks[2], ConfirmKind::Archive);
     } else if let Some((msg, instant)) = app.status_message()
         && instant.elapsed() < STATUS_TTL
     {
@@ -223,6 +225,8 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" rename  ", action_label),
         Span::styled(keys.delete.short_label(), action_key),
         Span::styled(" delete  ", action_label),
+        Span::styled(keys.archive.short_label(), action_key),
+        Span::styled(" archive  ", action_label),
     ];
 
     // Scope toggle (only when project context exists)
@@ -489,7 +493,8 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
 
     // Render dialog overlay if active
     match app.dialog_mode() {
-        DialogMode::ConfirmDelete => render_confirm_dialog(frame, layout.status),
+        DialogMode::ConfirmDelete => render_confirm_dialog(frame, layout.status, ConfirmKind::Delete),
+        DialogMode::ConfirmArchive => render_confirm_dialog(frame, layout.status, ConfirmKind::Archive),
         DialogMode::ExportMenu { selected } => render_export_menu(frame, *selected, false),
         DialogMode::YankMenu { selected } => render_export_menu(frame, *selected, true),
         DialogMode::Help { scroll } => {
@@ -868,6 +873,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled(" fork  ", label_style),
             Span::styled(app.keys().delete.short_label(), key_style),
             Span::styled(" del  ", label_style),
+            Span::styled(app.keys().archive.short_label(), key_style),
+            Span::styled(" archive  ", label_style),
             Span::styled("q", key_style),
             Span::styled("uit", label_style),
         ]);
@@ -1160,13 +1167,19 @@ fn centered_modal_area(area: Rect, preferred_width: u16, preferred_height: u16) 
     }
 }
 
-fn render_confirm_dialog(frame: &mut Frame, area: Rect) {
+enum ConfirmKind {
+    Delete,
+    Archive,
+}
+
+fn render_confirm_dialog(frame: &mut Frame, area: Rect, kind: ConfirmKind) {
+    let text = match kind {
+        ConfirmKind::Delete => "Delete this conversation? ",
+        ConfirmKind::Archive => "Archive this conversation to ~/.claude/archive/? ",
+    };
     let prompt = Line::from(vec![
         Span::raw(" "),
-        Span::styled(
-            "Delete this conversation? ",
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(text, Style::default().fg(Color::Yellow)),
         Span::styled("(y/n)", Style::default().fg(rgb(th().text_secondary))),
     ]);
     let paragraph = Paragraph::new(prompt);
@@ -1320,6 +1333,7 @@ fn render_help_overlay(
             (keys.resume.help_label(), "Resume"),
             (keys.fork.help_label(), "Fork resume"),
             (keys.delete.help_label(), "Delete"),
+            (keys.archive.help_label(), "Archive"),
             ("q / Esc".into(), exit_text),
         ]
     } else {
@@ -1340,6 +1354,7 @@ fn render_help_overlay(
             (keys.fork.help_label(), "Fork resume"),
             (keys.rename.help_label(), "Rename"),
             (keys.delete.help_label(), "Delete"),
+            (keys.archive.help_label(), "Archive"),
             ("Esc".into(), "Quit"),
         ];
         if semantic_available {
@@ -3181,7 +3196,7 @@ mod tests {
             }))
             .unwrap();
         app.receive_search_results();
-        let backend = TestBackend::new(80, 2);
+        let backend = TestBackend::new(100, 2);
         let mut terminal = Terminal::new(backend).unwrap();
 
         terminal
