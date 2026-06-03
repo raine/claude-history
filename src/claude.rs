@@ -155,6 +155,9 @@ pub enum ContentBlock {
     Image {
         source: serde_json::Value,
     },
+    /// Unknown content block type.
+    #[serde(other)]
+    Other,
 }
 
 /// Extract only Text blocks (for previews and user-facing display)
@@ -362,5 +365,34 @@ mod tests {
         let content = json!([{"text": "no type field"}]);
         let result = bounded_tool_result_text(&content);
         assert_eq!(result, Some("no type field".into()));
+    }
+
+    #[test]
+    fn deserializes_user_message_with_document_block() {
+        // Unknown block types parse as `Other` without hiding text blocks.
+        let message: UserMessage = serde_json::from_value(json!({
+            "role": "user",
+            "content": [
+                {
+                    "type": "document",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "JVBERi0xLjcK..."
+                    }
+                },
+                { "type": "text", "text": "summarize this" }
+            ]
+        }))
+        .expect("document block should deserialize as Other");
+
+        match &message.content {
+            UserContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(blocks[0], ContentBlock::Other));
+            }
+            other => panic!("expected blocks, got {other:?}"),
+        }
+        assert_eq!(extract_text_from_user(&message), "summarize this");
     }
 }

@@ -377,7 +377,7 @@ fn blocks_to_parts(
                     ),
                 })
             }
-            ContentBlock::Image { .. } => None,
+            ContentBlock::Image { .. } | ContentBlock::Other => None,
         })
         .collect()
 }
@@ -387,7 +387,7 @@ pub(crate) fn content_blocks_count_as_agent_message(blocks: &[ContentBlock]) -> 
         ContentBlock::Text { text } => !text.trim().is_empty(),
         ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
         ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::Image { .. } => false,
+        ContentBlock::Image { .. } | ContentBlock::Other => false,
     })
 }
 
@@ -426,7 +426,7 @@ fn agent_search_text_from_block(role: AgentMessageRole, block: &ContentBlock) ->
         ContentBlock::Thinking { thinking, .. } => {
             non_empty_text(&truncate_chars(thinking, MAX_AGENT_SEGMENT_CHARS))
         }
-        ContentBlock::Image { .. } => None,
+        ContentBlock::Image { .. } | ContentBlock::Other => None,
     }
 }
 
