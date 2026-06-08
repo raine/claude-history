@@ -31,7 +31,7 @@ jobs:
             target: aarch64-apple-darwin
             platform: darwin-arm64
             use_cross: false
-          - os: ubuntu-latest
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             platform: linux-amd64
             use_cross: false
