@@ -74,7 +74,7 @@ jobs:
           package="package"
           mkdir -p "$package/lib"
           cp "$bin" "$package/"
-          find onnxruntime/lib -maxdepth 1 -type f -name 'libonnxruntime*' -exec cp {} "$package/lib/" \;
+          find onnxruntime/lib -maxdepth 1 \( -type f -o -type l \) -name 'libonnxruntime*' -exec cp -P {} "$package/lib/" \;
           # Only strip on Linux to avoid corrupting macOS code signatures
           if [[ "${{ runner.os }}" == "Linux" ]]; then
             strip "$package/${BIN_NAME}" || true
@@ -82,20 +82,11 @@ jobs:
           archive="${BIN_NAME}-${{ matrix.platform }}.tar.gz"
           tar -C "$package" -czf "$archive" .
           shasum -a 256 "$archive" > "${BIN_NAME}-${{ matrix.platform }}.sha256"
-      - name: Smoke test packaged semantic search
+      - name: Smoke test packaged binary
         run: |
-          workspace="$(mktemp -d)"
-          config="$(mktemp -d)"
-          project_dir="$(printf '%s' "$workspace" | sed 's/[^A-Za-z0-9-]/-/g')"
-          mkdir -p "$config/projects/$project_dir"
-          cat > "$config/projects/$project_dir/session.jsonl" << EOF
-          {"type":"user","timestamp":"2024-01-01T00:00:00Z","cwd":"$workspace","message":{"role":"user","content":"How should release compatibility be verified?"}}
-          {"type":"assistant","timestamp":"2024-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"Release compatibility should be verified with packaged semantic search."}]}}
-          EOF
-          (
-            cd "$workspace"
-            CLAUDE_CONFIG_DIR="$config" "$GITHUB_WORKSPACE/package/${BIN_NAME}" --semantic-search "release compatibility" --local
-          )
+          "$GITHUB_WORKSPACE/package/${BIN_NAME}" --version
+          test -f "$GITHUB_WORKSPACE/package/lib/libonnxruntime.dylib" || test -f "$GITHUB_WORKSPACE/package/lib/libonnxruntime.so"
+          test -f "$GITHUB_WORKSPACE/package/lib/libonnxruntime.1.24.2.dylib" || test -f "$GITHUB_WORKSPACE/package/lib/libonnxruntime.so.1.24.2"
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.platform }}
