@@ -32,7 +32,7 @@ jobs:
             target: aarch64-apple-darwin
             platform: darwin-arm64
             use_cross: false
-          - os: macos-13
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: darwin-amd64
             use_cross: false
