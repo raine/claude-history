@@ -82,6 +82,20 @@ jobs:
           archive="${BIN_NAME}-${{ matrix.platform }}.tar.gz"
           tar -C "$package" -czf "$archive" .
           shasum -a 256 "$archive" > "${BIN_NAME}-${{ matrix.platform }}.sha256"
+      - name: Smoke test packaged semantic search
+        run: |
+          workspace="$(mktemp -d)"
+          config="$(mktemp -d)"
+          project_dir="$(printf '%s' "$workspace" | sed 's/[^A-Za-z0-9-]/-/g')"
+          mkdir -p "$config/projects/$project_dir"
+          cat > "$config/projects/$project_dir/session.jsonl" << EOF
+          {"type":"user","timestamp":"2024-01-01T00:00:00Z","cwd":"$workspace","message":{"role":"user","content":"How should release compatibility be verified?"}}
+          {"type":"assistant","timestamp":"2024-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"Release compatibility should be verified with packaged semantic search."}]}}
+          EOF
+          (
+            cd "$workspace"
+            CLAUDE_CONFIG_DIR="$config" "$GITHUB_WORKSPACE/package/${BIN_NAME}" --semantic-search "release compatibility" --local
+          )
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.platform }}
