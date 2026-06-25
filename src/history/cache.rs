@@ -34,6 +34,11 @@ pub struct CacheEntry {
     /// Avoids re-parsing known-empty files on every startup.
     #[serde(default)]
     pub is_empty: bool,
+    /// If true, this file was classified as a machine-generated session to exclude
+    /// (e.g. ICM memory jobs). Negative-caches the head-marker check so the file's
+    /// head is not re-read on every startup.
+    #[serde(default)]
+    pub excluded: bool,
     pub preview_first: String,
     pub preview_last: String,
     pub full_text: String,
@@ -182,6 +187,7 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         mtime_secs: duration_since_epoch.as_secs(),
         mtime_nsecs: duration_since_epoch.subsec_nanos(),
         is_empty: true,
+        excluded: false,
         preview_first: String::new(),
         preview_last: String::new(),
         full_text: String::new(),
@@ -201,6 +207,15 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
     }
 }
 
+/// Build a negative-cache entry for a file excluded by head-marker classification
+/// (e.g. an ICM memory session). Stores only metadata so the head is not re-read.
+pub fn excluded_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
+    CacheEntry {
+        excluded: true,
+        ..empty_entry(file_size, mtime)
+    }
+}
+
 /// Create a CacheEntry from a parsed Conversation
 pub fn entry_from_conversation(
     conv: &Conversation,
@@ -213,6 +228,7 @@ pub fn entry_from_conversation(
         mtime_secs: duration_since_epoch.as_secs(),
         mtime_nsecs: duration_since_epoch.subsec_nanos(),
         is_empty: false,
+        excluded: false,
         preview_first: conv.preview_first.clone(),
         preview_last: conv.preview_last.clone(),
         full_text: conv.full_text.clone(),

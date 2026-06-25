@@ -647,10 +647,10 @@ fn load_conversations_keyed(
     let cached_entries =
         cache::read_project_cache_keyed(project_dir_name, Some(cache_key)).unwrap_or_default();
 
-    // Find all JSONL files and capture metadata in one pass
+    // Find all JSONL files and capture metadata in one pass (stat only — no reads).
+    // ICM/marker classification happens later, only for cache misses.
     let mut files_with_meta = Vec::new();
     let mut skipped_agent_files = 0;
-    let mut skipped_excluded_files = 0;
 
     for entry in read_dir(projects_dir)? {
         let entry = entry?;
@@ -665,13 +665,6 @@ fn load_conversations_keyed(
                 continue;
             }
 
-            // Skip machine-generated sessions (e.g. ICM memory jobs) identified by a
-            // marker in their head, before parsing/caching/holding them in memory.
-            if head_contains_marker(&path, exclude_markers) {
-                skipped_excluded_files += 1;
-                continue;
-            }
-
             let metadata = entry.metadata().ok();
             let modified = metadata.as_ref().and_then(|m| m.modified().ok());
             let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -683,10 +676,9 @@ fn load_conversations_keyed(
     debug::info(
         debug_level,
         &format!(
-            "Found {} conversation files ({} agent files skipped, {} excluded by marker)",
+            "Found {} conversation files ({} agent files skipped)",
             files_with_meta.len(),
-            skipped_agent_files,
-            skipped_excluded_files
+            skipped_agent_files
         ),
     );
 
@@ -697,7 +689,11 @@ fn load_conversations_keyed(
     // Partition into cache hits and misses
     let mut dirty = false;
     let mut conversations: Vec<Conversation> = Vec::with_capacity(files_with_meta.len());
-    let mut files_to_parse: Vec<(PathBuf, Option<SystemTime>, u64)> = Vec::new();
+    let mut files_to_classify: Vec<(PathBuf, Option<SystemTime>, u64)> = Vec::new();
+    // Files known to be excluded (e.g. ICM sessions), carried forward in the cache
+    // so their heads are never re-read. (filename, file_size, mtime)
+    let mut excluded_files: Vec<(String, u64, SystemTime)> = Vec::new();
+    let mut skipped_excluded_files = 0usize;
 
     for (path, modified, file_size) in &files_with_meta {
         let filename = path
@@ -709,7 +705,11 @@ fn load_conversations_keyed(
             && let Some(entry) = cached_entries.get(filename)
             && cache::entry_matches(entry, *file_size, *mtime)
         {
-            if entry.is_empty {
+            if entry.excluded {
+                // Negative cache hit — file was previously classified as excluded
+                skipped_excluded_files += 1;
+                excluded_files.push((filename.to_owned(), *file_size, *mtime));
+            } else if entry.is_empty {
                 // Negative cache hit — file was previously parsed and yielded nothing
                 debug::debug(debug_level, &format!("Cache hit (empty) {}", filename));
             } else {
@@ -722,7 +722,7 @@ fn load_conversations_keyed(
             }
         } else {
             dirty = true;
-            files_to_parse.push((path.clone(), *modified, *file_size));
+            files_to_classify.push((path.clone(), *modified, *file_size));
         }
     }
 
@@ -731,12 +731,42 @@ fn load_conversations_keyed(
         dirty = true;
     }
 
+    // Classify cache misses by head marker (parallel reads). Only genuinely new
+    // files are read here; known files (incl. excluded ones) come from the cache.
+    let mut files_to_parse: Vec<(PathBuf, Option<SystemTime>, u64)> = Vec::new();
+    if !files_to_classify.is_empty() {
+        let classified: Vec<(PathBuf, Option<SystemTime>, u64, bool)> = files_to_classify
+            .into_par_iter()
+            .map(|(path, modified, file_size)| {
+                let is_excluded = head_contains_marker(&path, exclude_markers);
+                (path, modified, file_size, is_excluded)
+            })
+            .collect();
+
+        for (path, modified, file_size, is_excluded) in classified {
+            if is_excluded {
+                skipped_excluded_files += 1;
+                if let Some(mtime) = modified {
+                    let filename = path
+                        .file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("unknown")
+                        .to_owned();
+                    excluded_files.push((filename, file_size, mtime));
+                }
+            } else {
+                files_to_parse.push((path, modified, file_size));
+            }
+        }
+    }
+
     debug::info(
         debug_level,
         &format!(
-            "Cache: {} hits, {} misses",
+            "Cache: {} hits, {} to parse, {} excluded",
             conversations.len(),
-            files_to_parse.len()
+            files_to_parse.len(),
+            skipped_excluded_files
         ),
     );
 
@@ -833,6 +863,12 @@ fn load_conversations_keyed(
             {
                 new_cache.insert(filename.to_owned(), cache::empty_entry(*file_size, *mtime));
             }
+        }
+
+        // Add negative cache entries for excluded files (e.g. ICM sessions) so their
+        // heads are never re-read on subsequent startups.
+        for (filename, file_size, mtime) in &excluded_files {
+            new_cache.insert(filename.clone(), cache::excluded_entry(*file_size, *mtime));
         }
 
         cache::write_project_cache_keyed(project_dir_name, new_cache, Some(cache_key));
