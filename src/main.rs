@@ -160,6 +160,11 @@ fn run() -> Result<()> {
 
     let config = config::load_config()?;
 
+    // Session-head markers used to exclude machine-generated sessions (e.g. ICM
+    // persistent-memory background jobs) from loading. Computed before `config`
+    // fields are consumed below.
+    let exclude_markers = config.exclude_markers();
+
     // Merge CLI arguments with config file settings. CLI takes precedence.
     let display_config = config.display.unwrap_or_default();
 
@@ -246,8 +251,12 @@ fn run() -> Result<()> {
 
     // Handle --debug-search flag: debug search result scoring
     if let Some(ref query) = args.debug_search {
-        let mut conversations =
-            history::load_all_conversations(show_last, args.debug, ccs_info.as_ref())?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -327,8 +336,12 @@ fn run() -> Result<()> {
     }
 
     if let Some(ref query) = args.debug_semantic_search {
-        let mut conversations =
-            history::load_all_conversations(show_last, args.debug, ccs_info.as_ref())?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::debug_search(query, &conversations, args.local);
@@ -342,8 +355,12 @@ fn run() -> Result<()> {
                 "--generate-semantic-cache cannot be combined with a time filter".to_string(),
             ));
         }
-        let mut conversations =
-            history::load_all_conversations(show_last, args.debug, ccs_info.as_ref())?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::generate_cache(&conversations, args.local);
     }
@@ -354,8 +371,12 @@ fn run() -> Result<()> {
 
     // Handle --semantic-search flag
     if let Some(ref query) = args.semantic_search {
-        let mut conversations =
-            history::load_all_conversations(show_last, args.debug, ccs_info.as_ref())?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::run(query, &conversations, args.semantic_top, args.local);
@@ -422,6 +443,7 @@ fn run() -> Result<()> {
         args.debug,
         time_filter,
         ccs_info.clone(),
+        exclude_markers,
     );
 
     // An empty result is far more often the time filter than an empty history,

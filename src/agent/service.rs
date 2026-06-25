@@ -78,6 +78,15 @@ fn configured_scope(
     }
 }
 
+/// Session-head markers used to exclude machine-generated sessions (e.g. ICM
+/// persistent-memory background jobs) from loading. Agent subcommands load
+/// history outside the main `run()` flow, so they resolve the markers here.
+fn default_exclude_markers() -> Vec<String> {
+    config::load_config()
+        .map(|config| config.exclude_markers())
+        .unwrap_or_default()
+}
+
 fn project_is_excluded(path: &Path, excluded: &[String]) -> bool {
     path.parent()
         .and_then(Path::file_name)
@@ -159,8 +168,12 @@ impl AgentService {
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
-        let mut conversations =
-            history::load_all_conversations(false, None, ccs::discover_ccs().as_ref())?;
+        let mut conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         conversations.retain(|conversation| {
             !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                 && time.matches(conversation.timestamp)
@@ -1114,8 +1127,12 @@ pub(crate) fn resolve_agent_read_args(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations =
-            history::load_all_conversations(false, None, ccs::discover_ccs().as_ref())?;
+        let conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };
@@ -1189,8 +1206,12 @@ pub(crate) fn resolve_agent_conversation_arg(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations =
-            history::load_all_conversations(false, None, ccs::discover_ccs().as_ref())?;
+        let conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };

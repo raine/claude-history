@@ -21,6 +21,26 @@ pub struct ConfigFile {
     pub tui: Option<TuiConfig>,
     pub search: Option<SearchConfig>,
     pub agent: Option<AgentConfig>,
+    pub filter: Option<FilterConfig>,
+}
+
+impl ConfigFile {
+    /// Effective list of first-line substrings used to exclude machine-generated
+    /// sessions from loading. ICM (persistent-memory) background sessions are
+    /// excluded by default; set `[filter] exclude_icm = false` to keep them, and
+    /// add extra substrings via `[filter] exclude_markers = [...]`.
+    pub fn exclude_markers(&self) -> Vec<String> {
+        let filter = self.filter.as_ref();
+        let exclude_icm = filter.and_then(|f| f.exclude_icm).unwrap_or(true);
+        let mut markers = Vec::new();
+        if exclude_icm {
+            markers.push(crate::history::ICM_SESSION_MARKER.to_string());
+        }
+        if let Some(extra) = filter.and_then(|f| f.exclude_markers.as_ref()) {
+            markers.extend(extra.iter().cloned());
+        }
+        markers
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -216,6 +236,15 @@ subagents = true
 
         assert!(keys.rename.matches(KeyCode::Char('r'), KeyModifiers::ALT));
     }
+}
+
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct FilterConfig {
+    /// Exclude ICM persistent-memory background sessions from loading. Default: true.
+    pub exclude_icm: Option<bool>,
+    /// Additional first-line substrings; sessions whose head contains any are excluded.
+    pub exclude_markers: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug, Default)]

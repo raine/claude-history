@@ -47,12 +47,46 @@ pub struct DeleteEmptySummary {
     pub deleted: usize,
 }
 
+/// First-line signature of ICM (persistent-memory) background sessions. These are
+/// machine-generated `claude -p` jobs spawned by ICM hooks on nearly every tool
+/// call to distill memory; each embeds the full system context (~85 KB) and they
+/// can number in the hundreds of thousands, dwarfing real conversations. We skip
+/// them up front so they never get parsed, cached, or held in memory.
+pub const ICM_SESSION_MARKER: &str =
+    "extract durable facts that an AI agent should remember across sessions";
+
+/// Read the first chunk of a file and report whether it contains any of the given
+/// marker substrings. Reads only a small head (markers appear within the first
+/// queue-operation line), so this is far cheaper than parsing the whole file.
+fn head_contains_marker(path: &Path, markers: &[String]) -> bool {
+    use std::io::Read;
+    if markers.is_empty() {
+        return false;
+    }
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut buf = [0u8; 8192];
+    let n = file.read(&mut buf).unwrap_or(0);
+    if n == 0 {
+        return false;
+    }
+    let head = &buf[..n];
+    markers.iter().any(|m| {
+        let needle = m.as_bytes();
+        !needle.is_empty()
+            && needle.len() <= head.len()
+            && head.windows(needle.len()).any(|w| w == needle)
+    })
+}
+
 /// Load conversations from ALL projects globally (across all CCS roots)
 #[allow(dead_code)]
 pub fn load_all_conversations(
     show_last: bool,
     debug_level: Option<DebugLevel>,
     ccs_info: Option<&CcsInfo>,
+    exclude_markers: &[String],
 ) -> Result<Vec<Conversation>> {
     let roots = ccs::get_all_project_roots(ccs_info)?;
 
@@ -101,6 +135,7 @@ pub fn load_all_conversations(
                 &project.name,
                 debug_level,
                 cache_key,
+                exclude_markers,
             ) {
                 Ok(mut convs) => {
                     let fallback_path = decode_project_dir_name_to_path(&project.name);
@@ -153,11 +188,19 @@ pub fn load_all_conversations_streaming(
     debug_level: Option<DebugLevel>,
     time: TimeFilter,
     ccs_info: Option<CcsInfo>,
+    exclude_markers: Vec<String>,
 ) -> Receiver<LoaderMessage> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        load_all_streaming_inner(tx, show_last, debug_level, time, ccs_info.as_ref());
+        load_all_streaming_inner(
+            tx,
+            show_last,
+            debug_level,
+            time,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        );
     });
 
     rx
@@ -169,6 +212,7 @@ fn load_all_streaming_inner(
     debug_level: Option<DebugLevel>,
     time: TimeFilter,
     ccs_info: Option<&CcsInfo>,
+    exclude_markers: &[String],
 ) {
     let roots = match ccs::get_all_project_roots(ccs_info) {
         Ok(r) => r,
@@ -245,6 +289,7 @@ fn load_all_streaming_inner(
                 &project.name,
                 debug_level,
                 cache_key,
+                exclude_markers,
             ) {
                 Ok(mut convs) => {
                     if convs.is_empty() {
@@ -577,6 +622,7 @@ pub fn load_conversations(
     show_last: bool,
     project_dir_name: &str,
     debug_level: Option<DebugLevel>,
+    exclude_markers: &[String],
 ) -> Result<Vec<Conversation>> {
     load_conversations_keyed(
         projects_dir,
@@ -584,6 +630,7 @@ pub fn load_conversations(
         project_dir_name,
         debug_level,
         "default",
+        exclude_markers,
     )
 }
 
@@ -594,6 +641,7 @@ fn load_conversations_keyed(
     project_dir_name: &str,
     debug_level: Option<DebugLevel>,
     cache_key: &str,
+    exclude_markers: &[String],
 ) -> Result<Vec<Conversation>> {
     // Load existing cache for this project
     let cached_entries =
@@ -602,6 +650,7 @@ fn load_conversations_keyed(
     // Find all JSONL files and capture metadata in one pass
     let mut files_with_meta = Vec::new();
     let mut skipped_agent_files = 0;
+    let mut skipped_excluded_files = 0;
 
     for entry in read_dir(projects_dir)? {
         let entry = entry?;
@@ -616,6 +665,13 @@ fn load_conversations_keyed(
                 continue;
             }
 
+            // Skip machine-generated sessions (e.g. ICM memory jobs) identified by a
+            // marker in their head, before parsing/caching/holding them in memory.
+            if head_contains_marker(&path, exclude_markers) {
+                skipped_excluded_files += 1;
+                continue;
+            }
+
             let metadata = entry.metadata().ok();
             let modified = metadata.as_ref().and_then(|m| m.modified().ok());
             let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -627,9 +683,10 @@ fn load_conversations_keyed(
     debug::info(
         debug_level,
         &format!(
-            "Found {} conversation files ({} agent files skipped)",
+            "Found {} conversation files ({} agent files skipped, {} excluded by marker)",
             files_with_meta.len(),
-            skipped_agent_files
+            skipped_agent_files,
+            skipped_excluded_files
         ),
     );
 
