@@ -1,5 +1,6 @@
 use crate::agent::protocol::MessageLineRange;
 use crate::search::mode::SearchMode;
+use crate::time_filter::{TimeFilter, TimeFilterError, TimePoint};
 use clap::{ArgGroup, Args as ClapArgs, Parser, Subcommand};
 use std::fmt;
 use std::path::PathBuf;
@@ -158,6 +159,8 @@ pub struct AgentSearchArgs {
     pub all: bool,
     #[command(flatten)]
     pub search_mode: AgentSearchModeArgs,
+    #[command(flatten)]
+    pub time: TimeRangeArgs,
 }
 
 #[derive(Debug, ClapArgs)]
@@ -234,6 +237,36 @@ pub struct AgentOutlineArgs {
     pub conversation: String,
     #[command(flatten)]
     pub output: AgentOutputFlags,
+}
+
+// Bounds that narrow the conversation corpus by timestamp before ranking.
+//
+// Flattened into both the top-level args and `agent search`, because
+// `args_conflicts_with_subcommands` means a top-level flag cannot be combined
+// with a subcommand. Kept as `//` rather than `///`: clap promotes a flattened
+// struct's doc comment to the containing command's long help.
+#[derive(Debug, Default, ClapArgs)]
+pub struct TimeRangeArgs {
+    /// Only conversations this recent, as a duration or date (2d, 1d6h, 6mo, 2026-07-20)
+    #[arg(long, value_name = "WHEN", group = "time_lower_bound")]
+    pub since: Option<TimePoint>,
+    /// Alias for --since
+    #[arg(long, value_name = "WHEN", group = "time_lower_bound")]
+    pub after: Option<TimePoint>,
+    /// Only conversations older than this duration or date
+    #[arg(long, value_name = "WHEN")]
+    pub before: Option<TimePoint>,
+}
+
+impl TimeRangeArgs {
+    /// Resolve the flags into a filter, relative to the current instant.
+    pub fn resolve(&self) -> std::result::Result<TimeFilter, TimeFilterError> {
+        TimeFilter::resolve(
+            self.since.as_ref(),
+            self.after.as_ref(),
+            self.before.as_ref(),
+        )
+    }
 }
 
 impl AgentSearchArgs {
@@ -363,6 +396,9 @@ pub struct Args {
         help = "Show only conversations from the current workspace directory"
     )]
     pub local: bool,
+
+    #[command(flatten)]
+    pub time: TimeRangeArgs,
 
     /// Display output through a pager (less)
     #[arg(long, group = "pager_display")]
@@ -499,6 +535,112 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn agent_search_captures_time_range_flags() {
+        let args = Args::try_parse_from([
+            "claude-history",
+            "agent",
+            "search",
+            "cache warming",
+            "--since",
+            "2d",
+            "--before",
+            "2026-07-20",
+        ])
+        .unwrap();
+
+        match args.command.unwrap() {
+            Commands::Agent {
+                command: AgentCommand::Search(search),
+            } => {
+                assert!(search.time.since.is_some());
+                assert!(search.time.after.is_none());
+                assert!(search.time.before.is_some());
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_time_range_flags_are_accepted() {
+        let args = Args::try_parse_from(["claude-history", "--since", "1w"]).unwrap();
+        assert!(args.time.since.is_some());
+        assert!(args.time.resolve().unwrap().is_active());
+    }
+
+    #[test]
+    fn absent_time_range_flags_resolve_to_an_inactive_filter() {
+        let args = Args::try_parse_from(["claude-history"]).unwrap();
+        assert_eq!(args.time.resolve().unwrap(), TimeFilter::default());
+    }
+
+    #[test]
+    fn since_and_after_are_mutually_exclusive() {
+        assert!(
+            Args::try_parse_from(["claude-history", "--since", "2d", "--after", "3d"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "claude-history",
+                "agent",
+                "search",
+                "needle",
+                "--since",
+                "2d",
+                "--after",
+                "3d",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn since_and_before_can_be_combined() {
+        // Absolute on both ends so the assertion does not depend on today's
+        // date the way a relative lower bound would.
+        let args = Args::try_parse_from([
+            "claude-history",
+            "--since",
+            "2026-01-01",
+            "--before",
+            "2026-07-20",
+        ])
+        .unwrap();
+
+        let filter = args.time.resolve().unwrap();
+        assert!(filter.after.is_some());
+        assert!(filter.before.is_some());
+    }
+
+    #[test]
+    fn invalid_time_value_is_rejected_at_parse_time() {
+        let error = Args::try_parse_from(["claude-history", "--since", "30x"])
+            .expect_err("30x is not a valid span");
+
+        // Proves the bare FromStr impl's Display reaches the user rather than a
+        // generic clap "invalid value" message.
+        assert!(
+            error.to_string().contains("unknown unit 'x'"),
+            "unhelpful error: {error}"
+        );
+    }
+
+    #[test]
+    fn inverted_time_range_is_rejected_at_resolve_time() {
+        // clap accepts each value on its own; only resolving the pair catches
+        // the contradiction.
+        let args = Args::try_parse_from([
+            "claude-history",
+            "--after",
+            "2026-07-20",
+            "--before",
+            "2026-01-01",
+        ])
+        .unwrap();
+
+        assert!(args.time.resolve().is_err());
     }
 
     #[test]

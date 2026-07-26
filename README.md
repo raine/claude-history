@@ -192,6 +192,39 @@ Results are ranked by relevance using field-aware scoring: matches in the
 title, project name, and summary are weighted higher than body text. Within
 equally relevant results, recent conversations rank first.
 
+### Time filtering
+
+`--since` narrows to recent conversations, `--before` to older ones, and the two
+combine into a range. `--after` is an alias for `--since`, so the two cannot be
+used together. Both the conversation list and `agent search` accept them:
+
+```sh
+claude-history --since 2d
+claude-history agent search "cache invalidation" --since 1w
+claude-history agent search "cache invalidation" --after 2026-07-01 --before 2026-07-20
+```
+
+A value is either a duration back from now or an absolute local time:
+
+| Form | Meaning |
+| --- | --- |
+| `45s` `30m` `3h` `2d` `1w` | seconds, minutes, hours, days, weeks |
+| `6mo` `1y` | calendar months and years |
+| `1d6h` `1mo2w` | components combine |
+| `2026-07-20` | midnight local time |
+| `2026-07-20T14:30` | a time of day, space instead of `T` also accepted |
+
+Long spellings (`30minutes`, `2days`, `6months`) work too, and units are
+case-insensitive. Note that `m` is minutes and `mo` is months, months and years
+follow the calendar rather than 30- or 365-day approximations, and bounds are
+inclusive to the end of the unit written — so `--before 2026-07-20` includes all
+of the 20th.
+
+Filtering happens before ranking, so all four search modes honour it.
+Conversation times come from the transcript file's modification time — the same
+value behind the `3 days ago` column and the recency ranking bonus — so a
+resumed conversation counts as recent.
+
 ### Semantic search
 
 Semantic search ranks conversations by meaning instead of exact word matches. It
@@ -285,6 +318,9 @@ Options:
       --debug-search <QUERY>  Debug search result scoring for a query
       --debug [<LEVEL>]  Print debug information (optionally filter by level: debug, info, warn, error)
   -L, --local            Show only conversations from the current workspace directory
+      --since <WHEN>     Only conversations this recent (duration or date)
+      --after <WHEN>     Alias for --since
+      --before <WHEN>    Only conversations older than this duration or date
       --pager            Display output through a pager (less)
       --no-pager         Disable pager output
       --render <FILE>    Render a JSONL file in ledger format and exit

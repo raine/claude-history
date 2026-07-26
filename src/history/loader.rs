@@ -14,6 +14,7 @@ use crate::claude::{LogEntry, extract_search_text_from_user, parse_agent_progres
 use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::{AppError, Result};
+use crate::time_filter::TimeFilter;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::{File, read_dir};
@@ -114,11 +115,12 @@ pub fn load_all_conversations(
 pub fn load_all_conversations_streaming(
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time: TimeFilter,
 ) -> Receiver<LoaderMessage> {
     let (tx, rx) = mpsc::channel();
 
     thread::spawn(move || {
-        load_all_streaming_inner(tx, show_last, debug_level);
+        load_all_streaming_inner(tx, show_last, debug_level, time);
     });
 
     rx
@@ -128,6 +130,7 @@ fn load_all_streaming_inner(
     tx: Sender<LoaderMessage>,
     show_last: bool,
     debug_level: Option<DebugLevel>,
+    time: TimeFilter,
 ) {
     // First, validate that the projects root exists (fatal if not)
     let root = match super::get_claude_projects_root() {
@@ -175,6 +178,17 @@ fn load_all_streaming_inner(
                     let project_path = conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
                     conv.project_name = Some(format_short_name_from_path(&project_path));
                     conv.project_path = Some(project_path);
+                }
+
+                // Filtered here rather than inside load_conversations, whose
+                // per-project cache is rebuilt from the vec it returns —
+                // dropping conversations earlier would evict their cache
+                // entries and force a re-parse on every later run.
+                if time.is_active() {
+                    convs.retain(|conv| time.matches(conv.timestamp));
+                    if convs.is_empty() {
+                        return;
+                    }
                 }
 
                 // Send batch, ignore error if receiver dropped

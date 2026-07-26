@@ -20,15 +20,33 @@ fn project(config: &Path) -> PathBuf {
 }
 
 fn write_transcript(path: &Path, needle: &str) {
+    write_transcript_at(path, needle, "2026-07-20");
+}
+
+/// Backdate a transcript's modification time.
+///
+/// Conversation timestamps come from the file's mtime (see
+/// `history::parser`), not from the records inside it, so time filtering can
+/// only be exercised by changing the mtime. `stamp` is `YYYYMMDDhhmm`.
+fn set_modified(path: &Path, stamp: &str) {
+    let status = Command::new("touch")
+        .args(["-t", stamp])
+        .arg(path)
+        .status()
+        .expect("run touch");
+    assert!(status.success(), "touch -t {stamp} failed");
+}
+
+fn write_transcript_at(path: &Path, needle: &str, date: &str) {
     let user = serde_json::json!({
         "type": "user",
-        "timestamp": "2026-07-20T00:00:00Z",
+        "timestamp": format!("{date}T00:00:00Z"),
         "cwd": "/tmp/agent-phase3-tests",
         "message": {"role": "user", "content": needle}
     });
     let assistant = serde_json::json!({
         "type": "assistant",
-        "timestamp": "2026-07-20T00:00:01Z",
+        "timestamp": format!("{date}T00:00:01Z"),
         "message": {"role": "assistant", "content": [{"type": "text", "text": "answer"}]}
     });
     std::fs::write(path, format!("{user}\n{assistant}\n")).expect("write transcript");
@@ -237,4 +255,115 @@ fn agent_filesystem_failures_use_io_envelope() {
     let output = run(config.path(), &["agent", "search", "--lexical", "needle"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("protocol agent-error kind=io"));
+}
+
+#[test]
+fn search_time_range_narrows_the_corpus_without_reporting_skips() {
+    let config = tempfile::tempdir().expect("config");
+    let project = project(config.path());
+
+    let recent = project.join("11111111-1111-4111-9111-111111111111.jsonl");
+    let old = project.join("22222222-2222-4222-9222-222222222222.jsonl");
+    write_transcript_at(&recent, "time filter needle", "2026-07-20");
+    write_transcript_at(&old, "time filter needle", "2020-01-15");
+    set_modified(&recent, "202607200000");
+    set_modified(&old, "202001150000");
+
+    let unfiltered = run(
+        config.path(),
+        &["agent", "search", "--lexical", "time filter needle"],
+    );
+    assert!(
+        unfiltered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unfiltered.stderr)
+    );
+    let unfiltered_stdout = String::from_utf8_lossy(&unfiltered.stdout);
+    assert!(unfiltered_stdout.contains("uuid=11111111"));
+    assert!(unfiltered_stdout.contains("uuid=22222222"));
+
+    let filtered = run(
+        config.path(),
+        &[
+            "agent",
+            "search",
+            "--lexical",
+            "time filter needle",
+            "--since",
+            "2026-01-01",
+        ],
+    );
+    assert!(
+        filtered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&filtered.stderr)
+    );
+    let filtered_stdout = String::from_utf8_lossy(&filtered.stdout);
+    assert!(filtered_stdout.contains("uuid=11111111"));
+    assert!(
+        !filtered_stdout.contains("uuid=22222222"),
+        "out-of-window conversation still returned: {filtered_stdout}"
+    );
+
+    // Key discovery walks the projects directory independently of the time
+    // filter, so an unfiltered key list would report every excluded
+    // conversation as a skipped transcript and claim partial coverage.
+    assert!(
+        !filtered_stdout.contains("kind=skipped"),
+        "filtered-out conversations were reported as skipped: {filtered_stdout}"
+    );
+
+    // The converse: narrowing the key list must not hide diagnostics for files
+    // that are inside the window but failed to parse, or a filtered search would
+    // claim full coverage it does not have.
+    let unparseable = project.join("33333333-3333-4333-9333-333333333333.jsonl");
+    std::fs::write(&unparseable, "{malformed\n").expect("write malformed transcript");
+    set_modified(&unparseable, "202607200000");
+
+    let with_malformed = run(
+        config.path(),
+        &[
+            "agent",
+            "search",
+            "--lexical",
+            "time filter needle",
+            "--since",
+            "2026-01-01",
+        ],
+    );
+    assert!(with_malformed.status.success());
+    let with_malformed_stdout = String::from_utf8_lossy(&with_malformed.stdout);
+    assert!(
+        with_malformed_stdout.contains("kind=malformed-transcript"),
+        "in-window malformed transcript was silently dropped: {with_malformed_stdout}"
+    );
+}
+
+#[test]
+fn search_rejects_an_inverted_time_range() {
+    let config = tempfile::tempdir().expect("config");
+    let transcript = project(config.path()).join("33333333-3333-4333-9333-333333333333.jsonl");
+    write_transcript(&transcript, "inverted range needle");
+
+    let output = run(
+        config.path(),
+        &[
+            "agent",
+            "search",
+            "--lexical",
+            "inverted range needle",
+            "--after",
+            "2026-07-20",
+            "--before",
+            "2026-01-01",
+        ],
+    );
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .starts_with("protocol agent-error kind=out-of-range"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

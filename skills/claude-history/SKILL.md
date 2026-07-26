@@ -37,7 +37,21 @@ claude-history agent search "DEPLOYMENT_TOKEN" --mode exact
 ```
 
 Search is global by default. Use `--local` for the current workspace or `--all`
-to explicitly override a configured local scope. Grouped search ranks
+to explicitly override a configured local scope. `--since` and `--before` narrow
+the corpus by time before ranking, and combine with `--local`:
+
+```sh
+claude-history agent search "retry backoff" --since 2d
+claude-history agent search "retry backoff" --after 2026-07-01 --before 2026-07-20 --local
+```
+
+Values are a duration back from now (`45s`, `30m`, `3h`, `2d`, `1w`, `6mo`, `1y`,
+or combined as `1d6h`) or an absolute local time (`2026-07-20`,
+`2026-07-20T14:30`). Note that `m` is minutes and `mo` is months. Bounds are
+inclusive and an upper bound covers the whole unit written, so
+`--before 2026-07-20` includes all of the 20th. `--after` is an alias for
+`--since`; passing both is an error, as is a range whose lower bound is later
+than its upper bound. Grouped search ranks
 conversations. `--flat` ranks message hits across conversations. Use
 `--hits-per-conv` when one conversation needs more evidence and `--all-hits`
 only when duplicate suppression hides relevant tool-heavy evidence.

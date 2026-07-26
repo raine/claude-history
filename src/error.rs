@@ -35,6 +35,9 @@ pub enum AppError {
     #[error("{0}")]
     AgentProtocol(String),
 
+    #[error("Invalid time range: {0}")]
+    TimeFilter(#[from] crate::time_filter::TimeFilterError),
+
     #[error("Semantic search cancelled")]
     SemanticSearchCancelled,
 }

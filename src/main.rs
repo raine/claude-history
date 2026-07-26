@@ -14,6 +14,7 @@ mod semantic;
 mod semantic_cli;
 mod syntax;
 mod text_match;
+mod time_filter;
 mod tool_format;
 mod tui;
 mod update;
@@ -235,9 +236,14 @@ fn run() -> Result<()> {
         }
     }
 
+    // Resolved before the search paths below so every one of them honours the
+    // window rather than silently ignoring it.
+    let time_filter = args.time.resolve()?;
+
     // Handle --debug-search flag: debug search result scoring
     if let Some(ref query) = args.debug_search {
         let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         let searchable = search::precompute_search_text(&conversations);
@@ -317,11 +323,19 @@ fn run() -> Result<()> {
 
     if let Some(ref query) = args.debug_semantic_search {
         let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::debug_search(query, &conversations, args.local);
     }
 
     if args.generate_semantic_cache {
+        // Cache generation covers the whole corpus by definition; a partial
+        // cache would be silently wrong on later unfiltered searches.
+        if time_filter.is_active() {
+            return Err(AppError::ConfigError(
+                "--generate-semantic-cache cannot be combined with a time filter".to_string(),
+            ));
+        }
         let mut conversations = history::load_all_conversations(show_last, args.debug)?;
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::generate_cache(&conversations, args.local);
@@ -334,6 +348,7 @@ fn run() -> Result<()> {
     // Handle --semantic-search flag
     if let Some(ref query) = args.semantic_search {
         let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::run(query, &conversations, args.semantic_top, args.local);
     }
@@ -394,7 +409,16 @@ fn run() -> Result<()> {
     let workspace_filter = use_local;
 
     // Always use streaming global loader for all conversations
-    let rx = history::load_all_conversations_streaming(show_last, args.debug);
+    let rx = history::load_all_conversations_streaming(show_last, args.debug, time_filter);
+
+    // An empty result is far more often the time filter than an empty history,
+    // so say which when a filter is in play.
+    let describe_empty = |error| match error {
+        AppError::NoHistoryFound(scope) if time_filter.is_active() => {
+            AppError::NoHistoryFound(format!("{scope} within the requested time range"))
+        }
+        other => other,
+    };
 
     let (conversations, selected_path) = match tui::run_with_loader(
         rx,
@@ -407,7 +431,9 @@ fn run() -> Result<()> {
         tui::TuiSearchOptions {
             default_mode: tui_search_mode(search_mode),
         },
-    )? {
+    )
+    .map_err(describe_empty)?
+    {
         (tui::Action::Select(path), convs) => (convs, path),
         (tui::Action::Resume(path), convs) => {
             let conv = convs.iter().find(|c| c.path == path);

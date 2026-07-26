@@ -155,9 +155,13 @@ impl AgentService {
         let config = config::load_config()?;
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
+        // Resolved before loading so an inverted range fails without paying for
+        // a full corpus parse.
+        let time = args.time.resolve()?;
         let mut conversations = history::load_all_conversations(false, None)?;
         conversations.retain(|conversation| {
             !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
+                && time.matches(conversation.timestamp)
         });
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let scope = configured_scope(args, &agent_config);
@@ -197,6 +201,15 @@ impl AgentService {
         let (mut keys, mut base_warnings) =
             discover_agent_keys(current_project_dir_name.as_deref())?;
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
+        if time.is_active() {
+            // Key discovery walks the projects directory independently, so
+            // without this every conversation outside the window would be
+            // reported as a skipped transcript rather than simply filtered out.
+            // Tested against each file's own timestamp, not against membership
+            // in `conversations`, so that transcripts inside the window which
+            // failed to parse still report their diagnostics.
+            keys.retain(|key| transcript_timestamp(&key.path).is_none_or(|at| time.matches(at)));
+        }
         base_warnings.extend(warnings_for_skipped_transcripts(
             self,
             &conversations,
@@ -624,6 +637,16 @@ fn ensure_complete_compact_output(output: String) -> Result<String> {
     }
 }
 
+/// The timestamp a transcript is filtered on, matching how conversation
+/// timestamps are derived. `None` when the file cannot be inspected, so callers
+/// keep it rather than silently dropping it.
+fn transcript_timestamp(path: &std::path::Path) -> Option<chrono::DateTime<chrono::Local>> {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .map(chrono::DateTime::<chrono::Local>::from)
+}
+
 fn structured_agent_error(error: AppError) -> AppError {
     match error {
         AppError::Agent(_) => error,
@@ -639,6 +662,9 @@ fn structured_agent_error(error: AppError) -> AppError {
         }
         AppError::Io(error) => AgentError::io(None, error.to_string()).into(),
         AppError::ConfigError(detail) => AgentError::invalid_ref("command", detail).into(),
+        AppError::TimeFilter(error) => {
+            AgentError::out_of_range(Some("command"), error.to_string()).into()
+        }
         error => AgentError::io(None, error.to_string()).into(),
     }
 }
