@@ -51,8 +51,16 @@ pub fn load_all_conversations(
     show_last: bool,
     debug_level: Option<DebugLevel>,
 ) -> Result<Vec<Conversation>> {
-    let root = super::get_claude_projects_root()?;
-    let projects = list_projects(&root)?;
+    let roots = super::get_claude_projects_roots()?;
+    let mut projects: Vec<(PathBuf, Project)> = Vec::new();
+    for root in &roots {
+        if !root.exists() {
+            continue;
+        }
+        for project in list_projects(root)? {
+            projects.push((root.clone(), project));
+        }
+    }
 
     debug::info(
         debug_level,
@@ -62,9 +70,9 @@ pub fn load_all_conversations(
     // Load conversations from all projects in parallel
     let mut all_conversations: Vec<Conversation> = projects
         .par_iter()
-        .flat_map(|project| {
+        .flat_map(|(root, project)| {
             let project_dir = root.join(&project.name);
-            match load_conversations(&project_dir, show_last, &project.name, debug_level) {
+            match load_conversations(&project_dir, show_last, debug_level) {
                 Ok(mut convs) => {
                     // Fallback path for old JSONL files without cwd field
                     let fallback_path = decode_project_dir_name_to_path(&project.name);
@@ -129,8 +137,8 @@ fn load_all_streaming_inner(
     show_last: bool,
     debug_level: Option<DebugLevel>,
 ) {
-    // First, validate that the projects root exists (fatal if not)
-    let root = match super::get_claude_projects_root() {
+    // First, validate that at least one projects root exists (fatal if none)
+    let roots = match super::get_claude_projects_roots() {
         Ok(r) => r,
         Err(e) => {
             let _ = tx.send(LoaderMessage::Fatal(e));
@@ -138,21 +146,29 @@ fn load_all_streaming_inner(
         }
     };
 
-    if !root.exists() {
+    let existing_roots: Vec<_> = roots.iter().filter(|r| r.exists()).collect();
+    if existing_roots.is_empty() {
         let _ = tx.send(LoaderMessage::Fatal(AppError::ProjectsDirNotFound(
-            root.display().to_string(),
+            roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
         )));
         return;
     }
 
-    // List projects (fatal if this fails)
-    let projects = match list_projects(&root) {
-        Ok(p) => p,
-        Err(e) => {
-            let _ = tx.send(LoaderMessage::Fatal(e));
-            return;
+    // List projects across all roots (fatal if any listing fails)
+    let mut projects: Vec<(PathBuf, Project)> = Vec::new();
+    for root in existing_roots {
+        match list_projects(root) {
+            Ok(p) => projects.extend(p.into_iter().map(|project| (root.clone(), project))),
+            Err(e) => {
+                let _ = tx.send(LoaderMessage::Fatal(e));
+                return;
+            }
         }
-    };
+    }
 
     debug::info(
         debug_level,
@@ -160,10 +176,10 @@ fn load_all_streaming_inner(
     );
 
     // Process projects in parallel and send batches as they complete
-    projects.par_iter().for_each(|project| {
+    projects.par_iter().for_each(|(root, project)| {
         let project_dir = root.join(&project.name);
 
-        match load_conversations(&project_dir, show_last, &project.name, debug_level) {
+        match load_conversations(&project_dir, show_last, debug_level) {
             Ok(mut convs) => {
                 if convs.is_empty() {
                     return;
@@ -203,23 +219,23 @@ pub fn find_jsonl_by_uuid(uuid: &str) -> Result<Option<PathBuf>> {
 /// Find all session JSONL files by UUID across all projects.
 /// A session may exist in multiple project directories due to cross-project forking.
 fn find_all_jsonl_by_uuid(uuid: &str) -> Result<Vec<PathBuf>> {
-    let root = super::get_claude_projects_root()?;
-    if !root.exists() {
-        return Ok(Vec::new());
-    }
-
     let filename = format!("{}.jsonl", uuid);
     let mut matches = Vec::new();
 
-    for entry in read_dir(&root)? {
-        let entry = entry?;
-        let project_dir = entry.path();
-        if !project_dir.is_dir() {
+    for root in super::get_claude_projects_roots()? {
+        if !root.exists() {
             continue;
         }
-        let candidate = project_dir.join(&filename);
-        if candidate.exists() {
-            matches.push(candidate);
+        for entry in read_dir(&root)? {
+            let entry = entry?;
+            let project_dir = entry.path();
+            if !project_dir.is_dir() {
+                continue;
+            }
+            let candidate = project_dir.join(&filename);
+            if candidate.exists() {
+                matches.push(candidate);
+            }
         }
     }
 
@@ -283,31 +299,51 @@ pub fn delete_empty_transcripts(
 }
 
 fn find_empty_transcripts(scope: DeleteEmptyScope) -> Result<Vec<EmptyTranscript>> {
-    let root = super::get_claude_projects_root()?;
-    if !root.exists() {
-        return Err(AppError::ProjectsDirNotFound(root.display().to_string()));
+    let roots = super::get_claude_projects_roots()?;
+    let existing_roots: Vec<_> = roots.iter().filter(|r| r.exists()).cloned().collect();
+    if existing_roots.is_empty() {
+        return Err(AppError::ProjectsDirNotFound(
+            roots
+                .iter()
+                .map(|r| r.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
     }
 
-    let projects = match scope {
-        DeleteEmptyScope::All => list_projects(&root)?,
+    let mut projects: Vec<(PathBuf, Project)> = Vec::new();
+    match scope {
+        DeleteEmptyScope::All => {
+            for root in &existing_roots {
+                projects.extend(
+                    list_projects(root)?
+                        .into_iter()
+                        .map(|project| (root.clone(), project)),
+                );
+            }
+        }
         DeleteEmptyScope::Local => {
             let current_dir = std::env::current_dir()?;
             let project_dir_name = super::convert_path_to_project_dir_name(&current_dir);
-            let project_dir = root.join(&project_dir_name);
-            if !project_dir.exists() {
-                return Ok(Vec::new());
+            for root in &existing_roots {
+                if !root.join(&project_dir_name).exists() {
+                    continue;
+                }
+                projects.push((
+                    root.clone(),
+                    Project {
+                        name: project_dir_name.clone(),
+                        display_name: current_dir.display().to_string(),
+                        modified: SystemTime::UNIX_EPOCH,
+                    },
+                ));
             }
-            vec![Project {
-                name: project_dir_name,
-                display_name: current_dir.display().to_string(),
-                modified: SystemTime::UNIX_EPOCH,
-            }]
         }
-    };
+    }
 
     let mut candidates: Vec<EmptyTranscript> = projects
         .par_iter()
-        .flat_map(|project| {
+        .flat_map(|(root, project)| {
             let project_dir = root.join(&project.name);
             let entries = match read_dir(project_dir) {
                 Ok(entries) => entries,
@@ -467,11 +503,10 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
 pub fn load_conversations(
     projects_dir: &Path,
     show_last: bool,
-    project_dir_name: &str,
     debug_level: Option<DebugLevel>,
 ) -> Result<Vec<Conversation>> {
     // Load existing cache for this project
-    let cached_entries = cache::read_project_cache(project_dir_name).unwrap_or_default();
+    let cached_entries = cache::read_project_cache(projects_dir).unwrap_or_default();
 
     // Find all JSONL files and capture metadata in one pass
     let mut files_with_meta = Vec::new();
@@ -652,7 +687,7 @@ pub fn load_conversations(
             }
         }
 
-        cache::write_project_cache(project_dir_name, new_cache);
+        cache::write_project_cache(projects_dir, new_cache);
     }
 
     debug::info(

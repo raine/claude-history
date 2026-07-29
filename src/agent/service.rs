@@ -392,82 +392,88 @@ impl AgentService {
 fn discover_agent_keys(
     project_filter: Option<&str>,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
-    let root = history::get_claude_projects_root().map_err(structured_agent_error)?;
-    let projects = std::fs::read_dir(&root).map_err(|error| {
-        AgentError::io(
-            Some(&root.to_string_lossy()),
-            format!("failed to list projects: {error}"),
-        )
-    })?;
+    let roots = history::get_claude_projects_roots().map_err(structured_agent_error)?;
     let mut keys = Vec::new();
     let mut warnings = Vec::new();
-    for project in projects {
-        let project = match project {
-            Ok(project) => project,
-            Err(error) => {
-                warnings.push(AgentWarning {
-                    kind: AgentWarningKind::Io,
-                    reference: None,
-                    detail: format!("failed to read project entry: {error}"),
-                });
-                continue;
-            }
-        };
-        let project_path = project.path();
-        if !project_path.is_dir() {
+    for root in &roots {
+        if !root.exists() {
             continue;
         }
-        let Some(project_name) = project_path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if project_filter.is_some_and(|filter| !history::is_same_project(project_name, filter)) {
-            continue;
-        }
-        let entries = match std::fs::read_dir(&project_path) {
-            Ok(entries) => entries,
-            Err(error) => {
-                warnings.push(AgentWarning {
-                    kind: AgentWarningKind::Io,
-                    reference: None,
-                    detail: format!(
-                        "failed to list project transcripts at {}: {error}",
-                        project_path.display()
-                    ),
-                });
+        let projects = std::fs::read_dir(root).map_err(|error| {
+            AgentError::io(
+                Some(&root.to_string_lossy()),
+                format!("failed to list projects: {error}"),
+            )
+        })?;
+        for project in projects {
+            let project = match project {
+                Ok(project) => project,
+                Err(error) => {
+                    warnings.push(AgentWarning {
+                        kind: AgentWarningKind::Io,
+                        reference: None,
+                        detail: format!("failed to read project entry: {error}"),
+                    });
+                    continue;
+                }
+            };
+            let project_path = project.path();
+            if !project_path.is_dir() {
                 continue;
             }
-        };
-        for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
+            let Some(project_name) = project_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if project_filter.is_some_and(|filter| !history::is_same_project(project_name, filter))
+            {
+                continue;
+            }
+            let entries = match std::fs::read_dir(&project_path) {
+                Ok(entries) => entries,
                 Err(error) => {
                     warnings.push(AgentWarning {
                         kind: AgentWarningKind::Io,
                         reference: None,
                         detail: format!(
-                            "failed to read transcript entry in {}: {error}",
+                            "failed to list project transcripts at {}: {error}",
                             project_path.display()
                         ),
                     });
                     continue;
                 }
             };
-            let path = entry.path();
-            let Some(filename) = path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-            else {
-                continue;
-            };
-            if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
-                && !filename.starts_with("agent-")
-            {
-                keys.push(agent::refs::AgentConversationKey::new(
-                    project_name,
-                    filename,
-                    path,
-                ));
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        warnings.push(AgentWarning {
+                            kind: AgentWarningKind::Io,
+                            reference: None,
+                            detail: format!(
+                                "failed to read transcript entry in {}: {error}",
+                                project_path.display()
+                            ),
+                        });
+                        continue;
+                    }
+                };
+                let path = entry.path();
+                let Some(filename) = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                if path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+                    && !filename.starts_with("agent-")
+                {
+                    keys.push(agent::refs::AgentConversationKey::new(
+                        project_name,
+                        filename,
+                        path,
+                    ));
+                }
             }
         }
     }

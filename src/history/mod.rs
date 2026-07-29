@@ -99,22 +99,39 @@ pub enum LoaderMessage {
     Done,
 }
 
-/// Get the root Claude projects directory (~/.claude/projects)
-/// Respects CLAUDE_CONFIG_DIR env variable if set.
-pub fn get_claude_projects_root() -> Result<PathBuf> {
-    let claude_dir = if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        PathBuf::from(config_dir)
-    } else {
-        let home_dir = home::home_dir().ok_or_else(|| {
-            AppError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not determine home directory",
-            ))
-        })?;
-        home_dir.join(".claude")
-    };
+/// Get all Claude projects directories.
+/// Respects CLAUDE_CONFIG_DIR env variable if set, which may contain multiple
+/// config directories separated by the platform's PATH separator (`:` on Unix),
+/// e.g. `CLAUDE_CONFIG_DIR=~/.claude-personal:~/.claude-work`.
+pub fn get_claude_projects_roots() -> Result<Vec<PathBuf>> {
+    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let roots: Vec<PathBuf> = std::env::split_paths(&config_dir)
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.join("projects"))
+            .collect();
+        if !roots.is_empty() {
+            return Ok(roots);
+        }
+    }
 
-    Ok(claude_dir.join("projects"))
+    let home_dir = home::home_dir().ok_or_else(|| {
+        AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "Could not determine home directory",
+        ))
+    })?;
+
+    Ok(vec![home_dir.join(".claude").join("projects")])
+}
+
+/// Get the root Claude projects directory (~/.claude/projects)
+/// Respects CLAUDE_CONFIG_DIR env variable if set. When CLAUDE_CONFIG_DIR
+/// contains multiple directories, returns the first one.
+pub fn get_claude_projects_root() -> Result<PathBuf> {
+    Ok(get_claude_projects_roots()?
+        .into_iter()
+        .next()
+        .expect("get_claude_projects_roots returns at least one root"))
 }
 
 /// Get the Claude projects directory for the current working directory
