@@ -576,6 +576,20 @@ If you use the `CLAUDE_CONFIG_DIR` environment variable to store Claude's
 configuration in a non-default location, `claude-history` will respect it
 automatically — no extra flags needed.
 
+`CLAUDE_CONFIG_DIR` may also contain multiple config directories separated by
+the platform's `PATH` separator (`:` on Unix, `;` on Windows). This is handy if
+you keep separate Claude accounts, e.g. one for work and one for personal use:
+
+```sh
+CLAUDE_CONFIG_DIR="$HOME/.claude-personal:$HOME/.claude-work" claude-history
+```
+
+Conversations from all config directories are shown in one list, and resuming a
+conversation launches `claude` with `CLAUDE_CONFIG_DIR` set to the single
+config directory the session belongs to, so the right account is used
+automatically. (Note that `claude` itself expects a single directory — pass the
+multi-directory form only to `claude-history`.)
+
 ## Filtering details
 
 The tool filters out some noisy artifacts before showing conversations, so you

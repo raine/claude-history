@@ -1541,7 +1541,13 @@ fn resolve_claude_resume_action(
             "Cannot determine conversation's project directory".to_string(),
         )
     })?;
-    let cwd_projects_dir = history::get_claude_projects_dir(cwd)?;
+    // Resolve sibling project dirs under the conversation's own projects root, so
+    // comparisons and copies stay within the config dir the session belongs to
+    // when CLAUDE_CONFIG_DIR lists multiple config dirs.
+    let projects_root = conv_projects_dir.parent().ok_or_else(|| {
+        AppError::ClaudeExecutionError("Cannot determine conversation's projects root".to_string())
+    })?;
+    let cwd_projects_dir = projects_root.join(history::convert_path_to_project_dir_name(cwd));
     let project_dir = project_path.filter(|p| p.exists() && p.is_dir());
 
     if project_dir.is_none() || (fork_session && cwd_projects_dir != conv_projects_dir) {
@@ -1555,7 +1561,8 @@ fn resolve_claude_resume_action(
     }
 
     let project_dir = project_dir.unwrap();
-    let project_projects_dir = history::get_claude_projects_dir(project_dir)?;
+    let project_projects_dir =
+        projects_root.join(history::convert_path_to_project_dir_name(project_dir));
     if project_projects_dir == conv_projects_dir {
         Ok(ClaudeResumeAction::Run {
             current_dir: project_dir.clone(),
@@ -1592,6 +1599,17 @@ fn resume_with_claude(
         )
     })?;
 
+    // When CLAUDE_CONFIG_DIR lists multiple config dirs, the spawned claude needs
+    // the single config dir the selected session belongs to.
+    let conv_config_dir = if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+        conv_projects_dir
+            .parent()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+    } else {
+        None
+    };
+
     match resolve_claude_resume_action(selected_path, project_path, &cwd, fork_session)? {
         ClaudeResumeAction::CopyToCurrent { cwd_projects_dir } => {
             std::fs::create_dir_all(&cwd_projects_dir).map_err(AppError::Io)?;
@@ -1606,6 +1624,9 @@ fn resume_with_claude(
             command.args(["--resume", &conversation_id]);
             command.args(default_args);
             command.current_dir(&cwd);
+            if let Some(config_dir) = &conv_config_dir {
+                command.env("CLAUDE_CONFIG_DIR", config_dir);
+            }
             run_claude_command(command)
         }
         ClaudeResumeAction::Run { current_dir } => {
@@ -1616,6 +1637,9 @@ fn resume_with_claude(
             }
             command.args(default_args);
             command.current_dir(current_dir);
+            if let Some(config_dir) = &conv_config_dir {
+                command.env("CLAUDE_CONFIG_DIR", config_dir);
+            }
 
             run_claude_command(command)
         }

@@ -238,3 +238,36 @@ fn agent_filesystem_failures_use_io_envelope() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).starts_with("protocol agent-error kind=io"));
 }
+
+#[test]
+fn multiple_config_dirs_are_merged() {
+    let personal = tempfile::tempdir().expect("personal config");
+    let work = tempfile::tempdir().expect("work config");
+    let personal_transcript =
+        project(personal.path()).join("11111111-1234-4234-9234-123456789abc.jsonl");
+    write_transcript(&personal_transcript, "phase three needle");
+    let work_transcript = project(work.path()).join("22222222-1234-4234-9234-123456789abc.jsonl");
+    write_transcript(&work_transcript, "phase three needle");
+
+    let joined = std::env::join_paths([personal.path(), work.path()]).expect("join config dirs");
+
+    let output = Command::new(binary())
+        .env("CLAUDE_CONFIG_DIR", &joined)
+        .args(["agent", "search", "--lexical", "phase three needle"])
+        .output()
+        .expect("run claude-history");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("11111111-1234-4234-9234-123456789abc"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("22222222-1234-4234-9234-123456789abc"),
+        "{stdout}"
+    );
+}

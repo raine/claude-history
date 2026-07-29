@@ -65,29 +65,34 @@ pub struct CachedParseError {
 }
 
 /// Get the cache directory for per-project cache files.
-/// Respects CLAUDE_CONFIG_DIR to namespace caches per config root.
-fn cache_dir() -> Option<PathBuf> {
-    let base = home::home_dir()?.join(".cache").join("claude-history");
-    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
-        // Namespace by config dir to avoid cross-config cache collisions
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&config_dir, &mut hasher);
-        let hash = std::hash::Hasher::finish(&hasher);
-        Some(base.join(format!("config-{:016x}", hash)).join("projects"))
-    } else {
-        Some(base.join("projects"))
+/// Namespaced by the project's config root (derived from the project path) to
+/// avoid cross-config cache collisions when CLAUDE_CONFIG_DIR points at one or
+/// more non-default locations.
+fn cache_dir(project_dir: &std::path::Path) -> Option<PathBuf> {
+    let home = home::home_dir()?;
+    let base = home.join(".cache").join("claude-history");
+    let default_projects_root = home.join(".claude").join("projects");
+    match project_dir.parent() {
+        Some(projects_root) if projects_root != default_projects_root => {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&projects_root, &mut hasher);
+            let hash = std::hash::Hasher::finish(&hasher);
+            Some(base.join(format!("config-{:016x}", hash)).join("projects"))
+        }
+        _ => Some(base.join("projects")),
     }
 }
 
-/// Get the cache file path for a specific project
-fn cache_path_for_project(project_dir_name: &str) -> Option<PathBuf> {
-    cache_dir().map(|d| d.join(format!("{}.bin", project_dir_name)))
+/// Get the cache file path for a specific project directory
+fn cache_path_for_project(project_dir: &std::path::Path) -> Option<PathBuf> {
+    let name = project_dir.file_name()?.to_str()?;
+    cache_dir(project_dir).map(|d| d.join(format!("{}.bin", name)))
 }
 
 /// Read a project's cache file, returning entries keyed by session filename.
 /// Returns None on any failure (missing, corrupt, version mismatch).
-pub fn read_project_cache(project_dir_name: &str) -> Option<HashMap<String, CacheEntry>> {
-    let path = cache_path_for_project(project_dir_name)?;
+pub fn read_project_cache(project_dir: &std::path::Path) -> Option<HashMap<String, CacheEntry>> {
+    let path = cache_path_for_project(project_dir)?;
     let data = std::fs::read(&path).ok()?;
     if data.len() < 12 {
         return None;
@@ -104,8 +109,8 @@ pub fn read_project_cache(project_dir_name: &str) -> Option<HashMap<String, Cach
 
 /// Write a project's cache file atomically (temp file + rename).
 /// Uses tempfile for safe concurrent writes. Silently ignores failures.
-pub fn write_project_cache(project_dir_name: &str, entries: HashMap<String, CacheEntry>) {
-    let Some(path) = cache_path_for_project(project_dir_name) else {
+pub fn write_project_cache(project_dir: &std::path::Path, entries: HashMap<String, CacheEntry>) {
+    let Some(path) = cache_path_for_project(project_dir) else {
         return;
     };
     let Some(parent) = path.parent() else {
@@ -350,6 +355,14 @@ mod tests {
         assert!(!entry_matches(&entry, 501, mtime));
     }
 
+    fn test_project_dir(name: &str) -> std::path::PathBuf {
+        home::home_dir()
+            .unwrap()
+            .join(".claude")
+            .join("projects")
+            .join(name)
+    }
+
     #[test]
     fn cache_file_roundtrip() {
         // Use a unique project name to avoid test interference
@@ -365,10 +378,10 @@ mod tests {
         entries.insert("empty.jsonl".to_string(), empty_entry(100, mtime));
 
         // Write cache
-        write_project_cache(&project_name, entries);
+        write_project_cache(&test_project_dir(&project_name), entries);
 
         // Read it back
-        let loaded = read_project_cache(&project_name);
+        let loaded = read_project_cache(&test_project_dir(&project_name));
         assert!(loaded.is_some(), "Cache file should be readable");
 
         let loaded = loaded.unwrap();
@@ -384,7 +397,7 @@ mod tests {
         assert!(empty.is_empty);
 
         // Clean up
-        if let Some(path) = cache_path_for_project(&project_name) {
+        if let Some(path) = cache_path_for_project(&test_project_dir(&project_name)) {
             let _ = std::fs::remove_file(path);
         }
     }
@@ -392,13 +405,13 @@ mod tests {
     #[test]
     fn corrupt_cache_returns_none() {
         let project_name = format!("test-corrupt-{}", std::process::id());
-        if let Some(path) = cache_path_for_project(&project_name) {
+        if let Some(path) = cache_path_for_project(&test_project_dir(&project_name)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             // Write garbage
             let _ = std::fs::write(&path, b"not a valid cache file");
-            assert!(read_project_cache(&project_name).is_none());
+            assert!(read_project_cache(&test_project_dir(&project_name)).is_none());
             let _ = std::fs::remove_file(path);
         }
     }
@@ -406,7 +419,7 @@ mod tests {
     #[test]
     fn wrong_version_returns_none() {
         let project_name = format!("test-version-{}", std::process::id());
-        if let Some(path) = cache_path_for_project(&project_name) {
+        if let Some(path) = cache_path_for_project(&test_project_dir(&project_name)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -418,7 +431,7 @@ mod tests {
             };
             let data = bincode::serialize(&cache).unwrap();
             let _ = std::fs::write(&path, &data);
-            assert!(read_project_cache(&project_name).is_none());
+            assert!(read_project_cache(&test_project_dir(&project_name)).is_none());
             let _ = std::fs::remove_file(path);
         }
     }
@@ -426,7 +439,7 @@ mod tests {
     #[test]
     fn wrong_magic_returns_none() {
         let project_name = format!("test-magic-{}", std::process::id());
-        if let Some(path) = cache_path_for_project(&project_name) {
+        if let Some(path) = cache_path_for_project(&test_project_dir(&project_name)) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
@@ -437,13 +450,13 @@ mod tests {
             };
             let data = bincode::serialize(&cache).unwrap();
             let _ = std::fs::write(&path, &data);
-            assert!(read_project_cache(&project_name).is_none());
+            assert!(read_project_cache(&test_project_dir(&project_name)).is_none());
             let _ = std::fs::remove_file(path);
         }
     }
 
     #[test]
     fn missing_cache_returns_none() {
-        assert!(read_project_cache("nonexistent-project-xyz-12345").is_none());
+        assert!(read_project_cache(&test_project_dir("nonexistent-project-xyz-12345")).is_none());
     }
 }
