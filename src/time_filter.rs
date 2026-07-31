@@ -33,7 +33,7 @@ pub enum TimeFilterError {
     UnknownUnit { unit: String, input: String },
     /// The input looked absolute but matched none of the accepted formats.
     UnknownDateFormat(String),
-    /// The local time does not exist or is ambiguous and could not be resolved.
+    /// The local time does not exist because of a timezone transition.
     UnresolvableLocalTime(String),
     /// The resolved span or datetime fell outside the representable range.
     OutOfRange(String),
@@ -133,14 +133,27 @@ struct RelativeSpan {
 
 impl RelativeSpan {
     /// Subtract this span from `now`.
-    fn before(&self, now: DateTime<Local>) -> Option<DateTime<Local>> {
+    fn before(
+        &self,
+        now: DateTime<Local>,
+        bound: Bound,
+    ) -> Result<DateTime<Local>, TimeFilterError> {
         let shifted = if self.months == 0 {
             now
         } else {
-            now.checked_sub_months(Months::new(self.months))?
+            let naive = subtract_calendar_months(now.naive_local(), self.months)
+                .ok_or_else(|| TimeFilterError::OutOfRange(format!("{self:?}")))?;
+            resolve_local(naive, bound)?
         };
-        shifted.checked_sub_signed(self.duration)
+        shifted
+            .checked_sub_signed(self.duration)
+            .ok_or_else(|| TimeFilterError::OutOfRange(format!("{self:?}")))
     }
+}
+
+/// Subtract calendar months without resolving the resulting wall-clock time.
+fn subtract_calendar_months(naive: NaiveDateTime, months: u32) -> Option<NaiveDateTime> {
+    naive.checked_sub_months(Months::new(months))
 }
 
 /// One end of a time range, parsed from a CLI value.
@@ -169,9 +182,7 @@ impl TimePoint {
         bound: Bound,
     ) -> Result<DateTime<Local>, TimeFilterError> {
         match &self.0 {
-            Point::Relative(span) => span
-                .before(now)
-                .ok_or_else(|| TimeFilterError::OutOfRange(format!("{span:?}"))),
+            Point::Relative(span) => span.before(now, bound),
             Point::Absolute { naive, precision } => {
                 // An upper bound written to day precision should include the
                 // whole day, so extend to the last instant it covers.
@@ -182,7 +193,7 @@ impl TimePoint {
                         .and_then(|end| end.checked_sub_signed(Duration::nanoseconds(1)))
                         .ok_or_else(|| TimeFilterError::OutOfRange(naive.to_string()))?,
                 };
-                resolve_local(naive)
+                resolve_local(naive, bound)
             }
         }
     }
@@ -248,14 +259,27 @@ fn parse_absolute(s: &str) -> Result<(NaiveDateTime, Precision), TimeFilterError
 /// Attach the local timezone to a wall-clock time.
 ///
 /// Daylight saving makes this fallible in two ways. When the clocks go back a
-/// local time happens twice; we take the earlier instant so a lower bound stays
-/// inclusive. When they go forward it never happens at all, and there is no
-/// sensible answer, so that is an error.
-fn resolve_local(naive: NaiveDateTime) -> Result<DateTime<Local>, TimeFilterError> {
+/// local time happens twice; lower bounds take the earlier instant and upper
+/// bounds take the later one so inclusive ranges cover both occurrences. When
+/// the clocks go forward it never happens at all, and there is no sensible
+/// answer, so that is an error.
+fn resolve_local(naive: NaiveDateTime, bound: Bound) -> Result<DateTime<Local>, TimeFilterError> {
     match Local.from_local_datetime(&naive) {
         LocalResult::Single(resolved) => Ok(resolved),
-        LocalResult::Ambiguous(earlier, _) => Ok(earlier),
+        LocalResult::Ambiguous(first, second) => Ok(select_ambiguous(first, second, bound)),
         LocalResult::None => Err(TimeFilterError::UnresolvableLocalTime(naive.to_string())),
+    }
+}
+
+fn select_ambiguous<T: Copy + Ord>(first: T, second: T, bound: Bound) -> T {
+    let (earlier, later) = if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    match bound {
+        Bound::Lower => earlier,
+        Bound::Upper => later,
     }
 }
 
@@ -691,6 +715,29 @@ mod tests {
             point.resolve_at(now, Bound::Lower).unwrap(),
             at(2026, 6, 25, 12, 0)
         );
+    }
+
+    #[test]
+    fn calendar_month_subtraction_preserves_wall_clock_time() {
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 12, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+        let expected = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+
+        assert_eq!(subtract_calendar_months(start, 1), Some(expected));
+    }
+
+    #[test]
+    fn ambiguous_bounds_cover_both_possible_instants() {
+        let earlier = chrono::Utc.with_ymd_and_hms(2026, 11, 1, 5, 30, 0).unwrap();
+        let later = chrono::Utc.with_ymd_and_hms(2026, 11, 1, 6, 30, 0).unwrap();
+
+        assert_eq!(select_ambiguous(later, earlier, Bound::Lower), earlier);
+        assert_eq!(select_ambiguous(later, earlier, Bound::Upper), later);
     }
 
     // ==================== filter construction ====================
