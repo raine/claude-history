@@ -1,7 +1,14 @@
+---
+name: claude-history-search
+description: Search, narrow, and quote prior Claude Code conversation history using the claude-history CLI (semantic, lexical, hybrid, or exact search across past sessions).
+---
+
 # claude-history
 
 Use this skill to find, browse, read, or quote prior Claude Code conversations
 with `claude-history`.
+
+This skill was written for `claude-history` 0.1.72.
 
 ## Safety
 
@@ -35,6 +42,12 @@ traces, and quoted text:
 claude-history agent search "auth cache bug" --mode lexical
 claude-history agent search "DEPLOYMENT_TOKEN" --mode exact
 ```
+
+Keep lexical and exact queries short; both rank on the terms you supply, so
+every extra word narrows the match rather than describing it better. If a
+lexical or exact query returns nothing, that is usually a query-shape problem:
+try semantic or hybrid search, as they have the opposite preference and read
+longer, sentence-shaped queries well.
 
 Search is global by default. Use `--local` for the current workspace or `--all`
 to explicitly override a configured local scope. `--since` and `--before` narrow
