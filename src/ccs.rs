@@ -93,7 +93,15 @@ pub struct ProjectRoot {
 }
 
 /// Attempt to discover CCS configuration. Returns None if CCS is not installed.
+///
+/// An explicit `CLAUDE_CONFIG_DIR` pins one Claude config dir (that is how CCS
+/// itself activates a profile), so multi-root aggregation is skipped and only
+/// that root is loaded.
 pub fn discover_ccs() -> Option<CcsInfo> {
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+        return None;
+    }
+
     let home = home::home_dir()?;
     let config_path = home.join(".ccs").join("config.yaml");
     if !config_path.exists() {
