@@ -80,6 +80,38 @@ fn head_contains_marker(path: &Path, markers: &[String]) -> bool {
     })
 }
 
+/// Paths classified as excluded sessions (e.g. ICM memory jobs) in the per-project
+/// caches, across all roots. Read from the caches the loader just refreshed, so
+/// callers that walk the projects tree on their own can drop the same files
+/// without re-reading any transcript head.
+pub fn excluded_session_paths(ccs_info: Option<&CcsInfo>) -> HashSet<PathBuf> {
+    let Ok(roots) = ccs::get_all_project_roots(ccs_info) else {
+        return HashSet::new();
+    };
+
+    let mut excluded = HashSet::new();
+    for root in &roots {
+        let Ok(projects) = list_projects(&root.path) else {
+            continue;
+        };
+        for project in projects {
+            let Some(entries) =
+                cache::read_project_cache_keyed(&project.name, Some(&root.cache_key))
+            else {
+                continue;
+            };
+            let project_dir = root.path.join(&project.name);
+            excluded.extend(
+                entries
+                    .iter()
+                    .filter(|(_, entry)| entry.excluded)
+                    .map(|(filename, _)| project_dir.join(filename)),
+            );
+        }
+    }
+    excluded
+}
+
 /// Load conversations from ALL projects globally (across all CCS roots)
 #[allow(dead_code)]
 pub fn load_all_conversations(

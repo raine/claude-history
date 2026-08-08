@@ -216,6 +216,11 @@ impl AgentService {
         let (mut keys, mut base_warnings) =
             discover_agent_keys(current_project_dir_name.as_deref())?;
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
+        // Key discovery walks the projects directory itself, so sessions the
+        // loader excluded by head marker are absent from `conversations` and
+        // would otherwise be reported — and re-parsed — as skipped transcripts.
+        let excluded_sessions = history::excluded_session_paths(ccs::discover_ccs().as_ref());
+        keys.retain(|key| !excluded_sessions.contains(&key.path));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
             // without this every conversation outside the window would be
