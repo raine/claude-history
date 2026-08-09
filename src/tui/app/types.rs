@@ -11,8 +11,8 @@ use std::sync::Arc;
 pub enum Action {
     Select(PathBuf),
     Delete(PathBuf),
-    Resume(PathBuf),
-    ForkResume(PathBuf),
+    Resume(PathBuf, Option<String>),
+    ForkResume(PathBuf, Option<String>),
     Quit,
 }
 
@@ -33,6 +33,12 @@ pub enum DialogMode {
     SemanticDebug,
     /// Rename the selected conversation
     Rename { input: String, cursor: usize },
+    /// Profile picker for resume/fork (CCS multi-profile support)
+    ProfilePicker {
+        selected: usize,
+        profiles: Vec<String>,
+        is_fork: bool,
+    },
 }
 
 /// Main application mode

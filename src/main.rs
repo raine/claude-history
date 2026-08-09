@@ -1,4 +1,5 @@
 mod agent;
+mod ccs;
 mod claude;
 mod cli;
 mod config;
@@ -159,6 +160,11 @@ fn run() -> Result<()> {
 
     let config = config::load_config()?;
 
+    // Session-head markers used to exclude machine-generated sessions (e.g. ICM
+    // persistent-memory background jobs) from loading. Computed before `config`
+    // fields are consumed below.
+    let exclude_markers = config.exclude_markers();
+
     // Merge CLI arguments with config file settings. CLI takes precedence.
     let display_config = config.display.unwrap_or_default();
 
@@ -218,6 +224,9 @@ fn run() -> Result<()> {
         std::io::stdout().is_terminal(),
     );
 
+    // Discover CCS (early, before any loading)
+    let ccs_info = ccs::discover_ccs();
+
     // Handle --delete flag: delete a session by UUID and exit
     if let Some(ref session_id) = args.delete {
         match history::delete_session_by_uuid(session_id) {
@@ -242,7 +251,12 @@ fn run() -> Result<()> {
 
     // Handle --debug-search flag: debug search result scoring
     if let Some(ref query) = args.debug_search {
-        let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
@@ -322,7 +336,12 @@ fn run() -> Result<()> {
     }
 
     if let Some(ref query) = args.debug_semantic_search {
-        let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::debug_search(query, &conversations, args.local);
@@ -336,7 +355,12 @@ fn run() -> Result<()> {
                 "--generate-semantic-cache cannot be combined with a time filter".to_string(),
             ));
         }
-        let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::generate_cache(&conversations, args.local);
     }
@@ -347,7 +371,12 @@ fn run() -> Result<()> {
 
     // Handle --semantic-search flag
     if let Some(ref query) = args.semantic_search {
-        let mut conversations = history::load_all_conversations(show_last, args.debug)?;
+        let mut conversations = history::load_all_conversations(
+            show_last,
+            args.debug,
+            ccs_info.as_ref(),
+            &exclude_markers,
+        )?;
         conversations.retain(|conversation| time_filter.matches(conversation.timestamp));
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         return semantic_cli::run(query, &conversations, args.semantic_top, args.local);
@@ -408,8 +437,14 @@ fn run() -> Result<()> {
     // --local starts with workspace filter on; default is global (filter off)
     let workspace_filter = use_local;
 
-    // Always use streaming global loader for all conversations
-    let rx = history::load_all_conversations_streaming(show_last, args.debug, time_filter);
+    // Always use streaming global loader for all conversations (across all CCS roots)
+    let rx = history::load_all_conversations_streaming(
+        show_last,
+        args.debug,
+        time_filter,
+        ccs_info.clone(),
+        exclude_markers,
+    );
 
     // An empty result is far more often the time filter than an empty history,
     // so say which when a filter is in play.
@@ -431,20 +466,36 @@ fn run() -> Result<()> {
         tui::TuiSearchOptions {
             default_mode: tui_search_mode(search_mode),
         },
+        ccs_info.clone(),
+        args.profile.clone(),
     )
     .map_err(describe_empty)?
     {
         (tui::Action::Select(path), convs) => (convs, path),
-        (tui::Action::Resume(path), convs) => {
+        (tui::Action::Resume(path, profile), convs) => {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
-            resume_with_claude(&path, project_path, default_args, false)?;
+            resume_with_claude(
+                &path,
+                project_path,
+                default_args,
+                false,
+                profile.as_deref(),
+                ccs_info.as_ref(),
+            )?;
             return Ok(());
         }
-        (tui::Action::ForkResume(path), convs) => {
+        (tui::Action::ForkResume(path, profile), convs) => {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
-            resume_with_claude(&path, project_path, default_args, true)?;
+            resume_with_claude(
+                &path,
+                project_path,
+                default_args,
+                true,
+                profile.as_deref(),
+                ccs_info.as_ref(),
+            )?;
             return Ok(());
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
@@ -487,11 +538,19 @@ fn run() -> Result<()> {
             }
         }
         let project_path = conv.and_then(|c| c.project_path.as_ref());
+        // Use --profile flag or CCS default
+        let profile = args.profile.as_deref().or_else(|| {
+            ccs_info
+                .as_ref()
+                .and_then(|info| info.default_profile.as_deref())
+        });
         resume_with_claude(
             &selected_path,
             project_path,
             default_args,
             args.fork_session,
+            profile,
+            ccs_info.as_ref(),
         )?;
         return Ok(());
     }
@@ -926,6 +985,7 @@ mod agent_command_tests {
             model: None,
             total_tokens: 0,
             duration_minutes: None,
+            source_label: None,
         }
     }
 
@@ -1316,6 +1376,7 @@ mod agent_command_tests {
             model: None,
             total_tokens: 0,
             duration_minutes: None,
+            source_label: None,
         };
         let input = agent::search::AgentConversationInput {
             conversation: &conversation,
@@ -1596,6 +1657,8 @@ fn resume_with_claude(
     project_path: Option<&PathBuf>,
     default_args: &[String],
     fork_session: bool,
+    profile: Option<&str>,
+    ccs_info: Option<&ccs::CcsInfo>,
 ) -> Result<()> {
     let conversation_id = selected_path
         .file_stem()
@@ -1618,6 +1681,10 @@ fn resume_with_claude(
         )
     })?;
 
+    // Resolve CCS profile's config_dir for CLAUDE_CONFIG_DIR
+    let profile_config_dir =
+        profile.and_then(|name| ccs_info.and_then(|info| info.profile_config_dir(name).cloned()));
+
     match resolve_claude_resume_action(selected_path, project_path, &cwd, fork_session)? {
         ClaudeResumeAction::CopyToCurrent { cwd_projects_dir } => {
             std::fs::create_dir_all(&cwd_projects_dir).map_err(AppError::Io)?;
@@ -1632,6 +1699,9 @@ fn resume_with_claude(
             command.args(["--resume", &conversation_id]);
             command.args(default_args);
             command.current_dir(&cwd);
+            if let Some(ref config_dir) = profile_config_dir {
+                command.env("CLAUDE_CONFIG_DIR", config_dir);
+            }
             run_claude_command(command)
         }
         ClaudeResumeAction::Run { current_dir } => {
@@ -1642,6 +1712,9 @@ fn resume_with_claude(
             }
             command.args(default_args);
             command.current_dir(current_dir);
+            if let Some(ref config_dir) = profile_config_dir {
+                command.env("CLAUDE_CONFIG_DIR", config_dir);
+            }
 
             run_claude_command(command)
         }

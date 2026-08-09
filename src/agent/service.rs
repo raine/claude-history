@@ -1,5 +1,6 @@
 use crate::agent;
 use crate::agent::diagnostic::{AgentError, AgentErrorKind, AgentWarning, AgentWarningKind};
+use crate::ccs;
 use crate::cli::{self, AgentCommand, AgentOutlineArgs, AgentReadArgs};
 use crate::config;
 use crate::config::{AgentConfig, AgentScopeConfig};
@@ -75,6 +76,15 @@ fn configured_scope(
             AgentScopeConfig::Local => agent::search::AgentSearchScope::Local,
         }
     }
+}
+
+/// Session-head markers used to exclude machine-generated sessions (e.g. ICM
+/// persistent-memory background jobs) from loading. Agent subcommands load
+/// history outside the main `run()` flow, so they resolve the markers here.
+fn default_exclude_markers() -> Vec<String> {
+    config::load_config()
+        .map(|config| config.exclude_markers())
+        .unwrap_or_default()
 }
 
 fn project_is_excluded(path: &Path, excluded: &[String]) -> bool {
@@ -158,7 +168,12 @@ impl AgentService {
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
-        let mut conversations = history::load_all_conversations(false, None)?;
+        let mut conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         conversations.retain(|conversation| {
             !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
                 && time.matches(conversation.timestamp)
@@ -201,6 +216,11 @@ impl AgentService {
         let (mut keys, mut base_warnings) =
             discover_agent_keys(current_project_dir_name.as_deref())?;
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
+        // Key discovery walks the projects directory itself, so sessions the
+        // loader excluded by head marker are absent from `conversations` and
+        // would otherwise be reported — and re-parsed — as skipped transcripts.
+        let excluded_sessions = history::excluded_session_paths(ccs::discover_ccs().as_ref());
+        keys.retain(|key| !excluded_sessions.contains(&key.path));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
             // without this every conversation outside the window would be
@@ -598,6 +618,7 @@ fn conversation_from_agent_transcript(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        source_label: None,
     }
 }
 
@@ -1111,7 +1132,12 @@ pub(crate) fn resolve_agent_read_args(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations = history::load_all_conversations(false, None)?;
+        let conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };
@@ -1185,7 +1211,12 @@ pub(crate) fn resolve_agent_conversation_arg(
     let keys = if let Some(keys) = keys {
         keys
     } else {
-        let conversations = history::load_all_conversations(false, None)?;
+        let conversations = history::load_all_conversations(
+            false,
+            None,
+            ccs::discover_ccs().as_ref(),
+            &default_exclude_markers(),
+        )?;
         loaded_keys = agent::refs::conversation_keys_from_conversations(&conversations)?;
         &loaded_keys
     };

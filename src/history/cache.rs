@@ -34,6 +34,11 @@ pub struct CacheEntry {
     /// Avoids re-parsing known-empty files on every startup.
     #[serde(default)]
     pub is_empty: bool,
+    /// If true, this file was classified as a machine-generated session to exclude
+    /// (e.g. ICM memory jobs). Negative-caches the head-marker check so the file's
+    /// head is not re-read on every startup.
+    #[serde(default)]
+    pub excluded: bool,
     pub preview_first: String,
     pub preview_last: String,
     pub full_text: String,
@@ -65,10 +70,17 @@ pub struct CachedParseError {
 }
 
 /// Get the cache directory for per-project cache files.
-/// Respects CLAUDE_CONFIG_DIR to namespace caches per config root.
-fn cache_dir() -> Option<PathBuf> {
+/// When a cache_key is provided, uses it for namespacing.
+/// Falls back to CLAUDE_CONFIG_DIR-based namespacing, then default.
+fn cache_dir_with_key(cache_key: Option<&str>) -> Option<PathBuf> {
     let base = home::home_dir()?.join(".cache").join("claude-history");
-    if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+    if let Some(key) = cache_key {
+        if key == "default" {
+            Some(base.join("projects"))
+        } else {
+            Some(base.join(format!("roots-{}", key)).join("projects"))
+        }
+    } else if let Ok(config_dir) = std::env::var("CLAUDE_CONFIG_DIR") {
         // Namespace by config dir to avoid cross-config cache collisions
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::hash::Hash::hash(&config_dir, &mut hasher);
@@ -79,15 +91,38 @@ fn cache_dir() -> Option<PathBuf> {
     }
 }
 
+/// Get the cache directory (legacy, no explicit cache_key)
+fn cache_dir() -> Option<PathBuf> {
+    cache_dir_with_key(None)
+}
+
 /// Get the cache file path for a specific project
 fn cache_path_for_project(project_dir_name: &str) -> Option<PathBuf> {
     cache_dir().map(|d| d.join(format!("{}.bin", project_dir_name)))
 }
 
+/// Get the cache file path for a specific project under a given cache_key
+fn cache_path_for_project_keyed(project_dir_name: &str, cache_key: &str) -> Option<PathBuf> {
+    cache_dir_with_key(Some(cache_key)).map(|d| d.join(format!("{}.bin", project_dir_name)))
+}
+
 /// Read a project's cache file, returning entries keyed by session filename.
 /// Returns None on any failure (missing, corrupt, version mismatch).
+#[allow(dead_code)]
 pub fn read_project_cache(project_dir_name: &str) -> Option<HashMap<String, CacheEntry>> {
-    let path = cache_path_for_project(project_dir_name)?;
+    read_project_cache_keyed(project_dir_name, None)
+}
+
+/// Read a project's cache file with explicit cache_key for namespacing.
+pub fn read_project_cache_keyed(
+    project_dir_name: &str,
+    cache_key: Option<&str>,
+) -> Option<HashMap<String, CacheEntry>> {
+    let path = if let Some(key) = cache_key {
+        cache_path_for_project_keyed(project_dir_name, key)?
+    } else {
+        cache_path_for_project(project_dir_name)?
+    };
     let data = std::fs::read(&path).ok()?;
     if data.len() < 12 {
         return None;
@@ -104,8 +139,22 @@ pub fn read_project_cache(project_dir_name: &str) -> Option<HashMap<String, Cach
 
 /// Write a project's cache file atomically (temp file + rename).
 /// Uses tempfile for safe concurrent writes. Silently ignores failures.
+#[allow(dead_code)]
 pub fn write_project_cache(project_dir_name: &str, entries: HashMap<String, CacheEntry>) {
-    let Some(path) = cache_path_for_project(project_dir_name) else {
+    write_project_cache_keyed(project_dir_name, entries, None);
+}
+
+/// Write a project's cache file with explicit cache_key for namespacing.
+pub fn write_project_cache_keyed(
+    project_dir_name: &str,
+    entries: HashMap<String, CacheEntry>,
+    cache_key: Option<&str>,
+) {
+    let Some(path) = (if let Some(key) = cache_key {
+        cache_path_for_project_keyed(project_dir_name, key)
+    } else {
+        cache_path_for_project(project_dir_name)
+    }) else {
         return;
     };
     let Some(parent) = path.parent() else {
@@ -138,6 +187,7 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         mtime_secs: duration_since_epoch.as_secs(),
         mtime_nsecs: duration_since_epoch.subsec_nanos(),
         is_empty: true,
+        excluded: false,
         preview_first: String::new(),
         preview_last: String::new(),
         full_text: String::new(),
@@ -157,6 +207,15 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
     }
 }
 
+/// Build a negative-cache entry for a file excluded by head-marker classification
+/// (e.g. an ICM memory session). Stores only metadata so the head is not re-read.
+pub fn excluded_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
+    CacheEntry {
+        excluded: true,
+        ..empty_entry(file_size, mtime)
+    }
+}
+
 /// Create a CacheEntry from a parsed Conversation
 pub fn entry_from_conversation(
     conv: &Conversation,
@@ -169,6 +228,7 @@ pub fn entry_from_conversation(
         mtime_secs: duration_since_epoch.as_secs(),
         mtime_nsecs: duration_since_epoch.subsec_nanos(),
         is_empty: false,
+        excluded: false,
         preview_first: conv.preview_first.clone(),
         preview_last: conv.preview_last.clone(),
         full_text: conv.full_text.clone(),
@@ -241,6 +301,7 @@ pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: boo
         model: entry.model.clone(),
         total_tokens: entry.total_tokens,
         duration_minutes: entry.duration_minutes,
+        source_label: None,
     }
 }
 
@@ -282,6 +343,7 @@ mod tests {
             model: Some("claude-opus-4-5-20251101".to_string()),
             total_tokens: 1500,
             duration_minutes: Some(10),
+            source_label: None,
         }
     }
 

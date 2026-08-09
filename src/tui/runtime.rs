@@ -1,5 +1,6 @@
 use super::app::{Action, App, AppMode, DialogMode, TuiSearchOptions};
 use super::ui;
+use crate::ccs::CcsInfo;
 use crate::config::KeyBindings;
 use crate::debug_log;
 use crate::error::{AppError, Result};
@@ -183,6 +184,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn run_with_loader(
     rx: Receiver<LoaderMessage>,
     tool_display: ToolDisplayMode,
@@ -192,6 +194,8 @@ pub fn run_with_loader(
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
+    ccs_info: Option<CcsInfo>,
+    override_profile: Option<String>,
 ) -> Result<(Action, Vec<Conversation>)> {
     let mut guard = TerminalGuard::new()?;
     let mut app = App::new_loading_with_options(
@@ -202,6 +206,8 @@ pub fn run_with_loader(
         current_project_dir_name,
         exclude_projects,
         search_options,
+        ccs_info,
+        override_profile,
     );
 
     loop {

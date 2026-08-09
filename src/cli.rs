@@ -474,6 +474,14 @@ pub struct Args {
     #[arg(long = "clear-semantic-cache", hide = true)]
     pub clear_semantic_cache: bool,
 
+    /// CCS profile name to use when resuming a conversation
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "CCS profile to use when resuming a conversation"
+    )]
+    pub profile: Option<String>,
+
     /// Input JSONL file to view directly (skips conversation selection)
     #[arg(
         value_name = "FILE",

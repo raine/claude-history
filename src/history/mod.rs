@@ -24,8 +24,9 @@ use std::time::SystemTime;
 
 // Re-export public API
 pub use loader::{
-    DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
-    load_all_conversations, load_all_conversations_streaming,
+    DeleteEmptyScope, ICM_SESSION_MARKER, delete_empty_transcripts, delete_session_by_uuid,
+    excluded_session_paths, find_jsonl_by_uuid, load_all_conversations,
+    load_all_conversations_streaming,
 };
 pub(crate) use parser::{
     extract_skill_preview, is_clear_metadata_message, process_conversation_file,
@@ -79,6 +80,8 @@ pub struct Conversation {
     pub total_tokens: u64,
     /// Conversation duration in minutes (from first to last message)
     pub duration_minutes: Option<u64>,
+    /// Source label indicating where this conversation was loaded from (e.g., CCS profile name)
+    pub source_label: Option<String>,
 }
 
 pub struct Project {

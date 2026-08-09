@@ -169,6 +169,11 @@ fn render_list_mode(frame: &mut Frame, app: &App) {
         ),
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::ProfilePicker {
+            selected,
+            profiles,
+            is_fork,
+        } => render_profile_picker(frame, *selected, profiles, *is_fork),
         _ => {}
     }
 }
@@ -253,6 +258,17 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(" semantic·", label_style),
             Span::styled(app.list_search_mode().label(), mode_style),
             Span::raw("  "),
+        ]);
+    }
+
+    // CCS profile badge
+    if let Some(info) = app.ccs_info()
+        && let Some(ref default_name) = info.default_profile
+    {
+        spans.extend([
+            Span::styled("[", label_style),
+            Span::styled(default_name.as_str(), key_style),
+            Span::styled("]  ", label_style),
         ]);
     }
 
@@ -505,6 +521,11 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::ProfilePicker {
+            selected,
+            profiles,
+            is_fork,
+        } => render_profile_picker(frame, *selected, profiles, *is_fork),
         DialogMode::None => {}
     }
 }
@@ -1284,6 +1305,58 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     frame.render_widget(menu_content, inner);
 }
 
+fn render_profile_picker(frame: &mut Frame, selected: usize, profiles: &[String], is_fork: bool) {
+    let title = if is_fork {
+        "Fork with profile"
+    } else {
+        "Resume with profile"
+    };
+
+    let area = frame.area();
+    let menu_width = 35u16;
+    let menu_height = profiles.len() as u16 + 4;
+
+    let menu_area = centered_modal_area(area, menu_width, menu_height);
+
+    frame.render_widget(Clear, menu_area);
+
+    let background = Block::default().style(Style::default().bg(rgb(th().overlay_bg)));
+    frame.render_widget(background, menu_area);
+
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rgb(th().accent)));
+
+    let inner = block.inner(menu_area);
+    frame.render_widget(block, menu_area);
+
+    let mut lines = Vec::new();
+    for (i, name) in profiles.iter().enumerate() {
+        let style = if i == selected {
+            Style::default().fg(rgb(th().accent)).bold()
+        } else {
+            Style::default().fg(rgb(th().text_primary))
+        };
+        let prefix = if i == selected { "▶ " } else { "  " };
+        let label = format!("{}[{}] {}", prefix, i + 1, name);
+        lines.push(Line::styled(label, style));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  [Enter] Select  [Esc] Cancel",
+        Style::default().fg(rgb(th().text_muted)),
+    ));
+
+    if inner.is_empty() {
+        return;
+    }
+
+    let menu_content = Paragraph::new(lines);
+    frame.render_widget(menu_content, inner);
+}
+
 fn render_help_overlay(
     frame: &mut Frame,
     is_view_mode: bool,
@@ -1554,8 +1627,21 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 .map(|s| UnicodeWidthStr::width(s.as_str()))
                 .unwrap_or(0);
 
+            // CCS source label badge (e.g., " [team]")
+            let source_label_len = conv
+                .source_label
+                .as_ref()
+                .map(|l| UnicodeWidthStr::width(l.as_str()) + 3) // " [" + label + "]"
+                .unwrap_or(0);
+
             let available_for_summary = width.saturating_sub(
-                indicator_len + project_len + custom_title_len + right_len + min_padding + 4,
+                indicator_len
+                    + project_len
+                    + source_label_len
+                    + custom_title_len
+                    + right_len
+                    + min_padding
+                    + 4,
             );
 
             // Build summary part (dimmer, dynamically truncated based on available space)
@@ -1574,6 +1660,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
             // Calculate padding for right-aligned timestamp + message count
             let left_len = indicator_len
                 + project_len
+                + source_label_len
                 + custom_title_len
                 + summary_part
                     .as_ref()
@@ -1615,6 +1702,14 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 project_style,
                 highlight_style,
             ));
+
+            // Add CCS source label badge if present (e.g., [team])
+            if let Some(ref label) = conv.source_label {
+                header_spans.push(Span::styled(
+                    format!(" [{}]", label),
+                    Style::default().fg(rgb(th().text_muted)),
+                ));
+            }
 
             // Add custom title if present (with search highlighting)
             if let Some(ref title) = custom_title_part {
@@ -2724,6 +2819,7 @@ mod tests {
             model: None,
             total_tokens: 0,
             duration_minutes: None,
+            source_label: None,
         }
     }
 
