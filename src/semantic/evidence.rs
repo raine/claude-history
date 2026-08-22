@@ -11,17 +11,47 @@ pub fn query_terms(query: &str) -> Vec<String> {
     terms
 }
 
+#[cfg(test)]
 pub fn matched_terms(query: &str, text: &str) -> Vec<String> {
-    let normalized_text = normalize_for_search(text);
-    query_terms(query)
-        .into_iter()
-        .filter(|term| {
-            contains_prefix_match(&normalized_text, term)
-                || (contains_cjk(term) && normalized_text.contains(term))
-        })
-        .collect()
+    matched_terms_prepared(&query_terms(query), &normalize_for_search(text))
 }
 
+/// Same as `matched_terms`, for callers that already hold the normalized
+/// query terms and the normalized text (ranking does this once per chunk
+/// instead of once per chunk per query).
+pub fn matched_terms_prepared(terms: &[String], normalized_text: &str) -> Vec<String> {
+    terms
+        .iter()
+        .filter(|term| {
+            contains_prefix_match(normalized_text, term)
+                || (contains_cjk(term) && normalized_text.contains(term.as_str()))
+        })
+        .cloned()
+        .collect()
+}
+/// True when `evidence_preview(text)` would return `text` unchanged: no tag
+/// opener, no whitespace other than single ASCII spaces, nothing to trim.
+/// Lets callers skip the preview pass (and its copy) for normalized turns.
+pub fn preview_is_identity(text: &str) -> bool {
+    if text.is_empty() {
+        return true;
+    }
+    let mut last_was_space = true; // leading space would be trimmed
+    for ch in text.chars() {
+        if ch == '<' {
+            return false;
+        }
+        if ch.is_whitespace() {
+            if ch != ' ' || last_was_space {
+                return false;
+            }
+            last_was_space = true;
+        } else {
+            last_was_space = false;
+        }
+    }
+    !last_was_space
+}
 pub fn evidence_preview(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut last_was_space = false;

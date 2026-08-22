@@ -40,13 +40,15 @@ pub fn normalize_for_search(text: &str) -> String {
     for ch in text.chars() {
         if is_word_separator(ch) {
             out.push(' ');
+        } else if ch.is_ascii() {
+            // Same result as `ch.to_lowercase()` for ASCII, without the iterator.
+            out.push(ch.to_ascii_lowercase());
         } else {
             out.extend(ch.to_lowercase());
         }
     }
     out
 }
-
 pub fn is_word_separator(c: char) -> bool {
     c.is_whitespace() || c == '_' || c == '-' || c == '/' || is_cjk_punctuation(c)
 }
