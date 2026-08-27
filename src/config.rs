@@ -199,6 +199,23 @@ subagents = true
     }
 
     #[test]
+    fn resume_commands_parse_and_default_to_none() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+[resume]
+claude_command = "my-claude"
+pi_command = "my-pi"
+"#,
+        )
+        .unwrap();
+
+        let resume = config.resume.unwrap();
+        assert_eq!(resume.claude_command.as_deref(), Some("my-claude"));
+        assert_eq!(resume.pi_command.as_deref(), Some("my-pi"));
+        assert_eq!(resume.omp_command, None);
+    }
+
+    #[test]
     fn parses_function_key_binding() {
         let binding = parse_key_binding("f2").unwrap();
         assert_eq!(binding.code, KeyCode::F(2));
@@ -236,6 +253,9 @@ pub struct DisplayConfig {
 #[serde(deny_unknown_fields)]
 pub struct ResumeConfig {
     pub default_args: Option<Vec<String>>,
+    pub claude_command: Option<String>,
+    pub pi_command: Option<String>,
+    pub omp_command: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Default)]
