@@ -132,6 +132,7 @@ impl App {
                 return None;
             }
             DialogMode::Rename { .. } => return self.handle_rename_key(code, modifiers),
+            DialogMode::SubagentPicker { .. } => return self.handle_subagent_picker_key(code),
             DialogMode::None => {}
         }
 
@@ -356,6 +357,10 @@ impl App {
             }
             KeyCode::Char('e') => {
                 self.dialog_mode = DialogMode::ExportMenu { selected: 0 };
+                None
+            }
+            KeyCode::Char('s') => {
+                self.open_subagent_picker();
                 None
             }
             KeyCode::Char('y') => {

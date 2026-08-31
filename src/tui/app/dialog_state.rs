@@ -73,6 +73,67 @@ impl App {
         }
     }
 
+    /// Open the subagent picker for the currently viewed session, if it has
+    /// sidecar `agent-*.jsonl` transcripts. No-op (with a status hint) when
+    /// not in view mode or the session has no subagents.
+    pub(super) fn open_subagent_picker(&mut self) {
+        let path = match &self.app_mode {
+            AppMode::View(state) => state.conversation_path.clone(),
+            _ => return,
+        };
+        let entries = crate::history::discover_subagents(&path);
+        if entries.is_empty() {
+            self.status_message = Some((
+                "No subagents for this session".to_string(),
+                std::time::Instant::now(),
+            ));
+            return;
+        }
+        self.dialog_mode = DialogMode::SubagentPicker {
+            entries,
+            selected: 0,
+        };
+    }
+
+    pub(super) fn handle_subagent_picker_key(&mut self, code: KeyCode) -> Option<Action> {
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let DialogMode::SubagentPicker { selected, .. } = &mut self.dialog_mode {
+                    *selected = selected.saturating_sub(1);
+                }
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let DialogMode::SubagentPicker { entries, selected } = &mut self.dialog_mode {
+                    *selected = (*selected + 1).min(entries.len().saturating_sub(1));
+                }
+                None
+            }
+            KeyCode::Enter => {
+                let path = match &self.dialog_mode {
+                    DialogMode::SubagentPicker { entries, selected } => {
+                        entries.get(*selected).map(|e| e.path.clone())
+                    }
+                    _ => None,
+                };
+                self.dialog_mode = DialogMode::None;
+                if let Some(path) = path {
+                    let content_width = match &self.app_mode {
+                        AppMode::View(state) => state.content_width,
+                        _ => return None,
+                    };
+                    self.open_conversation_path(path, content_width);
+                }
+                None
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.dialog_mode = DialogMode::None;
+                None
+            }
+            _ => None,
+        }
+    }
+
     pub(super) fn handle_help_key(
         &mut self,
         code: KeyCode,

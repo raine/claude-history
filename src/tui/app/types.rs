@@ -33,6 +33,11 @@ pub enum DialogMode {
     SemanticDebug,
     /// Rename the selected conversation
     Rename { input: String, cursor: usize },
+    /// Pick a subagent transcript to open (sidecar `agent-*.jsonl` files)
+    SubagentPicker {
+        entries: Vec<crate::history::SubagentEntry>,
+        selected: usize,
+    },
 }
 
 /// Main application mode

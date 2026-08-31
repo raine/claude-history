@@ -505,6 +505,9 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::SubagentPicker { entries, selected } => {
+            render_subagent_picker(frame, entries, *selected)
+        }
         DialogMode::None => {}
     }
 }
@@ -1284,6 +1287,81 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     frame.render_widget(menu_content, inner);
 }
 
+fn render_subagent_picker(
+    frame: &mut Frame,
+    entries: &[crate::history::SubagentEntry],
+    selected: usize,
+) {
+    let area = frame.area();
+    let title = format!(" Subagents ({}) ", entries.len());
+
+    let max_label = entries
+        .iter()
+        .map(|e| e.label().chars().count())
+        .max()
+        .unwrap_or(0);
+    let menu_width = (max_label as u16)
+        .saturating_add(6)
+        .clamp(30, area.width.saturating_sub(4).max(30));
+
+    // Leave room for border (2) + blank line (1) + hint line (1).
+    let max_rows = area.height.saturating_sub(6).max(1) as usize;
+    let visible = entries.len().min(max_rows).max(1);
+    let menu_height = (visible as u16) + 4;
+
+    let menu_area = centered_modal_area(area, menu_width, menu_height);
+
+    // Clear the area behind the modal first
+    frame.render_widget(Clear, menu_area);
+
+    // Render background
+    let background = Block::default().style(Style::default().bg(rgb(th().overlay_bg)));
+    frame.render_widget(background, menu_area);
+
+    // Render border
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rgb(th().accent)));
+
+    let inner = block.inner(menu_area);
+    frame.render_widget(block, menu_area);
+
+    if inner.is_empty() {
+        return;
+    }
+
+    // Scroll window so the selected entry stays visible.
+    let start = if selected >= visible {
+        selected + 1 - visible
+    } else {
+        0
+    };
+    let end = (start + visible).min(entries.len());
+
+    let mut lines = Vec::new();
+    for (offset, entry) in entries[start..end].iter().enumerate() {
+        let idx = start + offset;
+        let style = if idx == selected {
+            Style::default().fg(rgb(th().accent)).bold()
+        } else {
+            Style::default().fg(rgb(th().text_primary))
+        };
+        let prefix = if idx == selected { "▶ " } else { "  " };
+        // Paragraph clips (does not wrap) so an overlong label stays on one row.
+        lines.push(Line::styled(format!("{}{}", prefix, entry.label()), style));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  [↑/↓] Move  [Enter] Open  [Esc] Cancel",
+        Style::default().fg(rgb(th().text_muted)),
+    ));
+
+    let menu_content = Paragraph::new(lines);
+    frame.render_widget(menu_content, inner);
+}
+
 fn render_help_overlay(
     frame: &mut Frame,
     is_view_mode: bool,
@@ -1313,6 +1391,7 @@ fn render_help_overlay(
             ("t".into(), "Cycle tools: off/trunc/full"),
             ("T".into(), "Toggle thinking"),
             ("i".into(), "Toggle timing"),
+            ("s".into(), "View subagents"),
             ("e".into(), "Export to file"),
             ("y".into(), "Copy to clipboard / message"),
             ("p".into(), "Show file path"),

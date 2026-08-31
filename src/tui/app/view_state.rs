@@ -7,8 +7,6 @@ use std::sync::Arc;
 
 impl App {
     pub fn enter_view_mode(&mut self, content_width: usize) {
-        use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
-
         let Some(selected) = self.selected else {
             return;
         };
@@ -16,6 +14,14 @@ impl App {
             return;
         };
         let path = self.conversations[conv_idx].path.clone();
+        self.open_conversation_path(path, content_width);
+    }
+
+    /// Parse and open an arbitrary conversation transcript by path, switching
+    /// into view mode. Used both by list selection (`enter_view_mode`) and by
+    /// the subagent picker to open sidecar `agent-*.jsonl` files.
+    pub fn open_conversation_path(&mut self, path: std::path::PathBuf, content_width: usize) {
+        use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
 
         let options = RenderOptions {
             tool_display: self.tool_display,

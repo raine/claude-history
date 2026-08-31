@@ -19,6 +19,7 @@ pub mod path;
 pub mod pi;
 pub mod pi_loader;
 mod rename;
+pub mod subagents;
 
 use crate::error::{AppError, Result};
 use chrono::{DateTime, Local};
@@ -35,6 +36,7 @@ pub(crate) use parser::{
 };
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;
+pub use subagents::{SubagentEntry, discover_subagents};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
