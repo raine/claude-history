@@ -113,7 +113,7 @@ pub fn discover_subagents(session_path: &Path) -> Vec<SubagentEntry> {
         ));
     }
 
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by_key(|(mtime, _)| *mtime);
     entries.into_iter().map(|(_, e)| e).collect()
 }
 

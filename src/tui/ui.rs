@@ -862,6 +862,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled("help  ", label_style),
             Span::styled("/", key_style),
             Span::styled("search  ", label_style),
+            Span::styled("s", key_style),
+            Span::styled("ubagents  ", label_style),
             Span::styled("e", key_style),
             Span::styled("xport  ", label_style),
             Span::styled("y", key_style),

@@ -23,6 +23,23 @@ impl App {
     pub fn open_conversation_path(&mut self, path: std::path::PathBuf, content_width: usize) {
         use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
 
+        // When drilling from a subagent back into another subagent, keep the
+        // original parent so Esc still returns to the top-level session. When
+        // returning to the parent itself (path == current parent), the parent
+        // is a top-level session with no parent of its own.
+        let parent_path = match &self.app_mode {
+            AppMode::View(state) => {
+                if state.conversation_path == path {
+                    state.parent_path.clone()
+                } else if state.parent_path.as_deref() == Some(path.as_path()) {
+                    None
+                } else {
+                    Some(state.conversation_path.clone())
+                }
+            }
+            _ => None,
+        };
+
         let options = RenderOptions {
             tool_display: self.tool_display,
             show_thinking: self.show_thinking,
@@ -43,6 +60,7 @@ impl App {
                 };
                 self.app_mode = AppMode::View(ViewState {
                     conversation_path: path,
+                    parent_path,
                     parsed_entries: Some(entries),
                     scroll_offset: 0,
                     rendered_lines: rendered.lines,

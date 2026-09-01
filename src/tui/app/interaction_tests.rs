@@ -529,3 +529,43 @@ fn subagent_picker_escape_closes_without_opening() {
         other => panic!("expected view mode, got {other:?}"),
     }
 }
+
+#[test]
+fn esc_from_subagent_returns_to_parent_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let session = proj.join("sess-4.jsonl");
+    write_named_conversation(&session, "parent body");
+    let agent = write_subagent(
+        &proj.join("sess-4"),
+        "ccc",
+        Some(r#"{"agentType":"Explore","description":"look","toolUseId":"call_1"}"#),
+    );
+
+    let mut app = app_with_conversation(session.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    // Drill into the subagent.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty(), 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty(), 20);
+    match app.app_mode() {
+        AppMode::View(state) => {
+            assert_eq!(state.conversation_path, agent);
+            assert_eq!(state.parent_path.as_deref(), Some(session.as_path()));
+        }
+        other => panic!("expected view mode, got {other:?}"),
+    }
+
+    // Esc returns to the parent session, not the conversation list.
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty(), 20);
+    assert!(matches!(app.app_mode(), AppMode::View(_)));
+    match app.app_mode() {
+        AppMode::View(state) => {
+            assert_eq!(state.conversation_path, session);
+            assert!(state.parent_path.is_none(), "parent itself has no parent");
+        }
+        other => panic!("expected view mode, got {other:?}"),
+    }
+}

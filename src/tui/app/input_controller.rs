@@ -208,6 +208,15 @@ impl App {
                 if self.single_file_mode {
                     return Some(Action::Quit);
                 }
+                // Drilled into a subagent: Esc returns to the parent session
+                // rather than the conversation list.
+                if let AppMode::View(ref state) = self.app_mode
+                    && let Some(parent) = state.parent_path.clone()
+                {
+                    let width = state.content_width;
+                    self.open_conversation_path(parent, width);
+                    return None;
+                }
                 self.app_mode = AppMode::List;
                 None
             }
