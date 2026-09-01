@@ -205,11 +205,9 @@ impl App {
                     self.clear_view_search();
                     return None;
                 }
-                if self.single_file_mode {
-                    return Some(Action::Quit);
-                }
                 // Drilled into a subagent: Esc returns to the parent session
-                // rather than the conversation list.
+                // rather than the conversation list. Checked before
+                // single_file_mode so the feature works in single-file view.
                 if let AppMode::View(ref state) = self.app_mode
                     && let Some(parent) = state.parent_path.clone()
                 {
@@ -217,10 +215,22 @@ impl App {
                     self.open_conversation_path(parent, width);
                     return None;
                 }
+                if self.single_file_mode {
+                    return Some(Action::Quit);
+                }
                 self.app_mode = AppMode::List;
                 None
             }
             KeyCode::Char('q') => {
+                // Match Esc: return to the parent session when drilling into a
+                // subagent, so `q` and Esc behave consistently.
+                if let AppMode::View(ref state) = self.app_mode
+                    && let Some(parent) = state.parent_path.clone()
+                {
+                    let width = state.content_width;
+                    self.open_conversation_path(parent, width);
+                    return None;
+                }
                 if self.single_file_mode {
                     return Some(Action::Quit);
                 }

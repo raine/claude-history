@@ -16,6 +16,7 @@
 //! conversation list. This module enumerates them on demand for a given
 //! session so the TUI can offer a picker.
 
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -73,48 +74,64 @@ pub fn discover_subagents(session_path: &Path) -> Vec<SubagentEntry> {
         return Vec::new();
     };
 
-    let mut entries: Vec<(SystemTime, SubagentEntry)> = Vec::new();
-    for dir_entry in read_dir.flatten() {
-        let path = dir_entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-            continue;
-        }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if !stem.starts_with("agent-") {
-            continue;
-        }
+    // Collect candidate paths first, then read meta files in parallel via
+    // rayon to keep the main TUI thread responsive.
+    let candidates: Vec<PathBuf> = read_dir
+        .flatten()
+        .filter(|entry| {
+            let path = entry.path();
+            path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|stem| stem.starts_with("agent-"))
+        })
+        .map(|entry| entry.path())
+        .collect();
 
-        let meta = std::fs::read_to_string(path.with_extension("meta.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<SubagentMeta>(&s).ok())
-            .unwrap_or_default();
+    let mut entries: Vec<(SystemTime, PathBuf, SubagentEntry)> = candidates
+        .par_iter()
+        .filter_map(|path| {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                return None;
+            };
 
-        let agent_type = if meta.agent_type.is_empty() {
-            stem.to_string()
-        } else {
-            meta.agent_type
-        };
+            let meta = std::fs::read_to_string(path.with_extension("meta.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str::<SubagentMeta>(&s).ok())
+                .unwrap_or_default();
 
-        let mtime = dir_entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(SystemTime::UNIX_EPOCH);
+            let agent_type = if meta.agent_type.is_empty() {
+                stem.to_string()
+            } else {
+                meta.agent_type
+            };
 
-        entries.push((
-            mtime,
-            SubagentEntry {
-                path,
-                agent_type,
-                description: meta.description,
-                tool_use_id: meta.tool_use_id,
-            },
-        ));
-    }
+            let mtime = std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
 
-    entries.sort_by_key(|(mtime, _)| *mtime);
-    entries.into_iter().map(|(_, e)| e).collect()
+            Some((
+                mtime,
+                path.clone(),
+                SubagentEntry {
+                    path: path.clone(),
+                    agent_type,
+                    description: meta.description,
+                    tool_use_id: meta.tool_use_id,
+                },
+            ))
+        })
+        .collect();
+
+    // Sort by mtime, then by path for a deterministic order when mtimes tie
+    // (common on filesystems with second-level granularity).
+    entries.sort_by(|(a_mtime, a_path, _), (b_mtime, b_path, _)| {
+        a_mtime
+            .cmp(b_mtime)
+            .then_with(|| a_path.cmp(b_path))
+    });
+    entries.into_iter().map(|(_, _, e)| e).collect()
 }
 
 #[cfg(test)]

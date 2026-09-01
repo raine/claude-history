@@ -27,17 +27,30 @@ impl App {
         // original parent so Esc still returns to the top-level session. When
         // returning to the parent itself (path == current parent), the parent
         // is a top-level session with no parent of its own.
-        let parent_path = match &self.app_mode {
+        let (parent_path, restore) = match &self.app_mode {
             AppMode::View(state) => {
                 if state.conversation_path == path {
-                    state.parent_path.clone()
+                    (state.parent_path.clone(), None)
                 } else if state.parent_path.as_deref() == Some(path.as_path()) {
-                    None
+                    // Returning to the parent session: preserve the scroll
+                    // position, search state, and expanded tool outputs so the
+                    // user resumes where they left off rather than from the top.
+                    let saved = ViewStateSnapshot {
+                        scroll_offset: state.scroll_offset,
+                        search_mode: state.search_mode.clone(),
+                        search_query: state.search_query.clone(),
+                        search_matches: state.search_matches.clone(),
+                        current_match: state.current_match,
+                        expanded_tool_outputs: state.expanded_tool_outputs.clone(),
+                        message_nav_active: state.message_nav_active,
+                        focused_message: state.focused_message,
+                    };
+                    (None, Some(saved))
                 } else {
-                    Some(state.conversation_path.clone())
+                    (Some(state.parent_path.clone().unwrap_or_else(|| state.conversation_path.clone())), None)
                 }
             }
-            _ => None,
+            _ => (None, None),
         };
 
         let options = RenderOptions {
@@ -58,7 +71,7 @@ impl App {
                 } else {
                     Some(0)
                 };
-                self.app_mode = AppMode::View(ViewState {
+                let mut new_state = ViewState {
                     conversation_path: path,
                     parent_path,
                     parsed_entries: Some(entries),
@@ -78,7 +91,11 @@ impl App {
                     message_nav_active: false,
                     expanded_tool_outputs: BTreeSet::new(),
                     hovered_tool_output: None,
-                });
+                };
+                if let Some(snap) = restore {
+                    snap.restore(&mut new_state);
+                }
+                self.app_mode = AppMode::View(new_state);
             }
             Err(e) => {
                 self.status_message =
@@ -600,6 +617,36 @@ impl App {
 struct ScrollAnchor {
     entry_index: usize,
     relative_row: isize,
+}
+
+/// Snapshot of the ephemeral view state captured before switching to a
+/// subagent, restored when Esc returns to the parent session so the user
+/// resumes at the same scroll position and search state.
+struct ViewStateSnapshot {
+    scroll_offset: usize,
+    search_mode: ViewSearchMode,
+    search_query: String,
+    search_matches: Vec<usize>,
+    current_match: usize,
+    expanded_tool_outputs: BTreeSet<ToolOutputId>,
+    message_nav_active: bool,
+    focused_message: Option<usize>,
+}
+
+impl ViewStateSnapshot {
+    fn restore(self, state: &mut ViewState) {
+        // Clamp scroll_offset to the new total in case the re-rendered
+        // content is shorter than before.
+        let max_scroll = state.total_lines.saturating_sub(state.scroll_offset.max(1));
+        state.scroll_offset = self.scroll_offset.min(max_scroll);
+        state.search_mode = self.search_mode;
+        state.search_query = self.search_query;
+        state.search_matches = self.search_matches;
+        state.current_match = self.current_match;
+        state.expanded_tool_outputs = self.expanded_tool_outputs;
+        state.message_nav_active = self.message_nav_active;
+        state.focused_message = self.focused_message;
+    }
 }
 
 fn capture_anchor(

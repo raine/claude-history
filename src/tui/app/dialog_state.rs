@@ -116,13 +116,17 @@ impl App {
                     }
                     _ => None,
                 };
+                // Capture content_width before closing the dialog, so we don't
+                // read app_mode state after mutating dialog_mode.
+                let content_width = match &self.app_mode {
+                    AppMode::View(state) => Some(state.content_width),
+                    _ => None,
+                };
                 self.dialog_mode = DialogMode::None;
-                if let Some(path) = path {
-                    let content_width = match &self.app_mode {
-                        AppMode::View(state) => state.content_width,
-                        _ => return None,
-                    };
-                    self.open_conversation_path(path, content_width);
+                if let Some(path) = path
+                    && let Some(width) = content_width
+                {
+                    self.open_conversation_path(path, width);
                 }
                 None
             }
