@@ -492,6 +492,21 @@ This provides a cleaner alternative to shell aliases, as the arguments are
 applied specifically when resuming through `claude-history`, without affecting
 how you normally invoke Claude.
 
+If you launch your agent through a wrapper script rather than the stock binary,
+point `claude-history` at it:
+
+```toml
+# ~/.config/claude-history/config.toml
+[resume]
+claude_command = "my-claude"
+pi_command = "my-pi"
+omp_command = "my-omp"
+```
+
+Each defaults to the agent's own name (`claude`, `pi`, `omp`). The value is a
+program name resolved on `PATH`, or an absolute path — not a shell command line,
+so put any fixed flags in `default_args` or inside the wrapper itself.
+
 For regular resumes, use `claude-history --resume` or press `Ctrl+R` in the TUI.
 Configure `[resume].default_args` for arguments that should apply every time
 `claude-history` resumes a session.
@@ -633,6 +648,12 @@ pager = true
 # Default arguments to pass to claude command when resuming
 # Example: default_args = ["--dangerously-skip-permissions"]
 
+# Programs to launch when resuming, for wrapper scripts
+# (default: claude, pi, omp)
+# claude_command = "my-claude"
+# pi_command = "my-pi"
+# omp_command = "my-omp"
+
 [keys]
 # Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
@@ -674,6 +695,15 @@ EOF
   when resuming conversations. Useful for flags like
   `--dangerously-skip-permissions` that you want applied every time you resume.
   Example: `default_args = ["--dangerously-skip-permissions", "--verbose"]`
+- `claude_command` (string): Program to run instead of `claude` when resuming a
+  Claude Code session (default: `claude`)
+- `pi_command` (string): Program to run instead of `pi` when resuming a Pi
+  session (default: `pi`)
+- `omp_command` (string): Program to run instead of `omp` when resuming an omp
+  session (default: `omp`)
+
+  These take a program name found on `PATH` or an absolute path, not a shell
+  command line. Use them when your agent is launched through a wrapper script.
 
 #### Key bindings
 

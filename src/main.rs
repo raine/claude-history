@@ -21,6 +21,7 @@ mod update;
 
 use clap::Parser;
 use cli::{Args, Commands, DeleteEmptyArgs};
+use config::ResumeConfig;
 use error::{AppError, Result};
 use search::mode::{SearchModeResolution, TuiSearchMode};
 use std::io::IsTerminal;
@@ -164,7 +165,6 @@ fn run() -> Result<()> {
 
     // Extract resume config
     let resume_config = config.resume.unwrap_or_default();
-    let default_args = resume_config.default_args.as_deref().unwrap_or(&[]);
 
     let search_config = config.search.unwrap_or_default();
     let tui_config = config.tui.unwrap_or_default();
@@ -452,14 +452,14 @@ fn run() -> Result<()> {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
-            resume_with_agent(source, &path, project_path, default_args, false)?;
+            resume_with_agent(source, &path, project_path, &resume_config, false)?;
             return Ok(());
         }
         (tui::Action::ForkResume(path), convs) => {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
-            resume_with_agent(source, &path, project_path, default_args, true)?;
+            resume_with_agent(source, &path, project_path, &resume_config, true)?;
             return Ok(());
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
@@ -509,7 +509,7 @@ fn run() -> Result<()> {
             source,
             &selected_path,
             project_path,
-            default_args,
+            &resume_config,
             args.fork_session,
         )?;
         return Ok(());
@@ -569,14 +569,14 @@ mod agent_command_tests {
     fn pi_resume_and_fork_commands_use_native_paths_without_claude_defaults() {
         let path = PathBuf::from("/tmp/pi sessions/session.jsonl");
         let cwd = PathBuf::from("/tmp/project");
-        let resume = build_pi_resume_command(&path, Some(&cwd), false);
+        let resume = build_pi_resume_command("pi", &path, Some(&cwd), false);
         assert_eq!(
             resume.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--session"), path.as_os_str()]
         );
         assert_eq!(resume.get_current_dir(), Some(cwd.as_path()));
 
-        let fork = build_pi_resume_command(&path, Some(&cwd), true);
+        let fork = build_pi_resume_command("pi", &path, Some(&cwd), true);
         assert_eq!(
             fork.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--fork"), path.as_os_str()]
@@ -588,7 +588,7 @@ mod agent_command_tests {
     fn omp_resume_and_fork_commands_use_native_paths() {
         let path = PathBuf::from("/tmp/omp sessions/session.jsonl");
         let cwd = PathBuf::from("/tmp/project");
-        let resume = build_omp_resume_command(&path, Some(&cwd), false);
+        let resume = build_omp_resume_command("omp", &path, Some(&cwd), false);
         assert_eq!(resume.get_program(), std::ffi::OsStr::new("omp"));
         assert_eq!(
             resume.get_args().collect::<Vec<_>>(),
@@ -596,12 +596,51 @@ mod agent_command_tests {
         );
         assert_eq!(resume.get_current_dir(), Some(cwd.as_path()));
 
-        let fork = build_omp_resume_command(&path, Some(&cwd), true);
+        let fork = build_omp_resume_command("omp", &path, Some(&cwd), true);
         assert_eq!(
             fork.get_args().collect::<Vec<_>>(),
             vec![std::ffi::OsStr::new("--fork"), path.as_os_str()]
         );
         assert_eq!(fork.get_current_dir(), None);
+    }
+
+    #[test]
+    fn agent_command_defaults_to_the_source_binary() {
+        let config = ResumeConfig::default();
+        assert_eq!(agent_command(history::Source::Claude, &config), "claude");
+        assert_eq!(agent_command(history::Source::Pi, &config), "pi");
+        assert_eq!(agent_command(history::Source::Omp, &config), "omp");
+    }
+
+    #[test]
+    fn agent_command_uses_configured_overrides_per_source() {
+        let config = ResumeConfig {
+            claude_command: Some("my-claude".to_string()),
+            pi_command: Some("my-pi".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(agent_command(history::Source::Claude, &config), "my-claude");
+        assert_eq!(agent_command(history::Source::Pi, &config), "my-pi");
+        assert_eq!(agent_command(history::Source::Omp, &config), "omp");
+    }
+
+    #[test]
+    fn claude_resume_command_uses_configured_program_and_default_args() {
+        let cwd = PathBuf::from("/tmp/project");
+        let args = vec!["--dangerously-skip-permissions".to_string()];
+        let command = build_claude_resume_command("my-claude", "abc-123", true, &args, &cwd);
+
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("my-claude"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new("--resume"),
+                std::ffi::OsStr::new("abc-123"),
+                std::ffi::OsStr::new("--fork-session"),
+                std::ffi::OsStr::new("--dangerously-skip-permissions"),
+            ]
+        );
+        assert_eq!(command.get_current_dir(), Some(cwd.as_path()));
     }
 
     fn key(project: &str, filename: &str) -> AgentConversationKey {
@@ -1847,23 +1886,41 @@ fn resolve_claude_resume_action(
     }
 }
 
+/// The program to launch for `source`, falling back to the agent's own name
+/// when `[resume]` has no override.
+fn agent_command(source: history::Source, config: &ResumeConfig) -> &str {
+    match source {
+        history::Source::Claude => config.claude_command.as_deref(),
+        history::Source::Pi => config.pi_command.as_deref(),
+        history::Source::Omp => config.omp_command.as_deref(),
+    }
+    .unwrap_or_else(|| source.label())
+}
+
 fn resume_with_agent(
     source: history::Source,
     selected_path: &Path,
     project_path: Option<&PathBuf>,
-    default_args: &[String],
+    config: &ResumeConfig,
     fork_session: bool,
 ) -> Result<()> {
+    let command = agent_command(source, config);
     match source {
-        history::Source::Claude => {
-            resume_with_claude(selected_path, project_path, default_args, fork_session)
-        }
+        history::Source::Claude => resume_with_claude(
+            command,
+            selected_path,
+            project_path,
+            config.default_args.as_deref().unwrap_or(&[]),
+            fork_session,
+        ),
         history::Source::Pi => run_claude_command(build_pi_resume_command(
+            command,
             selected_path,
             project_path,
             fork_session,
         )),
         history::Source::Omp => run_claude_command(build_omp_resume_command(
+            command,
             selected_path,
             project_path,
             fork_session,
@@ -1872,11 +1929,12 @@ fn resume_with_agent(
 }
 
 fn build_pi_resume_command(
+    program: &str,
     selected_path: &Path,
     project_path: Option<&PathBuf>,
     fork_session: bool,
 ) -> Command {
-    let mut command = Command::new("pi");
+    let mut command = Command::new(program);
     command.arg(if fork_session { "--fork" } else { "--session" });
     command.arg(selected_path);
     if !fork_session && let Some(project_path) = project_path {
@@ -1886,11 +1944,12 @@ fn build_pi_resume_command(
 }
 
 fn build_omp_resume_command(
+    program: &str,
     selected_path: &Path,
     project_path: Option<&PathBuf>,
     fork_session: bool,
 ) -> Command {
-    let mut command = Command::new("omp");
+    let mut command = Command::new(program);
     command.arg(if fork_session { "--fork" } else { "--resume" });
     command.arg(selected_path);
     if !fork_session && let Some(project_path) = project_path {
@@ -1899,7 +1958,25 @@ fn build_omp_resume_command(
     command
 }
 
+fn build_claude_resume_command(
+    program: &str,
+    conversation_id: &str,
+    fork_session: bool,
+    default_args: &[String],
+    current_dir: &Path,
+) -> Command {
+    let mut command = Command::new(program);
+    command.args(["--resume", conversation_id]);
+    if fork_session {
+        command.arg("--fork-session");
+    }
+    command.args(default_args);
+    command.current_dir(current_dir);
+    command
+}
+
 fn resume_with_claude(
+    program: &str,
     selected_path: &Path,
     project_path: Option<&PathBuf>,
     default_args: &[String],
@@ -1936,23 +2013,21 @@ fn resume_with_claude(
                 &cwd_projects_dir,
             )?;
 
-            let mut command = Command::new("claude");
-            command.args(["--resume", &conversation_id]);
-            command.args(default_args);
-            command.current_dir(&cwd);
-            run_claude_command(command)
+            run_claude_command(build_claude_resume_command(
+                program,
+                &conversation_id,
+                false,
+                default_args,
+                &cwd,
+            ))
         }
-        ClaudeResumeAction::Run { current_dir } => {
-            let mut command = Command::new("claude");
-            command.args(["--resume", &conversation_id]);
-            if fork_session {
-                command.arg("--fork-session");
-            }
-            command.args(default_args);
-            command.current_dir(current_dir);
-
-            run_claude_command(command)
-        }
+        ClaudeResumeAction::Run { current_dir } => run_claude_command(build_claude_resume_command(
+            program,
+            &conversation_id,
+            fork_session,
+            default_args,
+            &current_dir,
+        )),
     }
 }
 
