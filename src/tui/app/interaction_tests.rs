@@ -435,3 +435,137 @@ fn submit_empty_rename_clears_searchable_title() {
     assert_eq!(app.conversations[0].custom_title, None);
     assert!(search::search(&app.conversations, &app.searchable, "old", Local::now()).is_empty());
 }
+
+fn write_subagent(dir: &std::path::Path, id: &str, meta: Option<&str>) -> PathBuf {
+    let subdir = dir.join("subagents");
+    std::fs::create_dir_all(&subdir).unwrap();
+    let agent = subdir.join(format!("agent-{id}.jsonl"));
+    write_named_conversation(&agent, "subagent body");
+    if let Some(meta) = meta {
+        std::fs::write(subdir.join(format!("agent-{id}.meta.json")), meta).unwrap();
+    }
+    agent
+}
+
+#[test]
+fn subagent_picker_opens_selected_subagent() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let session = proj.join("sess-1.jsonl");
+    write_named_conversation(&session, "parent body");
+    let agent = write_subagent(
+        &proj.join("sess-1"),
+        "aaa",
+        Some(r#"{"agentType":"Explore","description":"look","toolUseId":"call_1"}"#),
+    );
+
+    let mut app = app_with_conversation(session, None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    // `s` opens the picker with the one discovered subagent.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty(), 20);
+    match &app.dialog_mode {
+        DialogMode::SubagentPicker { entries, selected } => {
+            assert_eq!(entries.len(), 1);
+            assert_eq!(*selected, 0);
+            assert_eq!(entries[0].agent_type, "Explore");
+        }
+        other => panic!("expected SubagentPicker, got {other:?}"),
+    }
+
+    // Enter opens that subagent transcript in the viewer.
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty(), 20);
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    match app.app_mode() {
+        AppMode::View(state) => assert_eq!(state.conversation_path, agent),
+        other => panic!("expected view mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn subagent_picker_noop_without_subagents() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("sess-2.jsonl");
+    write_named_conversation(&session, "parent body");
+
+    let mut app = app_with_conversation(session.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty(), 20);
+
+    // No dialog opens; a status hint is shown and we stay on the parent.
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    assert!(app.status_message().is_some());
+    match app.app_mode() {
+        AppMode::View(state) => assert_eq!(state.conversation_path, session),
+        other => panic!("expected view mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn subagent_picker_escape_closes_without_opening() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let session = proj.join("sess-3.jsonl");
+    write_named_conversation(&session, "parent body");
+    write_subagent(&proj.join("sess-3"), "bbb", None);
+
+    let mut app = app_with_conversation(session.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty(), 20);
+    assert!(matches!(app.dialog_mode, DialogMode::SubagentPicker { .. }));
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty(), 20);
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    // Still viewing the parent, unchanged.
+    match app.app_mode() {
+        AppMode::View(state) => assert_eq!(state.conversation_path, session),
+        other => panic!("expected view mode, got {other:?}"),
+    }
+}
+
+#[test]
+fn esc_from_subagent_returns_to_parent_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = dir.path().join("proj");
+    std::fs::create_dir_all(&proj).unwrap();
+    let session = proj.join("sess-4.jsonl");
+    write_named_conversation(&session, "parent body");
+    let agent = write_subagent(
+        &proj.join("sess-4"),
+        "ccc",
+        Some(r#"{"agentType":"Explore","description":"look","toolUseId":"call_1"}"#),
+    );
+
+    let mut app = app_with_conversation(session.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    // Drill into the subagent.
+    app.handle_key(KeyCode::Char('s'), KeyModifiers::empty(), 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::empty(), 20);
+    match app.app_mode() {
+        AppMode::View(state) => {
+            assert_eq!(state.conversation_path, agent);
+            assert_eq!(state.parent_path.as_deref(), Some(session.as_path()));
+        }
+        other => panic!("expected view mode, got {other:?}"),
+    }
+
+    // Esc returns to the parent session, not the conversation list.
+    app.handle_key(KeyCode::Esc, KeyModifiers::empty(), 20);
+    assert!(matches!(app.app_mode(), AppMode::View(_)));
+    match app.app_mode() {
+        AppMode::View(state) => {
+            assert_eq!(state.conversation_path, session);
+            assert!(state.parent_path.is_none(), "parent itself has no parent");
+        }
+        other => panic!("expected view mode, got {other:?}"),
+    }
+}
