@@ -35,6 +35,10 @@
             # Some tests require filesystem access not available in Nix sandbox
             doCheck = false;
 
+            doInstallCheck = true;
+            nativeInstallCheckInputs = [ pkgs.versionCheckHook ];
+            versionCheckProgramArg = "--version";
+
             meta = with pkgs.lib; {
               description = "Fuzzy-search Claude Code conversation history from the terminal.";
               homepage = "https://github.com/raine/claude-history";

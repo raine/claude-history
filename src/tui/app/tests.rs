@@ -283,6 +283,22 @@ fn uuid_lookup_bypasses_excluded_projects() {
 }
 
 #[test]
+fn uuid_lookup_uses_pi_header_id_instead_of_timestamped_filename() {
+    let uuid = "01a016dd-caa0-7ab1-873e-661d81757152";
+    let mut pi = conversation(Some("workmux"), "-tmp-workmux", uuid, "needle");
+    pi.source = crate::history::Source::Pi;
+    pi.path = PathBuf::from(format!(
+        "/tmp/pi-sessions/2026-08-18T21-53-49-216Z_{uuid}.jsonl"
+    ));
+    let mut app = app(vec![pi], vec![]);
+
+    app.query = uuid.to_ascii_uppercase();
+    app.update_filter();
+
+    assert_eq!(filtered_projects(&app), vec![Some("workmux")]);
+}
+
+#[test]
 fn stale_response_with_current_generation_but_old_mode_is_ignored() {
     let mut app = app_with_options(
         vec![conversation(

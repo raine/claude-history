@@ -10,7 +10,11 @@ permissions:
 
 jobs:
   flake:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: cachix/install-nix-action@v31

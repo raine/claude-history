@@ -602,13 +602,8 @@ impl App {
     }
 
     pub(super) fn find_or_load_uuid(&mut self, uuid: &str) -> Option<usize> {
-        let uuid_jsonl = format!("{}.jsonl", uuid);
         for (idx, conv) in self.conversations.iter().enumerate() {
-            if conv
-                .path
-                .file_name()
-                .is_some_and(|f| f.to_string_lossy() == uuid_jsonl)
-            {
+            if conv.session_id.eq_ignore_ascii_case(uuid) {
                 return Some(idx);
             }
         }
