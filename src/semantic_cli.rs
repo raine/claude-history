@@ -409,6 +409,19 @@ fn refresh_and_rank_interactive(
 fn semantic_cache_candidates(
     selected: &[&Conversation],
 ) -> Vec<crate::semantic::index::SemanticIndexCandidate> {
+    // One read for the whole corpus, which is what the cache covers. Without
+    // the annotation candidates, a note's chunk embeds at the first query that
+    // scopes it rather than during prewarm.
+    cache_candidates_with(selected, &annotations_by_path(selected))
+}
+
+fn cache_candidates_with(
+    selected: &[&Conversation],
+    annotations: &std::collections::HashMap<
+        std::path::PathBuf,
+        crate::annotations::ConversationAnnotations,
+    >,
+) -> Vec<crate::semantic::index::SemanticIndexCandidate> {
     let mut candidates = semantic_index_candidates(selected);
     for (index, conversation) in selected.iter().enumerate() {
         if !conversation.semantic_turns.is_empty()
@@ -421,8 +434,32 @@ fn semantic_cache_candidates(
                 conversation: std::sync::Arc::new(route),
             });
         }
+        if let Some(found) = annotations.get(&conversation.path)
+            && let Some(annotated) =
+                crate::agent::service::annotation_semantic_conversation(conversation, found)
+        {
+            candidates.push(crate::semantic::index::SemanticIndexCandidate {
+                index,
+                source: crate::semantic::types::SemanticChunkSource::Annotation,
+                conversation: std::sync::Arc::new(annotated),
+            });
+        }
     }
     candidates
+}
+
+/// Annotations for the selected conversations, keyed by transcript path.
+fn annotations_by_path(
+    selected: &[&Conversation],
+) -> std::collections::HashMap<std::path::PathBuf, crate::annotations::ConversationAnnotations> {
+    let paths = selected
+        .iter()
+        .map(|conversation| conversation.path.as_path())
+        .collect::<Vec<_>>();
+    crate::annotations::AnnotatorSet::from_current_config()
+        .read_all(&paths)
+        .into_iter()
+        .collect()
 }
 
 fn semantic_index_candidates(
@@ -811,5 +848,53 @@ mod tests {
         assert!(output.contains("intent: \"alpha\""));
         assert!(output.contains("\"RESTAURANT_SIGNALS\" (Sensitive)"));
         assert!(output.contains("\"lower phrase\" (Insensitive)"));
+    }
+
+    #[test]
+    fn the_cache_covers_a_conversation_s_annotations() {
+        let conversation =
+            SemanticConversationFixture::new("/tmp/session.jsonl", ["dialogue"]).build();
+        let selected = vec![&conversation];
+        let mut annotations = std::collections::HashMap::new();
+        annotations.insert(
+            conversation.path.clone(),
+            crate::annotations::ConversationAnnotations::from_flat(vec![
+                crate::annotations::Annotation {
+                    id: "a".to_string(),
+                    targets: vec![crate::annotations::TargetSpan::single(4)],
+                    kind: "recap".to_string(),
+                    text: "cache rewrite reverted".to_string(),
+                    annotator: "chsum".to_string(),
+                },
+            ]),
+        );
+
+        let candidates = cache_candidates_with(&selected, &annotations);
+
+        // Without an annotation candidate here, the note's chunk embeds at the
+        // first query that scopes it rather than during prewarm.
+        let annotation_candidates = candidates
+            .iter()
+            .filter(|candidate| {
+                candidate.source == crate::semantic::types::SemanticChunkSource::Annotation
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(annotation_candidates.len(), 1);
+        assert_eq!(
+            annotation_candidates[0].conversation.semantic_turns,
+            vec!["cache rewrite reverted".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_conversation_without_annotations_adds_no_candidate() {
+        let conversation =
+            SemanticConversationFixture::new("/tmp/session.jsonl", ["dialogue"]).build();
+
+        let candidates = cache_candidates_with(&[&conversation], &std::collections::HashMap::new());
+
+        assert!(candidates.iter().all(|candidate| {
+            candidate.source != crate::semantic::types::SemanticChunkSource::Annotation
+        }));
     }
 }
