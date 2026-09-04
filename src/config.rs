@@ -21,6 +21,41 @@ pub struct ConfigFile {
     pub tui: Option<TuiConfig>,
     pub search: Option<SearchConfig>,
     pub agent: Option<AgentConfig>,
+    pub annotations: Option<AnnotationsConfig>,
+}
+
+/// Where annotations are read from and written to.
+///
+/// `root` is optional. With it unset, reads and writes both use the default
+/// file-annotator directory, so annotating works without configuration.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationsConfig {
+    /// File-annotator root. Defaults to `~/.local/share/claude-history/annotations`.
+    pub root: Option<PathBuf>,
+}
+
+/// The file-annotator root: the configured path, else
+/// `~/.local/share/claude-history/annotations`.
+///
+/// A missing home directory leaves no default path, and the caller reads no
+/// annotations. A relative fallback would resolve against the working
+/// directory and name a different root per invocation.
+pub fn annotations_root(config: &ConfigFile) -> Option<PathBuf> {
+    if let Some(root) = config
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.root.clone())
+    {
+        return Some(root);
+    }
+    home::home_dir().map(|mut path| {
+        path.push(".local");
+        path.push("share");
+        path.push("claude-history");
+        path.push("annotations");
+        path
+    })
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -245,6 +280,7 @@ pub struct KeysConfig {
     pub fork: Option<KeyBinding>,
     pub rename: Option<KeyBinding>,
     pub delete: Option<KeyBinding>,
+    pub annotate: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,6 +380,7 @@ pub struct KeyBindings {
     pub fork: KeyBinding,
     pub rename: KeyBinding,
     pub delete: KeyBinding,
+    pub annotate: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -365,6 +402,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('x'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            annotate: KeyBinding {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::NONE,
+            },
         }
     }
 }
@@ -379,6 +420,7 @@ impl KeyBindings {
                 fork: cfg.fork.unwrap_or(defaults.fork),
                 rename: cfg.rename.unwrap_or(defaults.rename),
                 delete: cfg.delete.unwrap_or(defaults.delete),
+                annotate: cfg.annotate.unwrap_or(defaults.annotate),
             },
         }
     }

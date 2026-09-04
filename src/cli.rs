@@ -62,8 +62,39 @@ pub enum Commands {
         #[arg(long, group = "delete_empty_scope")]
         all: bool,
     },
+    /// Attach an annotation to a conversation, or remove one
+    Annotate(AnnotateArgs),
     /// Update claude-history to the latest version
     Update,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AnnotateArgs {
+    /// Conversation to annotate: a ch_ ref or a transcript path. With none, the
+    /// annotation lands on the transcript the running session writes to.
+    pub reference: Option<String>,
+    /// Annotation text. A write carries it; --delete names an existing
+    /// annotation and carries none.
+    #[arg(long, required_unless_present = "delete")]
+    pub text: Option<String>,
+    /// JSONL line the annotation attaches to. Repeat for several; a bare
+    /// `--line 7` names one line and `--line 7..9` a run of them. With none, the
+    /// annotation lands on the last prompt typed into the transcript.
+    #[arg(long = "line", value_name = "LINE|START..END")]
+    pub lines: Vec<String>,
+    /// Attach the annotation to the conversation as a whole instead of a line
+    #[arg(long, conflicts_with = "lines")]
+    pub session: bool,
+    /// Producer's label for this annotation. Free text, passed through
+    /// unchanged; the producer sets the vocabulary.
+    #[arg(long, default_value = "note")]
+    pub kind: String,
+    /// Identifier for the annotation. Generated when omitted.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Remove the annotation with this id instead of writing one
+    #[arg(long, conflicts_with_all = ["text", "lines", "kind", "id", "session"])]
+    pub delete: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]

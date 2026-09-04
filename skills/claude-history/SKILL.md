@@ -1,12 +1,12 @@
 ---
 name: claude-history
-description: Find, browse, read, or quote prior Claude Code conversations with the claude-history CLI.
+description: Find, browse, read, quote, or annotate prior Claude Code conversations with the claude-history CLI.
 ---
 
 # claude-history
 
-Use this skill to find, browse, read, or quote prior Claude Code conversations
-with `claude-history`.
+Use this skill to find, browse, read, quote, or annotate prior Claude Code
+conversations with `claude-history`.
 
 ## Safety
 
@@ -115,6 +115,26 @@ claude-history agent read ch_1234abcd5678:m8 --match "historical correction" --c
 Sliced output numbers content lines. A `>` marks a matching line, and `...`
 marks omitted lines between match windows. Both options require one
 single-message ref.
+
+## Annotations
+
+An annotation is text attached to a conversation from outside it. Annotation
+files sit beside the transcripts and never change them, and search returns their
+text alongside conversation content.
+
+```sh
+claude-history annotate --text "decided against the cache rewrite here"
+claude-history annotate ch_1234abcd5678 --line 412 --kind recap --text "..."
+claude-history annotate ch_1234abcd5678 --session --text "..."
+claude-history annotate ch_1234abcd5678 --delete an_18d1c251bbf7eec8
+```
+
+With no conversation named, `CLAUDE_CODE_SESSION_ID` and the working directory's
+project folder compose into the running session's transcript. With no `--line`,
+the annotation attaches to the last line marked `promptSource: "typed"`, which is
+the last prompt a person typed. `--session` attaches it to the conversation as a
+whole and conflicts with `--line`. `--kind` is a free label defaulting to `note`.
+`--delete` names the `id` reported when the annotation was written.
 
 Failures exit nonzero and write one typed compact line to stderr:
 

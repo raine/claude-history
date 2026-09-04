@@ -416,7 +416,7 @@ impl AgentService {
     }
 }
 
-fn discover_agent_keys(
+pub(crate) fn discover_agent_keys(
     project_filter: Option<&str>,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
     let root = history::get_claude_projects_root().map_err(structured_agent_error)?;

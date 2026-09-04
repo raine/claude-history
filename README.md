@@ -400,6 +400,7 @@ Usage: claude-history [OPTIONS] [FILE]
 Commands:
   agent         Run agent-oriented search and transcript commands
   delete-empty  Delete transcript files with no Claude messages
+  annotate      Attach an annotation to a conversation, or remove one
   update        Update claude-history to the latest version
 
 Arguments:
