@@ -82,6 +82,7 @@ mod tests {
             targets: vec![TargetSpan::single(4)],
             kind: "note".to_string(),
             text: text.to_string(),
+            annotator: String::new(),
         }
     }
 

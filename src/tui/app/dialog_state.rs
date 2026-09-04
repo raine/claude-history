@@ -188,11 +188,23 @@ impl App {
             return;
         };
         let path = state.conversation_path.clone();
-        if crate::annotations::delete_one(&path, &id).is_err() {
+        // The annotator holding the note is carried on the note itself, so the
+        // delete reaches the store it came from rather than the one writes go
+        // to.
+        let annotator = state
+            .annotations
+            .session
+            .iter()
+            .chain(state.annotations.positioned.iter())
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.annotator.clone())
+            .unwrap_or_default();
+        if self.annotators().delete(&path, &id, &annotator).is_err() {
             return;
         }
+        let annotations = self.annotators().read_one(&path);
         if let AppMode::View(state) = &mut self.app_mode {
-            state.annotations = crate::annotations::for_conversation(&path);
+            state.annotations = annotations;
             state.focused_annotation = None;
         }
         self.refresh_annotation_count(&path);
@@ -219,18 +231,41 @@ impl App {
         };
         let path = state.conversation_path.clone();
 
+        let replaced_annotator = replacing.as_ref().and_then(|id| {
+            state
+                .annotations
+                .session
+                .iter()
+                .chain(state.annotations.positioned.iter())
+                .find(|annotation| annotation.id == *id)
+                .map(|annotation| annotation.annotator.clone())
+        });
+
         // The replacement is written before the original is removed, so a
         // failure part-way leaves the note present rather than lost.
-        if crate::annotations::write_one(&path, line, &text).is_err() {
+        let annotation = crate::annotations::Annotation {
+            id: crate::annotations::generated_id(),
+            targets: line
+                .map(crate::annotations::TargetSpan::single)
+                .into_iter()
+                .collect(),
+            kind: "note".to_string(),
+            text,
+            annotator: String::new(),
+        };
+        if self.annotators().write(&path, &annotation).is_err() {
             return;
         }
         if let Some(id) = replacing {
-            let _ = crate::annotations::delete_one(&path, &id);
+            let _ = self
+                .annotators()
+                .delete(&path, &id, &replaced_annotator.unwrap_or_default());
         }
         // Re-read rather than appending in memory, so the viewer renders what
-        // the store holds rather than the record this process sent it.
+        // the annotators hold rather than the record this process sent them.
+        let annotations = self.annotators().read_one(&path);
         if let AppMode::View(state) = &mut self.app_mode {
-            state.annotations = crate::annotations::for_conversation(&path);
+            state.annotations = annotations;
             state.focused_annotation = None;
         }
         self.refresh_annotation_count(&path);

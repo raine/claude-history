@@ -103,6 +103,9 @@ pub struct RenderOptions {
     pub expanded_tool_outputs: BTreeSet<ToolOutputId>,
     pub show_annotations: bool,
     pub annotations: crate::annotations::ConversationAnnotations,
+    /// Label per annotator key, printed in the name column. A key absent here
+    /// prints with its first letter capitalised.
+    pub annotator_labels: std::collections::HashMap<String, String>,
     /// Id of the annotation currently selected, styled apart from the rest.
     pub focused_annotation: Option<String>,
 }
@@ -192,6 +195,7 @@ pub fn render_parsed_conversation(
                 options.content_width,
                 options.show_timing,
                 options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                &options.annotator_labels,
             );
         }
     }
@@ -218,6 +222,7 @@ pub fn render_parsed_conversation(
                     options.content_width,
                     options.show_timing,
                     options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                    &options.annotator_labels,
                 );
                 next_annotation += 1;
             }
@@ -266,6 +271,7 @@ pub fn render_parsed_conversation(
                 options.content_width,
                 options.show_timing,
                 options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                &options.annotator_labels,
             );
         }
     }
@@ -286,6 +292,23 @@ pub fn render_parsed_conversation(
 /// subagents hidden -- prints an annotation between its visible neighbours
 /// rather than among the entries it sat with. Stating the line keeps that gap
 /// visible instead of silently approximate.
+/// The name column for one annotation: the annotator's configured label, else
+/// its key with the first letter capitalised, truncated to the column width so
+/// every row's text starts in the same place.
+fn annotator_label(key: &str, labels: &std::collections::HashMap<String, String>) -> String {
+    let full = match labels.get(key) {
+        Some(label) => label.clone(),
+        None => {
+            let mut chars = key.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Note".to_string(),
+            }
+        }
+    };
+    full.chars().take(NAME_WIDTH).collect()
+}
+
 fn push_annotation_lines(
     lines: &mut Vec<RenderedLine>,
     ranges: &mut Vec<AnnotationRange>,
@@ -293,7 +316,9 @@ fn push_annotation_lines(
     content_width: usize,
     timing_enabled: bool,
     focused: bool,
+    labels: &std::collections::HashMap<String, String>,
 ) {
+    let label = annotator_label(&annotation.annotator, labels);
     let start_line = lines.len();
     use ledger::{LedgerRow, NameCol, push_row};
     use timing::TimingSlot;
@@ -360,7 +385,7 @@ fn push_annotation_lines(
     for (index, piece) in wrapped.into_iter().enumerate() {
         let name = if index == 0 {
             NameCol::Label {
-                text: "Note",
+                text: &label,
                 color,
                 bold: true,
                 dimmed: false,

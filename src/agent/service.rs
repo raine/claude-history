@@ -153,9 +153,9 @@ impl AgentService {
 
     fn run_search(&self, args: &cli::AgentSearchArgs) -> Result<String> {
         let config = config::load_config()?;
-        // Read before the per-section moves below: those partially move `config`
-        // and end any borrow of it as a whole.
-        let annotations_root = config::annotations_root(&config);
+        // Built before the per-section moves below: those partially move
+        // `config` and end any borrow of it as a whole.
+        let annotators = crate::annotations::AnnotatorSet::from_config(&config);
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
         // Resolved before loading so an inverted range fails without paying for
@@ -184,14 +184,8 @@ impl AgentService {
         // rather than for every conversation on the machine, and before the
         // corpus is chunked, because the chunker is rebuilt from these
         // conversations and the query arrives after the load.
-        let annotations = match annotations_root {
-            Some(root) => crate::annotations::enrich_scoped(
-                &mut conversations,
-                &scoped,
-                &crate::annotations::FileAnnotator::new(root),
-            )?,
-            None => std::collections::HashMap::new(),
-        };
+        let annotations =
+            crate::annotations::enrich_scoped(&mut conversations, &scoped, &annotators)?;
         let request = agent::search::AgentSearchRequest {
             query: args.query.clone(),
             top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),

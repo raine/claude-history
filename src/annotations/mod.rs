@@ -12,11 +12,15 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 mod command;
+mod command_annotator;
 mod file_annotator;
+mod set;
 mod write;
 
-pub use command::run_annotate;
+pub use command::{generated_id, run_annotate};
+pub use command_annotator::CommandAnnotator;
 pub use file_annotator::{FileAnnotator, sidecar_counts, sidecar_path};
+pub use set::AnnotatorSet;
 
 /// A contiguous run of JSONL lines an annotation attaches to.
 ///
@@ -102,13 +106,19 @@ impl<'de> Deserialize<'de> for TargetSpan {
 ///
 /// An empty `targets` list makes the annotation session-level: it names no line
 /// and carries no position within the conversation.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
 pub struct Annotation {
     pub id: String,
     #[serde(default)]
     pub targets: Vec<TargetSpan>,
     pub kind: String,
     pub text: String,
+    /// Key of the annotator holding this annotation, filled in after a read.
+    /// Skipped by serde so the stored record carries no annotator name: the
+    /// same file read through a differently named entry stays valid, and a
+    /// delete reaches the annotator the note came from.
+    #[serde(skip)]
+    pub annotator: String,
 }
 
 impl Annotation {
@@ -170,44 +180,18 @@ impl ConversationAnnotations {
 /// query rather than once per conversation.
 pub trait Annotator {
     fn read(&self, conversations: &[&Path]) -> Result<Vec<(PathBuf, ConversationAnnotations)>>;
+
+    /// Store one annotation and return the id it was stored under. The id is
+    /// the annotator's, so a later delete names what this annotator holds
+    /// rather than the id the caller supplied.
+    fn write(&self, conversation: &Path, annotation: &Annotation) -> Result<String>;
+
+    /// Remove the annotation carrying `id`. The bool reports whether one was
+    /// found, so a caller states a missing id rather than a silent success.
+    fn delete(&self, conversation: &Path, id: &str) -> Result<bool>;
 }
 
-/// Write one annotation against a conversation, into the file annotator's root.
-///
-/// `line` names the JSONL line it attaches to; `None` attaches it to the
-/// session. The kind is `mark`, because a caller writing through this path is a
-/// person choosing to note something rather than a tool generating a summary.
-pub fn write_one(conversation: &Path, line: Option<usize>, text: &str) -> Result<()> {
-    let config = crate::config::load_config()?;
-    let annotation = Annotation {
-        id: command::generated_id(),
-        targets: line.map(TargetSpan::single).into_iter().collect(),
-        kind: "mark".to_string(),
-        text: text.to_string(),
-    };
-
-    let Some(root) = crate::config::annotations_root(&config) else {
-        return Err(crate::error::AppError::ConfigError(
-            "no annotations root: set annotations.root, or make a home directory reachable"
-                .to_string(),
-        ));
-    };
-    write::append_to_file(&root, conversation, &annotation)
-}
-
-/// Remove one annotation by id from the file annotator's root.
-///
-/// Returns whether a matching annotation was found, so a caller reports a
-/// missing id rather than a silent success.
-pub fn delete_one(conversation: &Path, id: &str) -> Result<bool> {
-    let config = crate::config::load_config()?;
-    let Some(root) = crate::config::annotations_root(&config) else {
-        return Ok(false);
-    };
-    write::remove_from_file(&root, conversation, id)
-}
-
-/// Annotations for one conversation, read from the configured file root.
+/// Annotations for one conversation, merged across every registered annotator.
 ///
 /// Every failure yields no annotations rather than an error: a viewer opening a
 /// transcript shows the transcript whether or not annotations are readable.
@@ -215,15 +199,7 @@ pub fn for_conversation(conversation: &Path) -> ConversationAnnotations {
     let Ok(config) = crate::config::load_config() else {
         return ConversationAnnotations::default();
     };
-    let Some(root) = crate::config::annotations_root(&config) else {
-        return ConversationAnnotations::default();
-    };
-    FileAnnotator::new(root)
-        .read(&[conversation])
-        .ok()
-        .and_then(|read| read.into_iter().next())
-        .map(|(_, annotations)| annotations)
-        .unwrap_or_default()
+    AnnotatorSet::from_config(&config).read_one(conversation)
 }
 
 /// Read annotations for the scoped conversations and append their text to the
@@ -240,7 +216,7 @@ pub fn for_conversation(conversation: &Path) -> ConversationAnnotations {
 pub fn enrich_scoped(
     conversations: &mut [crate::history::Conversation],
     scoped: &[usize],
-    annotator: &dyn Annotator,
+    annotators: &AnnotatorSet,
 ) -> Result<std::collections::HashMap<usize, ConversationAnnotations>> {
     let paths = scoped
         .iter()
@@ -251,7 +227,7 @@ pub fn enrich_scoped(
         return Ok(std::collections::HashMap::new());
     }
 
-    let read = annotator.read(&paths)?;
+    let read = annotators.read_all(&paths);
     if read.is_empty() {
         return Ok(std::collections::HashMap::new());
     }

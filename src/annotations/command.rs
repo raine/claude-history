@@ -1,8 +1,7 @@
 //! The `claude-history annotate` command.
 
-use super::{Annotation, TargetSpan, write};
+use super::{Annotation, TargetSpan};
 use crate::cli::AnnotateArgs;
-use crate::config;
 use crate::error::{AppError, Result};
 
 /// Parse one `--line` value: `7` names a single line, `7..9` a run of them.
@@ -32,14 +31,19 @@ fn parse_line_argument(value: &str) -> Result<TargetSpan> {
     Ok(TargetSpan { start, end })
 }
 
-/// An identifier for an annotation the caller did not name, unique enough that
-/// two writes in the same second do not collide.
-pub(super) fn generated_id() -> String {
+/// An identifier for an annotation the caller did not name.
+///
+/// The clock supplies the leading half and a counter the trailing half: two
+/// writes inside one clock tick read the same nanosecond, and an id repeated
+/// there would address the earlier annotation on a later delete.
+pub fn generated_id() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
-    format!("an_{now:x}")
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("an_{now:x}_{sequence:x}")
 }
 
 /// The transcript the running session writes to.
@@ -100,13 +104,7 @@ fn latest_typed_prompt_line(path: &std::path::Path) -> Result<Option<usize>> {
 }
 
 pub fn run_annotate(args: AnnotateArgs) -> Result<String> {
-    let config = config::load_config()?;
-    let root = config::annotations_root(&config).ok_or_else(|| {
-        AppError::ConfigError(
-            "no annotations root: set annotations.root, or make a home directory reachable"
-                .to_string(),
-        )
-    })?;
+    let annotators = super::AnnotatorSet::from_current_config();
     // A transcript path is accepted alongside a ch_ ref. The viewer and a tool
     // watching the file already hold a path; without this arm each one runs a
     // search that returns the reference the path already names. Anything else
@@ -131,9 +129,18 @@ pub fn run_annotate(args: AnnotateArgs) -> Result<String> {
 
     if let Some(id) = args.delete {
         // The annotation is addressed by id rather than by position, because a
-        // sidecar is rewritten whenever anything is removed from it and every
-        // position after the removal would shift.
-        if write::remove_from_file(&root, &conversation, &id)? {
+        // store is rewritten whenever anything is removed from it and every
+        // position after the removal would shift. The annotator holding it is
+        // found by reading, so a delete reaches the store the id came from.
+        let annotations = annotators.read_one(&conversation);
+        let holder = annotations
+            .session
+            .iter()
+            .chain(annotations.positioned.iter())
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.annotator.clone())
+            .unwrap_or_default();
+        if annotators.delete(&conversation, &id, &holder)? {
             return Ok(format!("removed {id}\n"));
         }
         return Err(AppError::ConfigError(format!(
@@ -169,14 +176,14 @@ pub fn run_annotate(args: AnnotateArgs) -> Result<String> {
         targets,
         kind: args.kind,
         text,
+        annotator: String::new(),
     };
 
-    write::append_to_file(&root, &conversation, &annotation)?;
+    // The id reported is the one the annotator stored under, which is what a
+    // later delete names.
+    let stored = annotators.write(&conversation, &annotation)?;
 
-    Ok(format!(
-        "annotated {label}{placement} as {}\n",
-        annotation.id
-    ))
+    Ok(format!("annotated {label}{placement} as {stored}\n"))
 }
 
 #[cfg(test)]

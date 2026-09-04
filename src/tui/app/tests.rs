@@ -1714,6 +1714,22 @@ fn single_file_mode_has_no_project_exclusions() {
     assert!(app.is_single_file_mode());
 }
 
+/// An annotator set holding only the file annotator, rooted at `root`.
+fn annotator_set_rooted_at(root: PathBuf) -> crate::annotations::AnnotatorSet {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(
+        crate::config::DEFAULT_ANNOTATOR.to_string(),
+        crate::config::AnnotatorConfig {
+            root: Some(root),
+            ..crate::config::AnnotatorConfig::default()
+        },
+    );
+    crate::annotations::AnnotatorSet::from_config(&crate::config::ConfigFile {
+        annotators: Some(table),
+        ..crate::config::ConfigFile::default()
+    })
+}
+
 /// Writes one sidecar for `conversation` under a fresh annotations root and
 /// returns that root, mirroring the layout the file annotator reads.
 fn annotations_root_with_note(
@@ -1753,7 +1769,7 @@ fn a_note_makes_its_conversation_match_a_list_search() {
     let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
 
     let mut app = app(vec![conv], vec![]);
-    app.set_annotations_root_for_test(root);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
     app.finish_loading();
 
     app.query = "pelican".to_string();
@@ -1774,7 +1790,7 @@ fn note_text_reaches_the_field_the_evidence_line_is_drawn_from() {
     let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
 
     let mut app = app(vec![conv], vec![]);
-    app.set_annotations_root_for_test(root);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
     app.finish_loading();
 
     // The evidence builder reads full_text and skips what the preview already
@@ -1806,7 +1822,7 @@ fn enrichment_appends_one_copy_of_a_note() {
     let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
 
     let mut app = app(vec![conv], vec![]);
-    app.set_annotations_root_for_test(root);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
     app.finish_loading();
     // A second pass would double the note's text and with it its lexical weight.
     app.finish_loading();

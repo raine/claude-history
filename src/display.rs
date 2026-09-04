@@ -818,6 +818,7 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
         expanded_tool_outputs: BTreeSet::new(),
         show_annotations: true,
         annotations: crate::annotations::for_conversation(file_path),
+        annotator_labels: crate::annotations::AnnotatorSet::from_current_config().labels(),
         focused_annotation: None,
     };
 

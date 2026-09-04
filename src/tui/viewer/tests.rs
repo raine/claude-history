@@ -327,6 +327,7 @@ fn test_render_options(tool_display: ToolDisplayMode) -> RenderOptions {
         expanded_tool_outputs: BTreeSet::new(),
         show_annotations: false,
         annotations: crate::annotations::ConversationAnnotations::default(),
+        annotator_labels: std::collections::HashMap::new(),
         focused_annotation: None,
     }
 }
@@ -345,6 +346,7 @@ fn annotation(
             .collect(),
         kind: kind.to_string(),
         text: text.to_string(),
+        annotator: String::new(),
     }
 }
 
@@ -1696,4 +1698,50 @@ fn excluded_entry_kinds_produce_no_lines() {
         render_parsed_conversation(&entries, &test_render_options(ToolDisplayMode::Hidden));
     assert!(rendered.lines.is_empty());
     assert!(rendered.messages.is_empty());
+}
+
+#[test]
+fn a_note_prints_the_label_of_the_annotator_holding_it() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "recap", "cache rewrite reverted", vec![1]);
+    note.annotator = "chsum".to_string();
+    let mut options = annotated_options(vec![note], true);
+    options
+        .annotator_labels
+        .insert("chsum".to_string(), "Chsum".to_string());
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    assert!(rendered.contains("Chsum"), "{rendered}");
+    assert!(!rendered.contains("Note"), "{rendered}");
+}
+
+#[test]
+fn a_note_from_an_unlabelled_annotator_prints_its_key_capitalised() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "note", "by hand", vec![1]);
+    note.annotator = "file".to_string();
+    let options = annotated_options(vec![note], true);
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    assert!(rendered.contains("File"), "{rendered}");
+}
+
+#[test]
+fn a_label_longer_than_the_name_column_is_truncated() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "finding", "unchecked index", vec![1]);
+    note.annotator = "review".to_string();
+    let mut options = annotated_options(vec![note], true);
+    options
+        .annotator_labels
+        .insert("review".to_string(), "CodeReviewer".to_string());
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    // Nine characters is the width every other name in the ledger occupies;
+    // a wider one would push this row's text out of the shared column.
+    assert!(rendered.contains("CodeRevie"), "{rendered}");
+    assert!(!rendered.contains("CodeReviewer"), "{rendered}");
 }

@@ -19,7 +19,8 @@ impl App {
 
         // Read once on entry: a re-render reuses this rather than returning to
         // the filesystem on every toggle and resize.
-        let annotations = crate::annotations::for_conversation(&path);
+        let annotations = self.annotators().read_one(&path);
+        let annotator_labels = self.annotators().labels();
 
         let options = RenderOptions {
             tool_display: self.tool_display,
@@ -29,6 +30,7 @@ impl App {
             expanded_tool_outputs: BTreeSet::new(),
             show_annotations: true,
             annotations: annotations.clone(),
+            annotator_labels: annotator_labels.clone(),
             focused_annotation: None,
         };
 
@@ -237,6 +239,7 @@ impl App {
     pub(super) fn re_render_view(&mut self, viewport_height: usize) {
         use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
 
+        let annotator_labels = self.annotators().labels();
         if let AppMode::View(ref mut state) = self.app_mode {
             let options = RenderOptions {
                 tool_display: state.tool_display,
@@ -246,6 +249,7 @@ impl App {
                 expanded_tool_outputs: state.expanded_tool_outputs.clone(),
                 show_annotations: state.show_annotations,
                 annotations: state.annotations.clone(),
+                annotator_labels,
                 focused_annotation: state.focused_annotation.clone(),
             };
 

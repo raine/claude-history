@@ -94,6 +94,15 @@ impl Annotator for FileAnnotator {
 
         Ok(results)
     }
+
+    fn write(&self, conversation: &Path, annotation: &Annotation) -> Result<String> {
+        super::write::append_to_file(&self.root, conversation, annotation)?;
+        Ok(annotation.id.clone())
+    }
+
+    fn delete(&self, conversation: &Path, id: &str) -> Result<bool> {
+        super::write::remove_from_file(&self.root, conversation, id)
+    }
 }
 
 #[cfg(test)]

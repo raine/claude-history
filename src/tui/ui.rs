@@ -4272,7 +4272,7 @@ mod tests {
             KeyBindings::default(),
             vec![],
         );
-        app.set_annotation_count_for_test(PathBuf::from("/tmp/annotations"), &path, 2);
+        app.set_annotation_count_for_test(&path, 2);
 
         let backend = TestBackend::new(120, 6);
         let mut terminal = Terminal::new(backend).unwrap();

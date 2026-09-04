@@ -99,11 +99,12 @@ pub struct App {
     semantic_search: SemanticSearchState,
     /// Cached lexical evidence produced outside the render path
     lexical_evidence: HashMap<usize, search::LexicalEvidence>,
-    /// Root the annotation sidecars sit under, absent when no root resolves.
-    annotations_root: Option<PathBuf>,
-    /// Note count per sidecar path, read once at startup and refreshed for one
-    /// conversation after a write. The list row states a count per row, and a
-    /// per-row read would open one file per visible row on every frame.
+    /// The registered annotators, read together and written to one at a time.
+    annotators: crate::annotations::AnnotatorSet,
+    /// Note count per conversation, read when loading completes and refreshed
+    /// for one conversation after a write. The list row states a count per row,
+    /// and a per-row read would invoke every annotator once per visible row on
+    /// every frame.
     annotation_counts: HashMap<PathBuf, usize>,
     /// Whether note text has been appended to the corpus's lexical fields.
     /// The append is not idempotent, so a second pass over the same
@@ -136,9 +137,6 @@ struct AppParts {
 
 impl App {
     fn from_parts(parts: AppParts) -> Self {
-        let annotations_root = crate::config::load_config()
-            .ok()
-            .and_then(|config| crate::config::annotations_root(&config));
         Self {
             conversations_snapshot: parts.conversations_snapshot,
             semantic_conversations_snapshot: parts.semantic_conversations_snapshot,
@@ -171,63 +169,55 @@ impl App {
             list_search_mode: parts.list_search_mode,
             semantic_search: parts.semantic_search,
             lexical_evidence: HashMap::new(),
-            annotations_root: annotations_root.clone(),
-            annotation_counts: annotations_root
-                .as_deref()
-                .map(crate::annotations::sidecar_counts)
-                .unwrap_or_default(),
+            annotators: crate::annotations::AnnotatorSet::from_current_config(),
+            annotation_counts: HashMap::new(),
             annotations_enriched: false,
         }
     }
 
+    /// The registered annotators.
+    pub(super) fn annotators(&self) -> &crate::annotations::AnnotatorSet {
+        &self.annotators
+    }
+
     /// The number of notes attached to one conversation.
     pub fn annotation_count(&self, conversation: &std::path::Path) -> usize {
-        let Some(root) = self.annotations_root.as_deref() else {
-            return 0;
-        };
-        crate::annotations::sidecar_path(root, conversation)
-            .and_then(|sidecar| self.annotation_counts.get(&sidecar).copied())
+        self.annotation_counts
+            .get(conversation)
+            .copied()
             .unwrap_or(0)
     }
 
-    /// Places a note count for one conversation without touching the store.
+    /// Places a note count for one conversation without reading any annotator.
     #[cfg(test)]
-    pub fn set_annotation_count_for_test(
-        &mut self,
-        root: PathBuf,
-        conversation: &std::path::Path,
-        count: usize,
-    ) {
-        if let Some(sidecar) = crate::annotations::sidecar_path(&root, conversation) {
-            self.annotation_counts.insert(sidecar, count);
-        }
-        self.annotations_root = Some(root);
+    pub fn set_annotation_count_for_test(&mut self, conversation: &std::path::Path, count: usize) {
+        self.annotation_counts
+            .insert(conversation.to_path_buf(), count);
     }
 
-    /// Points the annotation reads at one root and drops the enrichment guard,
-    /// so a test corpus is read instead of the configured store.
+    /// Replaces the registered annotators and drops the enrichment guard, so a
+    /// test corpus is read instead of the configured store.
     #[cfg(test)]
-    pub fn set_annotations_root_for_test(&mut self, root: PathBuf) {
-        self.annotation_counts = crate::annotations::sidecar_counts(&root);
-        self.annotations_root = Some(root);
+    pub fn set_annotators_for_test(&mut self, annotators: crate::annotations::AnnotatorSet) {
+        self.annotators = annotators;
         self.annotations_enriched = false;
     }
 
-    /// Re-reads one conversation's sidecar after a note is written or deleted,
-    /// so the list row states the count the store holds rather than the count
-    /// read at startup.
+    /// Re-reads one conversation's notes after a write or a delete, so the list
+    /// row states the count the annotators hold rather than the count read when
+    /// loading completed.
     pub(super) fn refresh_annotation_count(&mut self, conversation: &std::path::Path) {
-        let Some(root) = self.annotations_root.clone() else {
-            return;
-        };
-        let Some(sidecar) = crate::annotations::sidecar_path(&root, conversation) else {
-            return;
-        };
-        let count = crate::annotations::for_conversation(conversation).len();
+        let count = self
+            .annotators
+            .counts(&[conversation])
+            .get(conversation)
+            .copied()
+            .unwrap_or(0);
         if count == 0 {
-            self.annotation_counts.remove(&sidecar);
+            self.annotation_counts.remove(conversation);
         } else {
-            self.annotation_counts.insert(sidecar, count);
+            self.annotation_counts
+                .insert(conversation.to_path_buf(), count);
         }
     }
 
@@ -454,16 +444,17 @@ impl App {
         if self.annotations_enriched {
             return;
         }
-        let Some(root) = self.annotations_root.clone() else {
-            return;
-        };
         let scoped = (0..self.conversations.len()).collect::<Vec<_>>();
-        let _ = crate::annotations::enrich_scoped(
-            &mut self.conversations,
-            &scoped,
-            &crate::annotations::FileAnnotator::new(root),
-        );
+        let _ =
+            crate::annotations::enrich_scoped(&mut self.conversations, &scoped, &self.annotators);
         self.annotations_enriched = true;
+
+        let paths = self
+            .conversations
+            .iter()
+            .map(|conversation| conversation.path.as_path())
+            .collect::<Vec<_>>();
+        self.annotation_counts = self.annotators.counts(&paths);
     }
 
     /// Rebuilds one conversation's lexical fields after its notes change.
@@ -493,13 +484,8 @@ impl App {
         conv.search_text_lower = reparsed.search_text_lower;
         conv.agent_search_text = reparsed.agent_search_text;
 
-        if let Some(root) = self.annotations_root.clone() {
-            let _ = crate::annotations::enrich_scoped(
-                &mut self.conversations,
-                &[index],
-                &crate::annotations::FileAnnotator::new(root),
-            );
-        }
+        let _ =
+            crate::annotations::enrich_scoped(&mut self.conversations, &[index], &self.annotators);
 
         // The worker scores against its own snapshot, so the corpus it holds is
         // replaced before the next query runs against stale text.
