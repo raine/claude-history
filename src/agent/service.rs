@@ -1716,6 +1716,79 @@ mod tests {
     }
 
     #[test]
+    fn the_annotation_candidate_carries_one_turn_per_note() {
+        let conversation = crate::semantic::test_fixtures::SemanticConversationFixture::new(
+            "/tmp/session.jsonl",
+            ["dialogue that should not be copied into the candidate"],
+        )
+        .build();
+        let annotations = crate::annotations::ConversationAnnotations::from_flat(vec![
+            crate::annotations::Annotation {
+                id: "a".to_string(),
+                targets: vec![crate::annotations::TargetSpan::single(4)],
+                kind: "recap".to_string(),
+                text: "cache rewrite reverted".to_string(),
+                annotator: "chsum".to_string(),
+            },
+            crate::annotations::Annotation {
+                id: "b".to_string(),
+                targets: Vec::new(),
+                kind: "note".to_string(),
+                text: "decided against it here".to_string(),
+                annotator: "chsum".to_string(),
+            },
+        ]);
+
+        let candidate = annotation_semantic_conversation(&conversation, &annotations).unwrap();
+
+        // One turn per note, so the chunker groups them independently and a hit
+        // names one note rather than a run of them.
+        assert_eq!(candidate.semantic_turns.len(), 2);
+        assert!(
+            candidate
+                .semantic_turns
+                .contains(&"cache rewrite reverted".to_string())
+        );
+        assert!(
+            !candidate.semantic_turns[0].contains("should not be copied"),
+            "{:?}",
+            candidate.semantic_turns
+        );
+        // Every range is ordinal m1: annotation targets are line space, and a
+        // line placed here would reach `agent read` as a message that need not
+        // exist.
+        assert!(
+            candidate
+                .semantic_turn_ranges
+                .iter()
+                .all(|range| *range == agent::refs::MessageRange::single(1))
+        );
+        assert!(
+            candidate
+                .path
+                .to_string_lossy()
+                .ends_with("session.jsonl.annotations-semantic")
+        );
+    }
+
+    #[test]
+    fn a_conversation_without_notes_builds_no_annotation_candidate() {
+        let conversation = crate::semantic::test_fixtures::SemanticConversationFixture::new(
+            "/tmp/session.jsonl",
+            ["dialogue"],
+        )
+        .build();
+
+        let candidate = annotation_semantic_conversation(
+            &conversation,
+            &crate::annotations::ConversationAnnotations::default(),
+        );
+
+        // An empty candidate would embed and cache a conversation with no text.
+        assert!(candidate.is_none());
+    }
+
+    #[test]
     fn anchor_read_resolves_message_after_unrelated_prefix() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("session.jsonl");
