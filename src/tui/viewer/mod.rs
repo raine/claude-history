@@ -202,32 +202,6 @@ pub fn render_parsed_conversation(
 
     let mut next_annotation = 0;
     for (parsed_idx, parsed) in entries.iter().enumerate() {
-        // Annotations print at the position their line falls in the file, ahead
-        // of the first entry at or past that line. An annotation naming a line
-        // that produced no entry -- a snapshot record, a line absorbed into a
-        // tool summary -- prints here rather than being dropped.
-        if options.show_annotations {
-            while let Some(annotation) = options.annotations.positioned.get(next_annotation) {
-                let Some(anchor) = annotation.anchor_line() else {
-                    next_annotation += 1;
-                    continue;
-                };
-                if anchor > parsed.jsonl_line {
-                    break;
-                }
-                push_annotation_lines(
-                    &mut lines,
-                    &mut annotation_ranges,
-                    annotation,
-                    options.content_width,
-                    options.show_timing,
-                    options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
-                    &options.annotator_labels,
-                );
-                next_annotation += 1;
-            }
-        }
-
         if options.tool_display.is_summary()
             && try_extend_or_start_pending_summary(
                 &mut lines,
@@ -250,6 +224,33 @@ pub fn render_parsed_conversation(
         );
 
         render_entry_with_range(&mut lines, &mut messages, parsed, options);
+
+        // Annotations print after the entry holding the line they name, so a
+        // note follows what it describes. An annotation naming a line that
+        // produced no entry -- a snapshot record, a line absorbed into a tool
+        // summary -- prints after the next entry rendered rather than being
+        // dropped.
+        if options.show_annotations {
+            while let Some(annotation) = options.annotations.positioned.get(next_annotation) {
+                let Some(anchor) = annotation.anchor_line() else {
+                    next_annotation += 1;
+                    continue;
+                };
+                if anchor > parsed.jsonl_line {
+                    break;
+                }
+                push_annotation_lines(
+                    &mut lines,
+                    &mut annotation_ranges,
+                    annotation,
+                    options.content_width,
+                    options.show_timing,
+                    options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                    &options.annotator_labels,
+                );
+                next_annotation += 1;
+            }
+        }
     }
 
     flush_tool_summary(

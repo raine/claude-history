@@ -420,7 +420,7 @@ fn session_annotations_print_ahead_of_the_conversation() {
 }
 
 #[test]
-fn a_positioned_annotation_prints_before_the_entry_at_its_line() {
+fn a_positioned_annotation_prints_after_the_entry_at_its_line() {
     let entries = vec![
         user_entry(0, "first message", None),
         assistant_text_entry(1, "second message", None),
@@ -435,9 +435,10 @@ fn a_positioned_annotation_prints_before_the_entry_at_its_line() {
     let text = rendered_text(&rendered);
 
     let first = position_of(&text, "first message").unwrap();
-    let note = position_of(&text, "about the second turn").unwrap();
     let second = position_of(&text, "second message").unwrap();
-    assert!(first < note && note < second);
+    let note = position_of(&text, "about the second turn").unwrap();
+    // The note follows the entry it names.
+    assert!(first < second && second < note, "{text}");
 }
 
 #[test]
