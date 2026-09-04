@@ -865,7 +865,6 @@ fn run_agent_semantic_hits(
         &candidates,
         semantic::types::MAX_GLOBAL_INTERACTIVE_PASSAGE_EMBEDDINGS,
     )
-    .map(|hits| (hits, Vec::new()))
 }
 
 pub(crate) fn agent_route_semantic_conversation(
@@ -932,11 +931,39 @@ fn stripped_semantic_conversation(
     }
 }
 
+/// The warning for a ranking that covered part of the corpus.
+///
+/// An uncached passage is not compared against the query, so the ranking runs
+/// over a subset and a closer match sits outside it unreported. The warning
+/// rides the protocol rather than stderr, because the caller reading these
+/// results parses stdout.
+fn semantic_deficit_warning(
+    ranked: usize,
+    missing: usize,
+    max_new_embeddings: usize,
+) -> Option<AgentWarning> {
+    if missing == 0 {
+        return None;
+    }
+    let remedy = if max_new_embeddings == 0 {
+        "run claude-history --generate-semantic-cache"
+    } else {
+        "rerun this search to embed more, or run claude-history --generate-semantic-cache"
+    };
+    Some(AgentWarning {
+        kind: AgentWarningKind::SemanticUnavailable,
+        reference: None,
+        detail: format!(
+            "ranking covered {ranked} passage(s); {missing} are not embedded and were not compared against the query, so a closer match may sit among them -- {remedy}"
+        ),
+    })
+}
+
 fn run_agent_semantic_hits_for_candidates(
     query: &str,
     candidates: &[semantic::index::SemanticIndexCandidate],
     max_new_embeddings: usize,
-) -> Result<Vec<semantic::types::SemanticHit>> {
+) -> Result<(Vec<semantic::types::SemanticHit>, Vec<AgentWarning>)> {
     let parsed = search::query::ParsedQuery::parse(query);
     let request = semantic::index::SemanticIndexRequest {
         query: parsed.semantic_text(),
@@ -963,20 +990,14 @@ fn run_agent_semantic_hits_for_candidates(
         .map_err(|error| {
             AgentError::semantic_unavailable(format!("semantic search failed: {error}"))
         })?;
-    if response.missing_chunk_count > 0 {
-        if max_new_embeddings == 0 {
-            eprintln!(
-                "Semantic search: {} passage(s) are not cached; run claude-history --generate-semantic-cache",
-                response.missing_chunk_count
-            );
-        } else {
-            eprintln!(
-                "Semantic search: {} passage(s) remain uncached after the bounded top-up; rerun this search to cache more",
-                response.missing_chunk_count
-            );
-        }
-    }
-    Ok(response.chunk_hits)
+    let warnings = semantic_deficit_warning(
+        response.indexed_chunk_count,
+        response.missing_chunk_count,
+        max_new_embeddings,
+    )
+    .into_iter()
+    .collect();
+    Ok((response.chunk_hits, warnings))
 }
 
 #[cfg(test)]
@@ -1297,7 +1318,7 @@ fn run_agent_within_semantic<'a>(
     };
     let mut candidates = Vec::new();
     push_agent_semantic_candidates(&mut candidates, &input, transcript, tool_content);
-    let semantic = run_agent_semantic_hits_for_candidates(
+    let (semantic, _warnings) = run_agent_semantic_hits_for_candidates(
         &request.query,
         &candidates,
         semantic::types::MAX_WITHIN_INTERACTIVE_PASSAGE_EMBEDDINGS,
@@ -1646,6 +1667,46 @@ mod tests {
                 .ends_with("session.jsonl.agent-route-semantic")
         );
         assert!(!route.semantic_turns[0].contains("should not be copied"));
+    }
+
+    #[test]
+    fn a_partial_ranking_warns_that_the_corpus_was_not_fully_compared() {
+        let warning = semantic_deficit_warning(256, 4_000, 0).expect("a deficit warns");
+
+        assert_eq!(warning.kind, AgentWarningKind::SemanticUnavailable);
+        // The count alone reads as bookkeeping. The consequence is that the
+        // results are drawn from part of the corpus.
+        assert!(
+            warning.detail.contains("4000 are not embedded"),
+            "{}",
+            warning.detail
+        );
+        assert!(
+            warning.detail.contains("closer match may sit among them"),
+            "{}",
+            warning.detail
+        );
+        assert!(
+            warning.detail.contains("--generate-semantic-cache"),
+            "{}",
+            warning.detail
+        );
+    }
+
+    #[test]
+    fn a_bounded_top_up_names_rerunning_as_the_remedy() {
+        let warning = semantic_deficit_warning(256, 10, 32).expect("a deficit warns");
+
+        assert!(
+            warning.detail.contains("rerun this search"),
+            "{}",
+            warning.detail
+        );
+    }
+
+    #[test]
+    fn a_complete_ranking_warns_about_nothing() {
+        assert!(semantic_deficit_warning(4_000, 0, 0).is_none());
     }
 
     #[test]
