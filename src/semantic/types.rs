@@ -69,6 +69,10 @@ pub enum SemanticChunkSource {
     AgentSubagentDialogue,
     AgentSubagentTool,
     AgentSubagentThinking,
+    /// Text a producer attached to the conversation, not text from the
+    /// conversation itself. Carried as its own variant so a hit names which it
+    /// is, and so ranking has a field to discriminate on later.
+    Annotation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

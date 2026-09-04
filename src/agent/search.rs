@@ -495,6 +495,7 @@ pub fn run_global_lexical_search(
         ranked_indices,
         load_transcript,
         |_, _| {},
+        &HashMap::new(),
     )
 }
 
@@ -505,6 +506,7 @@ pub fn run_global_lexical_search_reporting(
     ranked_indices: &[usize],
     load_transcript: impl Fn(&AgentConversationKey) -> Result<AgentTranscript>,
     mut report_error: impl FnMut(&AgentConversationKey, &AppError),
+    annotations: &HashMap<usize, crate::annotations::ConversationAnnotations>,
 ) -> Result<AgentSearchOutput> {
     let mode = effective_agent_mode(
         &request.query,
@@ -531,6 +533,14 @@ pub fn run_global_lexical_search_reporting(
         let Some(resolved) = resolved_by_path.get(&conversation.path) else {
             continue;
         };
+        if let Some(found) = annotations.get(&index) {
+            hits.extend(annotation_hits(
+                &request.query,
+                conversation,
+                resolved,
+                found,
+            ));
+        }
         let transcript = match load_transcript(&resolved.key) {
             Ok(transcript) => transcript,
             Err(error) => {
@@ -768,6 +778,62 @@ fn retrieval_output_hit(
     }
 }
 
+/// Hits built from annotation text rather than from transcript content.
+///
+/// The lexical path extracts evidence from the loaded transcript, and annotation
+/// text is not in the transcript, so a conversation shortlisted on an annotation
+/// yields no transcript hit and is dropped. These hits carry the annotation text
+/// as their own evidence.
+///
+/// `focus_range` is `MessageRange::single(1)`: annotation targets are line
+/// numbers and this field is ordinal space, so a target placed here would reach
+/// `agent read` as a message range that need not exist.
+fn annotation_hits(
+    query: &str,
+    conversation: &Conversation,
+    resolved: &ResolvedConversation,
+    annotations: &crate::annotations::ConversationAnnotations,
+) -> Vec<AgentOutputHit> {
+    let needle = crate::text_match::normalize_for_search(query);
+    let terms = needle.split_whitespace().collect::<Vec<_>>();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    let range = MessageRange::single(1);
+    annotations
+        .session
+        .iter()
+        .chain(annotations.positioned.iter())
+        .filter_map(|annotation| {
+            let haystack = crate::text_match::normalize_for_search(&annotation.text);
+            let matched = terms.iter().filter(|term| haystack.contains(*term)).count();
+            if matched == 0 {
+                return None;
+            }
+            // Every term present scores 1.0; a partial match scores its share,
+            // so an annotation covering the whole query outranks one covering
+            // half of it.
+            let score = matched as f64 / terms.len() as f64;
+            Some(AgentOutputHit {
+                conversation_ref: resolved.reference.canonical(),
+                project_id: resolved.key.project_id(),
+                conversation_uuid: resolved.reference.uuid(),
+                session: resolved.key.session_filename.clone(),
+                anchors: Vec::new(),
+                title: title_for_conversation(conversation),
+                score,
+                evidence_score: score,
+                source: AgentHitKind::Lexical,
+                evidence_source: AgentHitSource::Annotation,
+                render_options: AgentHitRenderOptions::default(),
+                preview: format_evidence_preview(&annotation.text),
+                focus_range: range,
+                read_range: range,
+            })
+        })
+        .collect()
+}
+
 fn anchors_for_range(
     transcript: &AgentTranscript,
     resolved: &ResolvedConversation,
@@ -867,6 +933,7 @@ fn semantic_evidence_source(source: SemanticChunkSource) -> AgentHitSource {
         SemanticChunkSource::AgentThinking | SemanticChunkSource::AgentSubagentThinking => {
             AgentHitSource::Thinking
         }
+        SemanticChunkSource::Annotation => AgentHitSource::Annotation,
     }
 }
 
@@ -959,8 +1026,7 @@ fn build_conversation_groups(
         }
     }
     for group in &mut by_ref {
-        sort_group_hits(&mut group.hits);
-        group.hits.truncate(hits_per_conversation);
+        truncate_group_hits(&mut group.hits, hits_per_conversation);
         group.score = group
             .hits
             .first()
@@ -994,8 +1060,48 @@ fn push_group_hit(
         return;
     }
     group.hits.push(hit);
-    sort_group_hits(&mut group.hits);
-    group.hits.truncate(hits_per_conversation);
+    truncate_group_hits(&mut group.hits, hits_per_conversation);
+}
+
+/// Trim one conversation's hits to the cap, giving annotation evidence a share
+/// of the slots proportional to its share of the hits.
+///
+/// An annotation hit scores the share of query terms its text carries, so at
+/// most 1.0, while a transcript hit scores higher. Ranked together, every note
+/// from a conversation whose transcript also matches falls below the cap and
+/// the conversation reports no annotation evidence at all.
+fn truncate_group_hits(hits: &mut Vec<AgentOutputHit>, cap: usize) {
+    sort_group_hits(hits);
+    if hits.len() <= cap || cap == 0 {
+        hits.truncate(cap);
+        return;
+    }
+    let annotation_count = hits
+        .iter()
+        .filter(|hit| hit.evidence_source == AgentHitSource::Annotation)
+        .count();
+    if annotation_count == 0 {
+        hits.truncate(cap);
+        return;
+    }
+
+    // Proportional, and at least one: a conversation carrying a matching note
+    // reports it, and one carrying thirty does not fill the group with them.
+    let reserved = ((cap * annotation_count) / hits.len()).clamp(1, cap);
+    let mut annotations = Vec::new();
+    let mut others = Vec::new();
+    for hit in hits.drain(..) {
+        if hit.evidence_source == AgentHitSource::Annotation {
+            if annotations.len() < reserved {
+                annotations.push(hit);
+            }
+        } else if others.len() < cap - reserved {
+            others.push(hit);
+        }
+    }
+    hits.extend(annotations);
+    hits.extend(others);
+    sort_group_hits(hits);
 }
 
 fn same_evidence_identity(existing: &AgentOutputHit, candidate: &AgentOutputHit) -> bool {
@@ -1039,6 +1145,7 @@ fn evidence_source_rank(source: AgentHitSource) -> u8 {
         AgentHitSource::Dialogue => 0,
         AgentHitSource::Tool => 1,
         AgentHitSource::Thinking => 2,
+        AgentHitSource::Annotation => 3,
     }
 }
 
@@ -1228,6 +1335,7 @@ fn output_source_atom(hit: &AgentOutputHit) -> &'static str {
         AgentHitSource::Dialogue => hit_source_atom(hit.source),
         AgentHitSource::Tool => "tool",
         AgentHitSource::Thinking => "thinking",
+        AgentHitSource::Annotation => "annotation",
     }
 }
 
@@ -1304,6 +1412,154 @@ mod tests {
             reference: key.conversation_ref(),
             key,
         }
+    }
+
+    fn annotations_of(
+        entries: &[(&str, &str, Vec<usize>)],
+    ) -> crate::annotations::ConversationAnnotations {
+        crate::annotations::ConversationAnnotations::from_flat(
+            entries
+                .iter()
+                .map(|(id, text, targets)| crate::annotations::Annotation {
+                    id: (*id).to_string(),
+                    targets: targets
+                        .iter()
+                        .map(|line| crate::annotations::TargetSpan::single(*line))
+                        .collect(),
+                    kind: "note".to_string(),
+                    text: (*text).to_string(),
+                })
+                .collect(),
+        )
+    }
+
+    /// One hit at `score` from `source`, enough for the trimming rules.
+    fn hit_from(source: AgentHitSource, score: f64) -> AgentOutputHit {
+        AgentOutputHit {
+            conversation_ref: "ch_1".to_string(),
+            project_id: "pr_1".to_string(),
+            conversation_uuid: "uuid".to_string(),
+            session: "session.jsonl".to_string(),
+            anchors: Vec::new(),
+            title: String::new(),
+            score,
+            evidence_score: score,
+            source: AgentHitKind::Lexical,
+            evidence_source: source,
+            render_options: AgentHitRenderOptions::default(),
+            preview: String::new(),
+            focus_range: MessageRange::single(1),
+            read_range: MessageRange::single(1),
+        }
+    }
+
+    fn annotation_count(hits: &[AgentOutputHit]) -> usize {
+        hits.iter()
+            .filter(|hit| hit.evidence_source == AgentHitSource::Annotation)
+            .count()
+    }
+
+    #[test]
+    fn a_matching_note_keeps_a_slot_against_higher_scoring_transcript_hits() {
+        let mut hits = vec![
+            hit_from(AgentHitSource::Dialogue, 4.0),
+            hit_from(AgentHitSource::Dialogue, 4.0),
+            hit_from(AgentHitSource::Dialogue, 4.0),
+            hit_from(AgentHitSource::Dialogue, 4.0),
+            hit_from(AgentHitSource::Annotation, 1.0),
+        ];
+
+        truncate_group_hits(&mut hits, 2);
+
+        // An annotation scores at most 1.0 and a transcript hit scores higher,
+        // so ranking alone drops every note from a conversation its transcript
+        // also matches.
+        assert_eq!(hits.len(), 2);
+        assert_eq!(annotation_count(&hits), 1);
+    }
+
+    #[test]
+    fn notes_take_slots_in_proportion_to_their_share_of_the_hits() {
+        let mut hits = (0..8)
+            .map(|_| hit_from(AgentHitSource::Annotation, 1.0))
+            .chain((0..2).map(|_| hit_from(AgentHitSource::Dialogue, 4.0)))
+            .collect::<Vec<_>>();
+
+        truncate_group_hits(&mut hits, 5);
+
+        // Eight of ten hits are notes, so four of five slots are theirs and the
+        // transcript keeps one.
+        assert_eq!(hits.len(), 5);
+        assert_eq!(annotation_count(&hits), 4);
+    }
+
+    #[test]
+    fn a_group_without_notes_trims_by_score_alone() {
+        let mut hits = vec![
+            hit_from(AgentHitSource::Dialogue, 4.0),
+            hit_from(AgentHitSource::Dialogue, 3.0),
+            hit_from(AgentHitSource::Dialogue, 2.0),
+        ];
+
+        truncate_group_hits(&mut hits, 2);
+
+        assert_eq!(hits.len(), 2);
+        assert_eq!(annotation_count(&hits), 0);
+    }
+
+    #[test]
+    fn annotation_hits_carry_their_own_evidence_and_source() {
+        let conversation = conversation("/p/a.jsonl", "title");
+        let resolved = resolved("/p/a.jsonl");
+        let annotations = annotations_of(&[
+            ("a", "the cache invalidation approach changed", vec![12]),
+            ("b", "unrelated note about deployments", vec![]),
+        ]);
+
+        let hits = annotation_hits("cache invalidation", &conversation, &resolved, &annotations);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].evidence_source, AgentHitSource::Annotation);
+        assert!(hits[0].preview.contains("cache invalidation"));
+        // Line targets are not ordinals, so the focus stays at the session
+        // rather than naming messages that need not exist.
+        assert_eq!(hits[0].focus_range, MessageRange::single(1));
+        assert_eq!(hits[0].score, 1.0);
+    }
+
+    #[test]
+    fn annotation_hits_score_by_share_of_query_terms_present() {
+        let conversation = conversation("/p/a.jsonl", "title");
+        let resolved = resolved("/p/a.jsonl");
+        let annotations = annotations_of(&[
+            ("full", "retry backoff behaviour", vec![1]),
+            ("half", "retry only, no mention of the other term", vec![2]),
+        ]);
+
+        let hits = annotation_hits("retry backoff", &conversation, &resolved, &annotations);
+
+        assert_eq!(hits.len(), 2);
+        let full = hits
+            .iter()
+            .find(|hit| hit.preview.contains("behaviour"))
+            .unwrap();
+        let half = hits
+            .iter()
+            .find(|hit| hit.preview.contains("no mention"))
+            .unwrap();
+        assert_eq!(full.score, 1.0);
+        assert_eq!(half.score, 0.5);
+    }
+
+    #[test]
+    fn annotation_hits_are_empty_when_nothing_matches() {
+        let conversation = conversation("/p/a.jsonl", "title");
+        let resolved = resolved("/p/a.jsonl");
+        let annotations = annotations_of(&[("a", "something else entirely", vec![1])]);
+
+        let hits = annotation_hits("cache invalidation", &conversation, &resolved, &annotations);
+
+        assert!(hits.is_empty());
     }
 
     fn request(query: &str, mode: Option<SearchMode>) -> AgentWithinRequest {

@@ -136,6 +136,9 @@ the last prompt a person typed. `--session` attaches it to the conversation as a
 whole and conflicts with `--line`. `--kind` is a free label defaulting to `note`.
 `--delete` names the `id` reported when the annotation was written.
 
+A search hit carrying `source=annotation` came from an annotation, not from
+something said in the conversation.
+
 Failures exit nonzero and write one typed compact line to stderr:
 
 ```text

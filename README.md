@@ -156,6 +156,41 @@ Claude resume default arguments apply only to Claude sessions.
 
 ### Delete empty transcripts
 
+### Annotations
+
+An annotation is text attached to a conversation from outside it: a note you
+write, or a summary a tool generates. Annotations live in their own files and
+never change a transcript, and they are searched alongside conversation content.
+
+```sh
+claude-history annotate --text "decided against the cache rewrite here"
+claude-history annotate ch_1234abcd5678 --line 412 --kind recap --text "..."
+claude-history annotate ch_1234abcd5678 --line 3 --line 7..9 --text "..."
+claude-history annotate ch_1234abcd5678 --session --text "..."
+claude-history annotate ch_1234abcd5678 --delete an_18d1c251bbf7eec8
+```
+
+A conversation is named by a `ch_` ref from search output or by a transcript
+path. With none named, the session id Claude Code exports and the working
+directory's project folder compose into the running session's transcript. With
+no `--line`, the annotation attaches to the last line marked
+`promptSource: "typed"`, which is the last prompt a person typed; `--session`
+attaches it to the conversation as a whole and conflicts with `--line`.
+`--kind` is a free label the writer chooses, defaulting to `note`, which is what
+the viewer writes for an annotation a person types; `--delete` names the `id`
+reported when the annotation was written.
+
+Search reports an annotation hit with `source=annotation`, so text you attached
+is never mistaken for something said in the conversation.
+
+Storage defaults to `~/.local/share/claude-history/annotations`, one JSONL
+sidecar per conversation. Configure a different root:
+
+```toml
+[annotations]
+root = "~/.local/share/claude-history/annotations"
+```
+
 Use `delete-empty` to find transcript files that have no Claude messages, such as
 sessions that only contain slash commands like `/status` or `/plugin`.
 
