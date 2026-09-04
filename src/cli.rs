@@ -64,8 +64,44 @@ pub enum Commands {
     },
     /// Attach an annotation to a conversation, or remove one
     Annotate(AnnotateArgs),
+    /// Register the tools annotations are read from and written to
+    Annotators {
+        #[command(subcommand)]
+        command: AnnotatorsCommand,
+    },
     /// Update claude-history to the latest version
     Update,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AnnotatorsCommand {
+    /// List the registered annotators and which one receives writes
+    List,
+    /// Register an annotator, or replace one registered under the same key
+    Add(AnnotatorAddArgs),
+    /// Drop an annotator's registration
+    Remove {
+        /// Key the annotator is registered under
+        key: String,
+    },
+    /// Name the annotator that receives writes
+    WriteTo {
+        /// Key of a registered annotator
+        key: String,
+    },
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AnnotatorAddArgs {
+    /// Key to register under, used in config and as the fallback label
+    pub key: String,
+    /// Command line invoked as `<command> read|write|delete`
+    #[arg(long)]
+    pub command: String,
+    /// Label the viewer prints, truncated to nine characters. With this absent
+    /// the key is used, first letter capitalised.
+    #[arg(long)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]

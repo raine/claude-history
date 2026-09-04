@@ -14,12 +14,14 @@ use std::path::{Path, PathBuf};
 mod command;
 mod command_annotator;
 mod file_annotator;
+mod registry_command;
 mod set;
 mod write;
 
 pub use command::{generated_id, run_annotate};
 pub use command_annotator::CommandAnnotator;
 pub use file_annotator::{FileAnnotator, sidecar_counts, sidecar_path};
+pub use registry_command::run as run_annotators;
 pub use set::AnnotatorSet;
 
 /// A contiguous run of JSONL lines an annotation attaches to.

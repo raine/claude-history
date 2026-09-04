@@ -183,13 +183,56 @@ reported when the annotation was written.
 Search reports an annotation hit with `source=annotation`, so text you attached
 is never mistaken for something said in the conversation.
 
-Storage defaults to `~/.local/share/claude-history/annotations`, one JSONL
-sidecar per conversation. Configure a different root:
+Annotations are read from every registered annotator and merged. Writes go to
+exactly one of them:
+
+```sh
+claude-history annotators list
+claude-history annotators add chsum --command "chsum annotations" --name "Chsum"
+claude-history annotators write-to chsum
+claude-history annotators remove chsum
+```
+
+`file` is built in: one JSONL sidecar per conversation under
+`~/.local/share/claude-history/annotations`, and the annotator writes go to
+while no other is named. Notes written under an earlier configuration keep being
+read, so changing where writes go moves nothing on disk.
+
+An external annotator is a command invoked as `<command> read|write|delete`,
+with one JSON object on stdin and one on stdout:
+
+```
+read    {"conversations": ["/path/session.jsonl"]}
+     -> {"annotations": [{"conversation": "/path/session.jsonl", "id": "an_1",
+                          "targets": [3, "7..9"], "kind": "recap", "text": "..."}]}
+write   {"conversation": "...", "targets": [...], "kind": "...", "text": "..."}
+     -> {"id": "an_2"}
+delete  {"conversation": "...", "id": "an_2"}
+     -> {"deleted": true}
+```
+
+A read carries every conversation in scope, so the command runs once per query
+rather than once per conversation. The annotator mints the id on write, and a
+later delete names it. A non-zero exit drops that annotator from the merge and
+the rest still render.
+
+Those commands write `~/.config/claude-history/config.toml`, which can also be
+edited by hand:
 
 ```toml
 [annotations]
+write_to = "chsum"
+
+[annotators.file]
 root = "~/.local/share/claude-history/annotations"
+
+[annotators.chsum]
+command = "chsum annotations"
+name = "Chsum"
 ```
+
+`name` is the label the viewer prints beside each note, truncated to nine
+characters; with it absent the key is used with its first letter capitalised.
 
 Use `delete-empty` to find transcript files that have no Claude messages, such as
 sessions that only contain slash commands like `/status` or `/plugin`.
@@ -436,6 +479,7 @@ Commands:
   agent         Run agent-oriented search and transcript commands
   delete-empty  Delete transcript files with no Claude messages
   annotate      Attach an annotation to a conversation, or remove one
+  annotators    Register the tools annotations are read from and written to
   update        Update claude-history to the latest version
 
 Arguments:

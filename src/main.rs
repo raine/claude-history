@@ -153,6 +153,9 @@ fn run() -> Result<()> {
             Commands::Annotate(args) => {
                 annotations::run_annotate(args).map(|output| print!("{output}"))
             }
+            Commands::Annotators { command } => {
+                annotations::run_annotators(command).map(|output| print!("{output}"))
+            }
             Commands::Update => update::run(),
         };
     }
