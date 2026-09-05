@@ -864,15 +864,17 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         Span::raw("  "),
     ];
 
-    // A selected note claims d, e and Esc ahead of every other binding, so the
-    // row names the note's keys instead of export and delete. Without the swap
-    // the footer advertises bindings the selection has taken.
+    // A selected note takes d, e, y and Esc ahead of every other binding, so
+    // the row names the note's keys instead of export, delete and yank. Without
+    // the swap the footer prints bindings that do not fire.
     if state.focused_annotation.is_some() {
         spans.extend([
             Span::styled("e", key_style),
             Span::styled("dit note  ", label_style),
             Span::styled("d", key_style),
             Span::styled("elete note  ", label_style),
+            Span::styled("y", key_style),
+            Span::styled("ank note  ", label_style),
             Span::styled("Esc", key_style),
             Span::styled(" deselect", label_style),
         ]);
@@ -4233,10 +4235,10 @@ mod tests {
         let contents = terminal_contents(&terminal);
         assert!(contents.contains("edit note"), "{contents:?}");
         assert!(contents.contains("elete note"), "{contents:?}");
-        // export and yank are bound to e and y until a selection takes e:
-        // naming them here would print a binding that does not fire.
+        assert!(contents.contains("ank note"), "{contents:?}");
+        // e is bound to export until a selection takes it: naming export here
+        // would print a binding that does not fire.
         assert!(!contents.contains("xport"), "{contents:?}");
-        assert!(!contents.contains("ank"), "{contents:?}");
     }
 
     #[test]

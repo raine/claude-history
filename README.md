@@ -292,7 +292,7 @@ JSONL files and their matching session artifact directories.
 | `t`            | Cycle tools: summary/truncated/full                |
 | `T`            | Toggle thinking                                    |
 | `e`            | Export conversation to file                        |
-| `y`            | Copy to clipboard (message if selected, else menu) |
+| `y`            | Copy to clipboard (message or note if selected)    |
 | `p`            | Show file path                                     |
 | `Y`            | Copy file path to clipboard                        |
 | `I`            | Copy session ID to clipboard                       |

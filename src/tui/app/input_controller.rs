@@ -165,14 +165,20 @@ impl App {
             return self.handle_search_typing_key(code, modifiers);
         }
 
-        // A selected note takes d and e ahead of every other binding, so
-        // the keys act on the selection rather than on the conversation.
+        // A selected note takes d, e and y ahead of every other binding, so
+        // the keys act on the selection rather than on the conversation. Without
+        // the y arm the key falls to the yank menu, whose every option copies
+        // the whole conversation.
         if let AppMode::View(ref state) = self.app_mode
             && state.focused_annotation.is_some()
         {
             match code {
                 KeyCode::Char('d') if modifiers.is_empty() => {
                     self.delete_focused_annotation(viewport_height);
+                    return None;
+                }
+                KeyCode::Char('y') if modifiers.is_empty() => {
+                    self.copy_focused_annotation();
                     return None;
                 }
                 KeyCode::Char('e') if modifiers.is_empty() => {

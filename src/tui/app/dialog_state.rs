@@ -180,6 +180,29 @@ impl App {
     }
 
     /// Remove the selected note.
+    /// Copies the selected note's text to the clipboard.
+    pub(super) fn copy_focused_annotation(&mut self) {
+        let AppMode::View(state) = &self.app_mode else {
+            return;
+        };
+        let Some(id) = state.focused_annotation.as_deref() else {
+            return;
+        };
+        let Some(text) = annotation_text(&state.annotations, id) else {
+            return;
+        };
+        let message = match crate::tui::export::copy_to_system_clipboard(&text) {
+            Ok(crate::tui::export::ClipboardDestination::System) => {
+                "Note copied to clipboard".to_string()
+            }
+            Ok(crate::tui::export::ClipboardDestination::Terminal) => {
+                "Note sent to terminal clipboard".to_string()
+            }
+            Err(e) => e,
+        };
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
     pub(super) fn delete_focused_annotation(&mut self, viewport_height: usize) {
         let AppMode::View(state) = &self.app_mode else {
             return;
@@ -475,5 +498,53 @@ impl App {
         };
 
         self.status_message = Some((result.message, std::time::Instant::now()));
+    }
+}
+
+/// The text of the note with this id, from either the session-level or the
+/// positioned notes of a conversation.
+fn annotation_text(
+    annotations: &crate::annotations::ConversationAnnotations,
+    id: &str,
+) -> Option<String> {
+    annotations
+        .session
+        .iter()
+        .chain(annotations.positioned.iter())
+        .find(|annotation| annotation.id == id)
+        .map(|annotation| annotation.text.clone())
+}
+
+#[cfg(test)]
+mod annotation_copy_tests {
+    use super::annotation_text;
+    use crate::annotations::{Annotation, ConversationAnnotations, TargetSpan};
+
+    fn note(id: &str, targets: Vec<TargetSpan>, text: &str) -> Annotation {
+        Annotation {
+            id: id.to_string(),
+            targets,
+            kind: "note".to_string(),
+            text: text.to_string(),
+            annotator: "file".to_string(),
+        }
+    }
+
+    #[test]
+    fn the_selected_note_resolves_to_its_own_text_only() {
+        let annotations = ConversationAnnotations::from_flat(vec![
+            note("s1", Vec::new(), "session-level remark"),
+            note("p1", vec![TargetSpan::single(4)], "the line four remark"),
+        ]);
+
+        assert_eq!(
+            annotation_text(&annotations, "p1").as_deref(),
+            Some("the line four remark")
+        );
+        assert_eq!(
+            annotation_text(&annotations, "s1").as_deref(),
+            Some("session-level remark")
+        );
+        assert_eq!(annotation_text(&annotations, "missing"), None);
     }
 }
