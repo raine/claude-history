@@ -83,6 +83,7 @@ mod tests {
             kind: "note".to_string(),
             text: text.to_string(),
             annotator: String::new(),
+            origin: None,
         }
     }
 
@@ -147,5 +148,18 @@ mod tests {
         let contents = std::fs::read_to_string(&path).unwrap();
         assert!(contents.contains("a later version"));
         assert!(!contents.contains("\"id\":\"a\""));
+    }
+
+    #[test]
+    fn a_note_without_an_origin_is_stored_without_the_key() {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = Path::new("/home/u/.claude/projects/p/abc.jsonl");
+        append_to_file(root.path(), conversation, &annotation("a", "first")).unwrap();
+        let path = sidecar_path(root.path(), conversation).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        // A hand-written note describes the conversation itself, so the record
+        // stays as it was before origins existed and older readers parse it.
+        assert!(!contents.contains("origin"), "{contents}");
     }
 }

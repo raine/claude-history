@@ -347,6 +347,7 @@ fn annotation(
         kind: kind.to_string(),
         text: text.to_string(),
         annotator: String::new(),
+        origin: None,
     }
 }
 
@@ -461,6 +462,29 @@ fn an_annotation_past_the_last_entry_prints_at_the_end() {
     let note = position_of(&text, "names a line that has no entry")
         .expect("an annotation past the last entry is kept, not dropped");
     assert!(note > only);
+}
+
+#[test]
+fn the_trailer_names_the_origin_when_the_note_carries_one() {
+    let entries = vec![user_entry(0, "only message", None)];
+    let mut note = annotation("a", "recap", "agent work", vec![1]);
+    note.origin = Some(crate::annotations::AnnotationOrigin {
+        path: std::path::PathBuf::from("/tmp/subagents/agent-ac1cffaa.jsonl"),
+        lines: "412..430".to_string(),
+    });
+    let options = annotated_options(vec![note], true);
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    let labelled = text
+        .lines()
+        .find(|line| line.contains("agent work"))
+        .expect("annotation line rendered");
+    assert!(
+        labelled.contains("@1 · recap · agent-ac1cffaa @412..430"),
+        "{labelled}"
+    );
 }
 
 #[test]

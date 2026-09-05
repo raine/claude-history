@@ -188,9 +188,10 @@ impl App {
         let Some(id) = state.focused_annotation.as_deref() else {
             return;
         };
-        let Some(text) = annotation_text(&state.annotations, id) else {
+        let Some(annotation) = find_annotation(&state.annotations, id) else {
             return;
         };
+        let text = annotation_yank_text(annotation, &state.conversation_path);
         let message = match crate::tui::export::copy_to_system_clipboard(&text) {
             Ok(crate::tui::export::ClipboardDestination::System) => {
                 "Note copied to clipboard".to_string()
@@ -275,6 +276,7 @@ impl App {
             kind: "note".to_string(),
             text,
             annotator: String::new(),
+            origin: None,
         };
         if self.annotators().write(&path, &annotation).is_err() {
             return;
@@ -501,32 +503,68 @@ impl App {
     }
 }
 
-/// The text of the note with this id, from either the session-level or the
-/// positioned notes of a conversation.
-fn annotation_text(
-    annotations: &crate::annotations::ConversationAnnotations,
+/// The note with this id, from either the session-level or the positioned
+/// notes of a conversation.
+fn find_annotation<'a>(
+    annotations: &'a crate::annotations::ConversationAnnotations,
     id: &str,
-) -> Option<String> {
+) -> Option<&'a crate::annotations::Annotation> {
     annotations
         .session
         .iter()
         .chain(annotations.positioned.iter())
         .find(|annotation| annotation.id == id)
-        .map(|annotation| annotation.text.clone())
+}
+
+/// The clipboard text for a note: its text, then a locator naming the
+/// annotator, the kind, the conversation and the lines targeted, and the
+/// origin when the note carries one. A note pasted elsewhere then leads back
+/// to the transcript it describes and to the file it summarised.
+fn annotation_yank_text(
+    annotation: &crate::annotations::Annotation,
+    conversation: &std::path::Path,
+) -> String {
+    let target = match annotation.targets.as_slice() {
+        [] => "session".to_string(),
+        targets => targets
+            .iter()
+            .map(|span| {
+                if span.start == span.end {
+                    span.start.to_string()
+                } else {
+                    format!("{}..{}", span.start, span.end)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let mut out = format!(
+        "{}\n\n— {} · {} · {} @{target}",
+        annotation.text.trim_end(),
+        annotation.annotator,
+        annotation.kind,
+        conversation.display()
+    );
+    if let Some(origin) = &annotation.origin {
+        out.push_str(&format!("\n  origin {}", origin.long()));
+    }
+    out
 }
 
 #[cfg(test)]
 mod annotation_copy_tests {
-    use super::annotation_text;
-    use crate::annotations::{Annotation, ConversationAnnotations, TargetSpan};
+    use super::{annotation_yank_text, find_annotation};
+    use crate::annotations::{Annotation, AnnotationOrigin, ConversationAnnotations, TargetSpan};
+    use std::path::{Path, PathBuf};
 
     fn note(id: &str, targets: Vec<TargetSpan>, text: &str) -> Annotation {
         Annotation {
             id: id.to_string(),
             targets,
-            kind: "note".to_string(),
+            kind: "recap".to_string(),
             text: text.to_string(),
-            annotator: "file".to_string(),
+            annotator: "chsum".to_string(),
+            origin: None,
         }
     }
 
@@ -538,13 +576,49 @@ mod annotation_copy_tests {
         ]);
 
         assert_eq!(
-            annotation_text(&annotations, "p1").as_deref(),
+            find_annotation(&annotations, "p1").map(|a| a.text.as_str()),
             Some("the line four remark")
         );
         assert_eq!(
-            annotation_text(&annotations, "s1").as_deref(),
+            find_annotation(&annotations, "s1").map(|a| a.text.as_str()),
             Some("session-level remark")
         );
-        assert_eq!(annotation_text(&annotations, "missing"), None);
+        assert!(find_annotation(&annotations, "missing").is_none());
+    }
+
+    #[test]
+    fn a_yanked_note_carries_its_locator() {
+        let annotation = note(
+            "p1",
+            vec![TargetSpan::single(443)],
+            "Agent removed the wizard.\n",
+        );
+
+        let text = annotation_yank_text(&annotation, Path::new("/tmp/proj/session.jsonl"));
+
+        assert_eq!(
+            text,
+            "Agent removed the wizard.\n\n— chsum · recap · /tmp/proj/session.jsonl @443"
+        );
+    }
+
+    #[test]
+    fn a_yanked_note_with_an_origin_names_the_file_it_summarised() {
+        let mut annotation = note(
+            "p1",
+            vec![TargetSpan::single(443)],
+            "Agent removed the wizard.",
+        );
+        annotation.origin = Some(AnnotationOrigin {
+            path: PathBuf::from("/tmp/proj/subagents/agent-ac1cffaa.jsonl"),
+            lines: "412..430".to_string(),
+        });
+
+        let text = annotation_yank_text(&annotation, Path::new("/tmp/proj/session.jsonl"));
+
+        assert!(
+            text.ends_with("\n  origin /tmp/proj/subagents/agent-ac1cffaa.jsonl @412..430"),
+            "{text}"
+        );
     }
 }

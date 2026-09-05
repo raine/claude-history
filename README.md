@@ -204,7 +204,9 @@ with one JSON object on stdin and one on stdout:
 ```
 read    {"conversations": ["/path/session.jsonl"]}
      -> {"annotations": [{"conversation": "/path/session.jsonl", "id": "an_1",
-                          "targets": [3, "7..9"], "kind": "recap", "text": "..."}]}
+                          "targets": [3, "7..9"], "kind": "recap", "text": "...",
+                          "origin": {"path": "/path/subagents/agent-1.jsonl",
+                                     "lines": "412..430"}}]}
 write   {"conversation": "...", "targets": [...], "kind": "...", "text": "..."}
      -> {"id": "an_2"}
 delete  {"conversation": "...", "id": "an_2"}
@@ -212,7 +214,10 @@ delete  {"conversation": "...", "id": "an_2"}
 ```
 
 A read carries every conversation in scope, so the command runs once per query
-rather than once per conversation. The annotator mints the id on write, and a
+rather than once per conversation. `origin` is optional: it names a file the note
+summarises when that file is not the conversation itself, such as a subagent's
+transcript, and the viewer prints it in the note's trailer and includes it when
+the note is yanked. The annotator mints the id on write, and a
 later delete names it. A non-zero exit drops that annotator from the merge and
 the rest still render.
 

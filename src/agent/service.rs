@@ -1729,6 +1729,7 @@ mod tests {
                 kind: "recap".to_string(),
                 text: "cache rewrite reverted".to_string(),
                 annotator: "chsum".to_string(),
+                origin: None,
             },
             crate::annotations::Annotation {
                 id: "b".to_string(),
@@ -1736,6 +1737,7 @@ mod tests {
                 kind: "note".to_string(),
                 text: "decided against it here".to_string(),
                 annotator: "chsum".to_string(),
+                origin: None,
             },
         ]);
 

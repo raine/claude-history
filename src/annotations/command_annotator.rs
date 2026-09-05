@@ -190,6 +190,23 @@ mod tests {
     }
 
     #[test]
+    fn a_read_carries_the_origin_the_command_states() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"{"annotations":[{"conversation":"/tmp/a.jsonl","id":"n1","targets":[443],"kind":"recap","text":"agent work","origin":{"path":"/tmp/subagents/agent-1.jsonl","lines":"412..430"}}]}"#;
+        let annotator = CommandAnnotator::new(stub(dir.path(), body, 0));
+
+        let read = annotator.read(&[Path::new("/tmp/a.jsonl")]).unwrap();
+
+        let origin = read[0].1.positioned[0]
+            .origin
+            .as_ref()
+            .expect("origin read");
+        assert_eq!(origin.path, PathBuf::from("/tmp/subagents/agent-1.jsonl"));
+        assert_eq!(origin.lines, "412..430");
+        assert_eq!(origin.short(), "agent-1 @412..430");
+    }
+
+    #[test]
     fn a_conversation_outside_the_request_is_dropped() {
         let dir = tempfile::tempdir().unwrap();
         let body = r#"{"annotations":[{"conversation":"/tmp/other.jsonl","id":"n1","kind":"recap","text":"hello"}]}"#;

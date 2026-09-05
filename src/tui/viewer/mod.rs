@@ -365,11 +365,16 @@ fn push_annotation_lines(
             .collect::<Vec<_>>()
             .join(","),
     };
-    let trailer = if annotation.kind.trim().is_empty() {
+    let mut trailer = if annotation.kind.trim().is_empty() {
         format!("  @{target}")
     } else {
         format!("  @{target} · {}", annotation.kind)
     };
+    // An origin names the file the note summarises when that file is not this
+    // conversation, so a recap of an agent's work leads back to the agent.
+    if let Some(origin) = &annotation.origin {
+        trailer.push_str(&format!(" · {}", origin.short()));
+    }
 
     let width = content_width.max(20);
     let mut wrapped = Vec::new();

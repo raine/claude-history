@@ -177,6 +177,7 @@ pub fn run_annotate(args: AnnotateArgs) -> Result<String> {
         kind: args.kind,
         text,
         annotator: String::new(),
+        origin: None,
     };
 
     // The id reported is the one the annotator stored under, which is what a

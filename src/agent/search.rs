@@ -1429,6 +1429,7 @@ mod tests {
                     kind: "note".to_string(),
                     text: (*text).to_string(),
                     annotator: String::new(),
+                    origin: None,
                 })
                 .collect(),
         )

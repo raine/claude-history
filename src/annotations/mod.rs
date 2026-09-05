@@ -121,6 +121,46 @@ pub struct Annotation {
     /// delete reaches the annotator the note came from.
     #[serde(skip)]
     pub annotator: String,
+    /// Where the annotated material sits outside this conversation: an agent's
+    /// transcript and the rows a recap summarised. Supplied by the annotator on
+    /// the read wire; absent for a note about the conversation itself, so a
+    /// reader without it renders the note as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<AnnotationOrigin>,
+}
+
+/// A path and, when the annotator states them, the rows within it, as `412` or
+/// `412..430`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Default)]
+pub struct AnnotationOrigin {
+    pub path: PathBuf,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lines: String,
+}
+
+impl AnnotationOrigin {
+    /// The file stem and rows, the form short enough for a trailer.
+    pub fn short(&self) -> String {
+        let stem = self
+            .path
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if self.lines.is_empty() {
+            stem
+        } else {
+            format!("{stem} @{}", self.lines)
+        }
+    }
+
+    /// The full path and rows, the form a reader opens.
+    pub fn long(&self) -> String {
+        if self.lines.is_empty() {
+            self.path.display().to_string()
+        } else {
+            format!("{} @{}", self.path.display(), self.lines)
+        }
+    }
 }
 
 impl Annotation {

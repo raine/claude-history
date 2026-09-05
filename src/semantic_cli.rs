@@ -865,6 +865,7 @@ mod tests {
                     kind: "recap".to_string(),
                     text: "cache rewrite reverted".to_string(),
                     annotator: "chsum".to_string(),
+                    origin: None,
                 },
             ]),
         );
