@@ -17,12 +17,21 @@ impl App {
         };
         let path = self.conversations[conv_idx].path.clone();
 
+        // Read once on entry: a re-render reuses this rather than returning to
+        // the filesystem on every toggle and resize.
+        let annotations = self.annotators().read_one(&path);
+        let annotator_labels = self.annotators().labels();
+
         let options = RenderOptions {
             tool_display: self.tool_display,
             show_thinking: self.show_thinking,
             show_timing: self.show_timing,
             content_width,
             expanded_tool_outputs: BTreeSet::new(),
+            show_annotations: true,
+            annotations: annotations.clone(),
+            annotator_labels: annotator_labels.clone(),
+            focused_annotation: None,
         };
 
         match parse_conversation_file(&path) {
@@ -43,6 +52,10 @@ impl App {
                     total_lines,
                     tool_display: self.tool_display,
                     show_thinking: self.show_thinking,
+                    show_annotations: true,
+                    annotations,
+                    annotation_ranges: rendered.annotations.clone(),
+                    focused_annotation: None,
                     show_timing: self.show_timing,
                     content_width,
                     search_mode: ViewSearchMode::Off,
@@ -208,6 +221,13 @@ impl App {
         }
     }
 
+    pub(super) fn toggle_view_annotations(&mut self, viewport_height: usize) {
+        if let AppMode::View(ref mut state) = self.app_mode {
+            state.show_annotations = !state.show_annotations;
+        }
+        self.re_render_view(viewport_height);
+    }
+
     pub(super) fn toggle_view_timing(&mut self, viewport_height: usize) {
         if let AppMode::View(ref mut state) = self.app_mode {
             state.show_timing = !state.show_timing;
@@ -219,6 +239,7 @@ impl App {
     pub(super) fn re_render_view(&mut self, viewport_height: usize) {
         use crate::tui::viewer::{parse_conversation_file, render_parsed_conversation};
 
+        let annotator_labels = self.annotators().labels();
         if let AppMode::View(ref mut state) = self.app_mode {
             let options = RenderOptions {
                 tool_display: state.tool_display,
@@ -226,6 +247,10 @@ impl App {
                 show_timing: state.show_timing,
                 content_width: state.content_width,
                 expanded_tool_outputs: state.expanded_tool_outputs.clone(),
+                show_annotations: state.show_annotations,
+                annotations: state.annotations.clone(),
+                annotator_labels,
+                focused_annotation: state.focused_annotation.clone(),
             };
 
             let anchor = capture_anchor(
@@ -251,6 +276,7 @@ impl App {
             state.total_lines = rendered.lines.len();
             state.rendered_lines = rendered.lines;
             state.message_ranges = rendered.messages;
+            state.annotation_ranges = rendered.annotations;
 
             let max_scroll = state.total_lines.saturating_sub(viewport_height);
 
@@ -428,6 +454,24 @@ impl App {
         true
     }
 
+    /// Places one annotation range over the given lines and selects it, the
+    /// state a click inside a note leaves behind.
+    #[cfg(test)]
+    pub fn select_annotation_for_test(&mut self, id: &str, start_line: usize, end_line: usize) {
+        let AppMode::View(state) = &mut self.app_mode else {
+            panic!("view mode");
+        };
+        state
+            .annotation_ranges
+            .push(crate::tui::viewer::AnnotationRange {
+                id: id.to_string(),
+                start_line,
+                end_line,
+            });
+        state.focused_annotation = Some(id.to_string());
+        state.message_nav_active = false;
+    }
+
     pub fn handle_view_click(
         &mut self,
         row: u16,
@@ -437,6 +481,24 @@ impl App {
         let Some(line_idx) = self.view_line_at_row(row, frame_area) else {
             return false;
         };
+        if let AppMode::View(state) = &self.app_mode
+            && let Some(id) = state
+                .annotation_ranges
+                .iter()
+                .find(|range| line_idx >= range.start_line && line_idx < range.end_line)
+                .map(|range| range.id.clone())
+        {
+            let already = state.focused_annotation.as_deref() == Some(id.as_str());
+            if let AppMode::View(state) = &mut self.app_mode {
+                // A second click clears the selection, so a deselect needs no
+                // key.
+                state.focused_annotation = if already { None } else { Some(id) };
+                state.message_nav_active = false;
+            }
+            self.re_render_view(viewport_height);
+            return true;
+        }
+
         let tool_output = self.view_tool_output_at_line(line_idx);
         let message_idx = if let AppMode::View(state) = &self.app_mode {
             Self::message_idx_at_line(&state.message_ranges, line_idx)

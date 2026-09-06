@@ -153,6 +153,9 @@ impl AgentService {
 
     fn run_search(&self, args: &cli::AgentSearchArgs) -> Result<String> {
         let config = config::load_config()?;
+        // Built before the per-section moves below: those partially move
+        // `config` and end any borrow of it as a whole.
+        let annotators = crate::annotations::AnnotatorSet::from_config(&config);
         let search_config = config.search.unwrap_or_default();
         let agent_config = config.agent.unwrap_or_default();
         // Resolved before loading so an inverted range fails without paying for
@@ -177,6 +180,12 @@ impl AgentService {
             scope,
             current_project_dir_name.as_deref(),
         )?;
+        // After scoping, so a --local query reads annotations for one project
+        // rather than for every conversation on the machine, and before the
+        // corpus is chunked, because the chunker is rebuilt from these
+        // conversations and the query arrives after the load.
+        let annotations =
+            crate::annotations::enrich_scoped(&mut conversations, &scoped, &annotators)?;
         let request = agent::search::AgentSearchRequest {
             query: args.query.clone(),
             top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),
@@ -236,6 +245,7 @@ impl AgentService {
                             ),
                         ));
                     },
+                    &annotations,
                 )?;
                 apply_configured_render_policy(&mut output, &agent_config);
                 return Ok(agent::search::format_agent_output_with_warnings(
@@ -244,8 +254,14 @@ impl AgentService {
                 ));
             }
             SearchMode::Semantic => {
-                let (mut output, mut warnings) =
-                    run_agent_semantic_search(self, &request, &conversations, &keys, &scoped)?;
+                let (mut output, mut warnings) = run_agent_semantic_search(
+                    self,
+                    &request,
+                    &conversations,
+                    &keys,
+                    &scoped,
+                    &annotations,
+                )?;
                 apply_configured_render_policy(&mut output, &agent_config);
                 warnings.splice(0..0, base_warnings);
                 return Ok(agent::search::format_agent_output_with_warnings(
@@ -280,9 +296,10 @@ impl AgentService {
                             ),
                         ));
                     },
+                    &annotations,
                 )?;
                 let inputs = agent_inputs_for_indices(&conversations, &keys, &scoped)?;
-                match run_agent_semantic_hits(&args.query, &inputs) {
+                match run_agent_semantic_hits(&args.query, &inputs, &annotations) {
                     Ok((semantic, semantic_warnings)) => {
                         warnings.borrow_mut().extend(semantic_warnings);
                         let mut output = agent::search::run_global_hybrid_search(
@@ -315,6 +332,7 @@ impl AgentService {
                                     ),
                                 ));
                             },
+                            &annotations,
                         )?;
                         let mut output = lexical;
                         output.mode = SearchMode::Hybrid;
@@ -416,7 +434,7 @@ impl AgentService {
     }
 }
 
-fn discover_agent_keys(
+pub(crate) fn discover_agent_keys(
     project_filter: Option<&str>,
 ) -> Result<(Vec<agent::refs::AgentConversationKey>, Vec<AgentWarning>)> {
     let root = history::get_claude_projects_root().map_err(structured_agent_error)?;
@@ -805,9 +823,10 @@ fn run_agent_semantic_search(
     conversations: &[history::Conversation],
     keys: &[agent::refs::AgentConversationKey],
     indices: &[usize],
+    annotations: &std::collections::HashMap<usize, crate::annotations::ConversationAnnotations>,
 ) -> Result<(agent::search::AgentSearchOutput, Vec<AgentWarning>)> {
     let inputs = agent_inputs_for_indices(conversations, keys, indices)?;
-    let (semantic, warnings) = run_agent_semantic_hits(&request.query, &inputs)?;
+    let (semantic, warnings) = run_agent_semantic_hits(&request.query, &inputs, annotations)?;
     let mut output = agent::search::run_global_semantic_search(request, &inputs, &semantic);
     attach_input_transcript_metadata(service, &mut output, &inputs);
     Ok((output, warnings))
@@ -837,6 +856,7 @@ fn attach_input_transcript_metadata(
 fn run_agent_semantic_hits(
     query: &str,
     inputs: &[agent::search::AgentConversationInput<'_>],
+    annotations: &std::collections::HashMap<usize, crate::annotations::ConversationAnnotations>,
 ) -> Result<(Vec<semantic::types::SemanticHit>, Vec<AgentWarning>)> {
     let mut candidates = Vec::with_capacity(inputs.len().saturating_mul(2));
     for input in inputs {
@@ -857,6 +877,15 @@ fn run_agent_semantic_hits(
                 index: input.original_index,
                 source: semantic::types::SemanticChunkSource::AgentRoute,
                 conversation: std::sync::Arc::new(route),
+            });
+        }
+        if let Some(found) = annotations.get(&input.original_index)
+            && let Some(annotated) = annotation_semantic_conversation(input.conversation, found)
+        {
+            candidates.push(semantic::index::SemanticIndexCandidate {
+                index: input.original_index,
+                source: semantic::types::SemanticChunkSource::Annotation,
+                conversation: std::sync::Arc::new(annotated),
             });
         }
     }
@@ -895,6 +924,44 @@ pub(crate) fn agent_route_semantic_conversation(
                 .copied()
                 .unwrap_or_else(|| agent::refs::MessageRange::single(1)),
         ],
+    ))
+}
+
+/// A candidate carrying only annotation text, tagged
+/// `SemanticChunkSource::Annotation`.
+///
+/// Built as its own candidate rather than appended to the conversation's
+/// semantic turns, because a source applies per conversation and the chunker
+/// concatenates consecutive turns: appended annotations would be absorbed into
+/// dialogue chunks and never carry the annotation source.
+///
+/// Every turn takes `MessageRange::single(1)`. The range is ordinal space and
+/// annotation targets are line space; a target placed here would reach
+/// `agent read` as `m{start}..m{end}` and name messages that need not exist.
+/// The hit identifies the conversation, and the annotation's own text names its
+/// lines.
+pub(crate) fn annotation_semantic_conversation(
+    conversation: &history::Conversation,
+    annotations: &crate::annotations::ConversationAnnotations,
+) -> Option<history::Conversation> {
+    let turns = annotations
+        .texts()
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if turns.is_empty() {
+        return None;
+    }
+    let file_name = conversation
+        .path
+        .file_name()
+        .map(|name| format!("{}.annotations-semantic", name.to_string_lossy()))?;
+    let ranges = vec![agent::refs::MessageRange::single(1); turns.len()];
+    Some(stripped_semantic_conversation(
+        conversation,
+        conversation.path.with_file_name(file_name),
+        turns,
+        ranges,
     ))
 }
 
@@ -1646,6 +1713,81 @@ mod tests {
                 .ends_with("session.jsonl.agent-route-semantic")
         );
         assert!(!route.semantic_turns[0].contains("should not be copied"));
+    }
+
+    #[test]
+    fn the_annotation_candidate_carries_one_turn_per_note() {
+        let conversation = crate::semantic::test_fixtures::SemanticConversationFixture::new(
+            "/tmp/session.jsonl",
+            ["dialogue that should not be copied into the candidate"],
+        )
+        .build();
+        let annotations = crate::annotations::ConversationAnnotations::from_flat(vec![
+            crate::annotations::Annotation {
+                id: "a".to_string(),
+                targets: vec![crate::annotations::TargetSpan::single(4)],
+                kind: "recap".to_string(),
+                text: "cache rewrite reverted".to_string(),
+                annotator: "chsum".to_string(),
+                origin: None,
+            },
+            crate::annotations::Annotation {
+                id: "b".to_string(),
+                targets: Vec::new(),
+                kind: "note".to_string(),
+                text: "decided against it here".to_string(),
+                annotator: "chsum".to_string(),
+                origin: None,
+            },
+        ]);
+
+        let candidate = annotation_semantic_conversation(&conversation, &annotations).unwrap();
+
+        // One turn per note, so the chunker groups them independently and a hit
+        // names one note rather than a run of them.
+        assert_eq!(candidate.semantic_turns.len(), 2);
+        assert!(
+            candidate
+                .semantic_turns
+                .contains(&"cache rewrite reverted".to_string())
+        );
+        assert!(
+            !candidate.semantic_turns[0].contains("should not be copied"),
+            "{:?}",
+            candidate.semantic_turns
+        );
+        // Every range is ordinal m1: annotation targets are line space, and a
+        // line placed here would reach `agent read` as a message that need not
+        // exist.
+        assert!(
+            candidate
+                .semantic_turn_ranges
+                .iter()
+                .all(|range| *range == agent::refs::MessageRange::single(1))
+        );
+        assert!(
+            candidate
+                .path
+                .to_string_lossy()
+                .ends_with("session.jsonl.annotations-semantic")
+        );
+    }
+
+    #[test]
+    fn a_conversation_without_notes_builds_no_annotation_candidate() {
+        let conversation = crate::semantic::test_fixtures::SemanticConversationFixture::new(
+            "/tmp/session.jsonl",
+            ["dialogue"],
+        )
+        .build();
+
+        let candidate = annotation_semantic_conversation(
+            &conversation,
+            &crate::annotations::ConversationAnnotations::default(),
+        );
+
+        // An empty candidate would embed and cache a conversation with no text.
+        assert!(candidate.is_none());
     }
 
     #[test]

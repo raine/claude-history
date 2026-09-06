@@ -156,6 +156,89 @@ Claude resume default arguments apply only to Claude sessions.
 
 ### Delete empty transcripts
 
+### Annotations
+
+An annotation is text attached to a conversation from outside it: a note you
+write, or a summary a tool generates. Annotations live in their own files and
+never change a transcript, and they are searched alongside conversation content.
+
+```sh
+claude-history annotate --text "decided against the cache rewrite here"
+claude-history annotate ch_1234abcd5678 --line 412 --kind recap --text "..."
+claude-history annotate ch_1234abcd5678 --line 3 --line 7..9 --text "..."
+claude-history annotate ch_1234abcd5678 --session --text "..."
+claude-history annotate ch_1234abcd5678 --delete an_18d1c251bbf7eec8
+```
+
+A conversation is named by a `ch_` ref from search output or by a transcript
+path. With none named, the session id Claude Code exports and the working
+directory's project folder compose into the running session's transcript. With
+no `--line`, the annotation attaches to the last line marked
+`promptSource: "typed"`, which is the last prompt a person typed; `--session`
+attaches it to the conversation as a whole and conflicts with `--line`.
+`--kind` is a free label the writer chooses, defaulting to `note`, which is what
+the viewer writes for an annotation a person types; `--delete` names the `id`
+reported when the annotation was written.
+
+Search reports an annotation hit with `source=annotation`, so text you attached
+is never mistaken for something said in the conversation.
+
+Annotations are read from every registered annotator and merged. Writes go to
+exactly one of them:
+
+```sh
+claude-history annotators list
+claude-history annotators add chsum --command "chsum annotations" --name "Chsum"
+claude-history annotators write-to chsum
+claude-history annotators remove chsum
+```
+
+`file` is built in: one JSONL sidecar per conversation under
+`~/.local/share/claude-history/annotations`, and the annotator writes go to
+while no other is named. Notes written under an earlier configuration keep being
+read, so changing where writes go moves nothing on disk.
+
+An external annotator is a command invoked as `<command> read|write|delete`,
+with one JSON object on stdin and one on stdout:
+
+```
+read    {"conversations": ["/path/session.jsonl"]}
+     -> {"annotations": [{"conversation": "/path/session.jsonl", "id": "an_1",
+                          "targets": [3, "7..9"], "kind": "recap", "text": "...",
+                          "origin": {"path": "/path/subagents/agent-1.jsonl",
+                                     "lines": "412..430"}}]}
+write   {"conversation": "...", "targets": [...], "kind": "...", "text": "..."}
+     -> {"id": "an_2"}
+delete  {"conversation": "...", "id": "an_2"}
+     -> {"deleted": true}
+```
+
+A read carries every conversation in scope, so the command runs once per query
+rather than once per conversation. `origin` is optional: it names a file the note
+summarises when that file is not the conversation itself, such as a subagent's
+transcript, and the viewer prints it in the note's trailer and includes it when
+the note is yanked. The annotator mints the id on write, and a
+later delete names it. A non-zero exit drops that annotator from the merge and
+the rest still render.
+
+Those commands write `~/.config/claude-history/config.toml`, which can also be
+edited by hand:
+
+```toml
+[annotations]
+write_to = "chsum"
+
+[annotators.file]
+root = "~/.local/share/claude-history/annotations"
+
+[annotators.chsum]
+command = "chsum annotations"
+name = "Chsum"
+```
+
+`name` is the label the viewer prints beside each note, truncated to nine
+characters; with it absent the key is used with its first letter capitalised.
+
 Use `delete-empty` to find transcript files that have no Claude messages, such as
 sessions that only contain slash commands like `/status` or `/plugin`.
 
@@ -214,7 +297,7 @@ JSONL files and their matching session artifact directories.
 | `t`            | Cycle tools: summary/truncated/full                |
 | `T`            | Toggle thinking                                    |
 | `e`            | Export conversation to file                        |
-| `y`            | Copy to clipboard (message if selected, else menu) |
+| `y`            | Copy to clipboard (message or note if selected)    |
 | `p`            | Show file path                                     |
 | `Y`            | Copy file path to clipboard                        |
 | `I`            | Copy session ID to clipboard                       |
@@ -400,6 +483,8 @@ Usage: claude-history [OPTIONS] [FILE]
 Commands:
   agent         Run agent-oriented search and transcript commands
   delete-empty  Delete transcript files with no Claude messages
+  annotate      Attach an annotation to a conversation, or remove one
+  annotators    Register the tools annotations are read from and written to
   update        Update claude-history to the latest version
 
 Arguments:

@@ -101,6 +101,13 @@ pub struct RenderOptions {
     pub show_timing: bool,
     pub content_width: usize,
     pub expanded_tool_outputs: BTreeSet<ToolOutputId>,
+    pub show_annotations: bool,
+    pub annotations: crate::annotations::ConversationAnnotations,
+    /// Label per annotator key, printed in the name column. A key absent here
+    /// prints with its first letter capitalised.
+    pub annotator_labels: std::collections::HashMap<String, String>,
+    /// Id of the annotation currently selected, styled apart from the rest.
+    pub focused_annotation: Option<String>,
 }
 
 /// Tracks the line range of a single message (User or Assistant entry) in the rendered output
@@ -114,10 +121,23 @@ pub struct MessageRange {
     pub end_line: usize,
 }
 
+/// The lines one annotation occupies, and the annotation it came from.
+///
+/// Held separately from `MessageRange` because an annotation carries no entry,
+/// and `MessageRange::entry_index` is binary-searched when restoring scroll
+/// position: a synthetic or duplicated index there corrupts that search.
+#[derive(Clone, Debug)]
+pub struct AnnotationRange {
+    pub id: String,
+    pub start_line: usize,
+    pub end_line: usize,
+}
+
 /// Result of rendering a conversation
 pub struct RenderedConversation {
     pub lines: Vec<RenderedLine>,
     pub messages: Vec<MessageRange>,
+    pub annotations: Vec<AnnotationRange>,
 }
 
 /// Format an ISO 8601 timestamp to HH:MM local time
@@ -132,6 +152,10 @@ fn format_timestamp(iso_timestamp: &str) -> Option<String> {
 #[derive(Debug)]
 pub struct RenderableEntry {
     pub entry_index: usize,
+    /// Physical JSONL line this entry came from, 1-based, blank lines counted
+    /// before being skipped. Kept because annotations name lines, and
+    /// `entry_index` counts parsed entries after filtering rather than lines.
+    pub jsonl_line: usize,
     entry: LogEntry,
 }
 
@@ -140,11 +164,13 @@ pub fn parse_conversation_file(file_path: &Path) -> std::io::Result<Vec<Renderab
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     Ok(normalized
         .into_iter()
-        .map(|(_, entry)| entry)
         .enumerate()
-        .filter_map(|(entry_index, entry)| {
-            (!matches!(entry, LogEntry::FileHistorySnapshot { .. }))
-                .then_some(RenderableEntry { entry_index, entry })
+        .filter_map(|(entry_index, (jsonl_line, entry))| {
+            (!matches!(entry, LogEntry::FileHistorySnapshot { .. })).then_some(RenderableEntry {
+                entry_index,
+                jsonl_line,
+                entry,
+            })
         })
         .collect())
 }
@@ -155,8 +181,26 @@ pub fn render_parsed_conversation(
 ) -> RenderedConversation {
     let mut lines = Vec::new();
     let mut messages = Vec::new();
+    let mut annotation_ranges = Vec::new();
     let mut pending_tool_summary: Option<PendingToolSummary> = None;
 
+    // Session-level annotations name no line, so they carry no position in the
+    // file and print ahead of the conversation.
+    if options.show_annotations {
+        for annotation in &options.annotations.session {
+            push_annotation_lines(
+                &mut lines,
+                &mut annotation_ranges,
+                annotation,
+                options.content_width,
+                options.show_timing,
+                options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                &options.annotator_labels,
+            );
+        }
+    }
+
+    let mut next_annotation = 0;
     for (parsed_idx, parsed) in entries.iter().enumerate() {
         if options.tool_display.is_summary()
             && try_extend_or_start_pending_summary(
@@ -180,6 +224,33 @@ pub fn render_parsed_conversation(
         );
 
         render_entry_with_range(&mut lines, &mut messages, parsed, options);
+
+        // Annotations print after the entry holding the line they name, so a
+        // note follows what it describes. An annotation naming a line that
+        // produced no entry -- a snapshot record, a line absorbed into a tool
+        // summary -- prints after the next entry rendered rather than being
+        // dropped.
+        if options.show_annotations {
+            while let Some(annotation) = options.annotations.positioned.get(next_annotation) {
+                let Some(anchor) = annotation.anchor_line() else {
+                    next_annotation += 1;
+                    continue;
+                };
+                if anchor > parsed.jsonl_line {
+                    break;
+                }
+                push_annotation_lines(
+                    &mut lines,
+                    &mut annotation_ranges,
+                    annotation,
+                    options.content_width,
+                    options.show_timing,
+                    options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                    &options.annotator_labels,
+                );
+                next_annotation += 1;
+            }
+        }
     }
 
     flush_tool_summary(
@@ -190,9 +261,175 @@ pub fn render_parsed_conversation(
         options,
     );
 
+    // Annotations naming a line past the last entry still belong to the
+    // conversation, so they print at its end rather than vanishing.
+    if options.show_annotations {
+        for annotation in options.annotations.positioned.iter().skip(next_annotation) {
+            push_annotation_lines(
+                &mut lines,
+                &mut annotation_ranges,
+                annotation,
+                options.content_width,
+                options.show_timing,
+                options.focused_annotation.as_deref() == Some(annotation.id.as_str()),
+                &options.annotator_labels,
+            );
+        }
+    }
+
     postprocess_blank_lines(&mut lines, &mut messages);
 
-    RenderedConversation { lines, messages }
+    RenderedConversation {
+        lines,
+        messages,
+        annotations: annotation_ranges,
+    }
+}
+
+/// Render one annotation as its own lines, labelled with its kind and the lines
+/// it names.
+///
+/// The label carries the target because a filtered view -- tools, thinking or
+/// subagents hidden -- prints an annotation between its visible neighbours
+/// rather than among the entries it sat with. Stating the line keeps that gap
+/// visible instead of silently approximate.
+/// The name column for one annotation: the annotator's configured label, else
+/// its key with the first letter capitalised, truncated to the column width so
+/// every row's text starts in the same place.
+fn annotator_label(key: &str, labels: &std::collections::HashMap<String, String>) -> String {
+    let full = match labels.get(key) {
+        Some(label) => label.clone(),
+        None => {
+            let mut chars = key.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "Note".to_string(),
+            }
+        }
+    };
+    full.chars().take(NAME_WIDTH).collect()
+}
+
+fn push_annotation_lines(
+    lines: &mut Vec<RenderedLine>,
+    ranges: &mut Vec<AnnotationRange>,
+    annotation: &crate::annotations::Annotation,
+    content_width: usize,
+    timing_enabled: bool,
+    focused: bool,
+    labels: &std::collections::HashMap<String, String>,
+) {
+    let label = annotator_label(&annotation.annotator, labels);
+    let start_line = lines.len();
+    use ledger::{LedgerRow, NameCol, push_row};
+    use timing::TimingSlot;
+
+    let color = th().annotation;
+    let timing = || {
+        if timing_enabled {
+            TimingSlot::Pad
+        } else {
+            TimingSlot::Disabled
+        }
+    };
+    // A focused note drops the italic and takes bold, so the selection is
+    // marked by weight rather than by a colour outside the theme's palette.
+    let text_style = LineStyle {
+        fg: Some(color),
+        italic: !focused,
+        bold: focused,
+        ..LineStyle::default()
+    };
+    let trailer_style = LineStyle {
+        fg: Some(color),
+        dimmed: true,
+        ..LineStyle::default()
+    };
+
+    // The trailer names the lines targeted and the producer's kind. The target
+    // is stated because a filtered view -- tools, thinking or subagents hidden
+    // -- prints an annotation between its visible neighbours rather than among
+    // the entries it sat with, and stating it keeps that gap visible instead of
+    // silently approximate.
+    let target = match annotation.targets.as_slice() {
+        [] => "session".to_string(),
+        targets => targets
+            .iter()
+            .map(|span| {
+                if span.start == span.end {
+                    span.start.to_string()
+                } else {
+                    format!("{}..{}", span.start, span.end)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let mut trailer = if annotation.kind.trim().is_empty() {
+        format!("  @{target}")
+    } else {
+        format!("  @{target} · {}", annotation.kind)
+    };
+    // An origin names the file the note summarises when that file is not this
+    // conversation, so a recap of an agent's work leads back to the agent.
+    if let Some(origin) = &annotation.origin {
+        trailer.push_str(&format!(" · {}", origin.short()));
+    }
+
+    let width = content_width.max(20);
+    let mut wrapped = Vec::new();
+    for text_line in annotation.text.lines() {
+        for piece in textwrap::wrap(text_line, width) {
+            wrapped.push(piece.to_string());
+        }
+    }
+    if wrapped.is_empty() {
+        wrapped.push(String::new());
+    }
+    let last = wrapped.len() - 1;
+
+    for (index, piece) in wrapped.into_iter().enumerate() {
+        let name = if index == 0 {
+            NameCol::Label {
+                text: &label,
+                color,
+                bold: true,
+                dimmed: false,
+            }
+        } else {
+            NameCol::BlankColoredDim { color }
+        };
+        let mut content = vec![(piece, text_style.clone())];
+        // The trailer follows the body's final line, so a wrapped annotation
+        // does not push its target off the first row.
+        if index == last {
+            content.push((trailer.clone(), trailer_style.clone()));
+        }
+        push_row(
+            lines,
+            LedgerRow {
+                timing: timing(),
+                name,
+                separator_dimmed: true,
+                tool_output_id: None,
+                clickable: false,
+            },
+            content,
+        );
+    }
+
+    // A blank row after the block, matching the separation between message
+    // blocks. Consecutive blanks are collapsed later, so a run of annotations
+    // does not open a gap per annotation.
+    lines.push(RenderedLine::new(Vec::new()));
+
+    ranges.push(AnnotationRange {
+        id: annotation.id.clone(),
+        start_line,
+        // The trailing blank is excluded, so a click on the gap between blocks
+        // selects nothing rather than the block above it.
+        end_line: lines.len().saturating_sub(1),
+    });
 }
 
 /// Handle a parsed entry while in summary tool-display mode.

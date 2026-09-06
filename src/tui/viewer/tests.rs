@@ -325,13 +325,209 @@ fn test_render_options(tool_display: ToolDisplayMode) -> RenderOptions {
         show_timing: false,
         content_width: 80,
         expanded_tool_outputs: BTreeSet::new(),
+        show_annotations: false,
+        annotations: crate::annotations::ConversationAnnotations::default(),
+        annotator_labels: std::collections::HashMap::new(),
+        focused_annotation: None,
     }
+}
+
+fn annotation(
+    id: &str,
+    kind: &str,
+    text: &str,
+    targets: Vec<usize>,
+) -> crate::annotations::Annotation {
+    crate::annotations::Annotation {
+        id: id.to_string(),
+        targets: targets
+            .into_iter()
+            .map(crate::annotations::TargetSpan::single)
+            .collect(),
+        kind: kind.to_string(),
+        text: text.to_string(),
+        annotator: String::new(),
+        origin: None,
+    }
+}
+
+fn annotated_options(
+    annotations: Vec<crate::annotations::Annotation>,
+    show: bool,
+) -> RenderOptions {
+    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    options.show_annotations = show;
+    options.annotations = crate::annotations::ConversationAnnotations::from_flat(annotations);
+    options
+}
+
+/// Index of the first rendered line containing `needle`, for asserting the
+/// order annotations and entries print in.
+fn position_of(text: &str, needle: &str) -> Option<usize> {
+    text.lines().position(|line| line.contains(needle))
+}
+
+#[test]
+fn each_annotation_reports_the_lines_it_occupies() {
+    let entries = vec![
+        user_entry(0, "first message", None),
+        assistant_text_entry(1, "second message", None),
+    ];
+    let options = annotated_options(
+        vec![
+            annotation("s", "note", "session note", vec![]),
+            annotation("a", "recap", "about the second turn", vec![2]),
+        ],
+        true,
+    );
+
+    let rendered = render_parsed_conversation(&entries, &options);
+
+    let ids = rendered
+        .annotations
+        .iter()
+        .map(|range| range.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec!["s", "a"]);
+    for range in &rendered.annotations {
+        assert!(range.end_line > range.start_line);
+    }
+    // Message ranges stay free of annotation blocks: the scroll anchor binary
+    // searches them by entry_index, which an entry-less block would corrupt.
+    assert_eq!(rendered.messages.len(), 2);
+}
+
+#[test]
+fn session_annotations_print_ahead_of_the_conversation() {
+    // entry_index 0 and 1 carry jsonl_line 1 and 2.
+    let entries = vec![
+        user_entry(0, "first message", None),
+        assistant_text_entry(1, "second message", None),
+    ];
+    let options = annotated_options(
+        vec![annotation("s", "note", "whole session note", vec![])],
+        true,
+    );
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    let note = position_of(&text, "whole session note").expect("annotation rendered");
+    let first = position_of(&text, "first message").expect("conversation rendered");
+    assert!(
+        note < first,
+        "session annotation should precede the conversation"
+    );
+}
+
+#[test]
+fn a_positioned_annotation_prints_after_the_entry_at_its_line() {
+    let entries = vec![
+        user_entry(0, "first message", None),
+        assistant_text_entry(1, "second message", None),
+    ];
+    // jsonl_line 2 belongs to the second entry.
+    let options = annotated_options(
+        vec![annotation("a", "recap", "about the second turn", vec![2])],
+        true,
+    );
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    let first = position_of(&text, "first message").unwrap();
+    let second = position_of(&text, "second message").unwrap();
+    let note = position_of(&text, "about the second turn").unwrap();
+    // The note follows the entry it names.
+    assert!(first < second && second < note, "{text}");
+}
+
+#[test]
+fn an_annotation_past_the_last_entry_prints_at_the_end() {
+    let entries = vec![user_entry(0, "only message", None)];
+    let options = annotated_options(
+        vec![annotation(
+            "a",
+            "recap",
+            "names a line that has no entry",
+            vec![99],
+        )],
+        true,
+    );
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    let only = position_of(&text, "only message").unwrap();
+    let note = position_of(&text, "names a line that has no entry")
+        .expect("an annotation past the last entry is kept, not dropped");
+    assert!(note > only);
+}
+
+#[test]
+fn the_trailer_names_the_origin_when_the_note_carries_one() {
+    let entries = vec![user_entry(0, "only message", None)];
+    let mut note = annotation("a", "recap", "agent work", vec![1]);
+    note.origin = Some(crate::annotations::AnnotationOrigin {
+        path: std::path::PathBuf::from("/tmp/subagents/agent-ac1cffaa.jsonl"),
+        lines: "412..430".to_string(),
+    });
+    let options = annotated_options(vec![note], true);
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    let labelled = text
+        .lines()
+        .find(|line| line.contains("agent work"))
+        .expect("annotation line rendered");
+    assert!(
+        labelled.contains("@1 · recap · agent-ac1cffaa @412..430"),
+        "{labelled}"
+    );
+}
+
+#[test]
+fn the_label_names_the_kind_and_the_lines_targeted() {
+    let entries = vec![user_entry(0, "only message", None)];
+    let options = annotated_options(vec![annotation("a", "recap", "body", vec![1])], true);
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    // The kind sits in the name column and the target follows the body, so the
+    // two are no longer adjacent in the rendered line.
+    let labelled = text
+        .lines()
+        .find(|line| line.contains("recap") && line.contains("body"))
+        .expect("annotation line rendered");
+    assert!(labelled.contains("@1"), "target named on the label row");
+}
+
+#[test]
+fn annotations_are_absent_when_the_toggle_is_off() {
+    let entries = vec![user_entry(0, "only message", None)];
+    let options = annotated_options(
+        vec![
+            annotation("a", "recap", "positioned note", vec![1]),
+            annotation("s", "note", "session note", vec![]),
+        ],
+        false,
+    );
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let text = rendered_text(&rendered);
+
+    assert!(position_of(&text, "positioned note").is_none());
+    assert!(position_of(&text, "session note").is_none());
+    assert!(position_of(&text, "only message").is_some());
 }
 
 fn tool_summary_entries() -> Vec<RenderableEntry> {
     vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"one"}}]}}"#,
             )
@@ -339,6 +535,7 @@ fn tool_summary_entries() -> Vec<RenderableEntry> {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"grep result"}]}}"#,
             )
@@ -346,6 +543,7 @@ fn tool_summary_entries() -> Vec<RenderableEntry> {
         },
         RenderableEntry {
             entry_index: 2,
+            jsonl_line: 3,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"src/main.rs"}},{"type":"tool_use","id":"toolu_3","name":"Bash","input":{"command":"cargo test"}}]}}"#,
             )
@@ -353,6 +551,7 @@ fn tool_summary_entries() -> Vec<RenderableEntry> {
         },
         RenderableEntry {
             entry_index: 3,
+            jsonl_line: 4,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_3","content":"bash result"}]}}"#,
             )
@@ -365,6 +564,7 @@ fn tool_summary_entries() -> Vec<RenderableEntry> {
 fn hidden_tool_mode_renders_activity_summary() {
     let entry = RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"one"}},{"type":"tool_use","id":"toolu_2","name":"Grep","input":{"pattern":"two"}},{"type":"tool_use","id":"toolu_3","name":"Read","input":{"file_path":"src/main.rs"}}]}}"#,
         )
@@ -397,6 +597,7 @@ fn tool_summary_uses_source_agent_label() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","agent":"Pi","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"pwd"}}]}}"#,
             )
@@ -404,6 +605,7 @@ fn tool_summary_uses_source_agent_label() {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"result"}]}}"#,
             )
@@ -431,6 +633,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","agent":"Pi","message":{"role":"assistant","content":[{"type":"thinking","thinking":"inspect files","signature":""},{"type":"tool_use","id":"call_1","name":"bash","input":{"command":"pwd"}}]}}"#,
             )
@@ -438,6 +641,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_1","content":"/tmp/project"}]}}"#,
             )
@@ -445,6 +649,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
         },
         RenderableEntry {
             entry_index: 2,
+            jsonl_line: 3,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","agent":"Pi","message":{"role":"assistant","content":[{"type":"thinking","thinking":"inspect status","signature":""},{"type":"tool_use","id":"call_2","name":"bash","input":{"command":"git status"}}]}}"#,
             )
@@ -452,6 +657,7 @@ fn hidden_pi_thinking_allows_clickable_grouped_tool_summary() {
         },
         RenderableEntry {
             entry_index: 3,
+            jsonl_line: 4,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call_2","content":"clean"}]}}"#,
             )
@@ -511,6 +717,7 @@ fn subagent_summary_label_parity() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","parent_tool_use_id":"toolu_parent_abc","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"one"}}]}}"#,
             )
@@ -518,6 +725,7 @@ fn subagent_summary_label_parity() {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"user","parent_tool_use_id":"toolu_parent_abc","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"grep result"}]}}"#,
             )
@@ -625,6 +833,7 @@ fn show_thinking_controls_subagent_entries() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","parent_tool_use_id":"toolu_parent","message":{"role":"assistant","content":[{"type":"text","text":"subagent text"}]}}"#,
             )
@@ -632,6 +841,7 @@ fn show_thinking_controls_subagent_entries() {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"progress","data":{"type":"agent_progress","agentId":"agent-abcdef123456","message":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"agent progress text"}]}}}}"#,
             )
@@ -756,6 +966,7 @@ fn user_entry(entry_index: usize, text: &str, timestamp: Option<&str>) -> Render
     );
     RenderableEntry {
         entry_index,
+        jsonl_line: entry_index + 1,
         entry: serde_json::from_str(&json).unwrap(),
     }
 }
@@ -775,6 +986,7 @@ fn assistant_text_entry(
     );
     RenderableEntry {
         entry_index,
+        jsonl_line: entry_index + 1,
         entry: serde_json::from_str(&json).unwrap(),
     }
 }
@@ -813,6 +1025,7 @@ fn message_ranges_skip_non_message_entries() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(r#"{"type":"summary","summary":"ignored"}"#).unwrap(),
         },
         user_entry(1, "Hello", None),
@@ -935,6 +1148,7 @@ fn assistant_label_uses_accent_bold() {
 fn subagent_assistant_uses_nested_label_when_thinking_shown() {
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","parent_tool_use_id":"toolu_parent_abc","message":{"role":"assistant","content":[{"type":"text","text":"sub text"}]}}"#,
         )
@@ -957,6 +1171,7 @@ fn subagent_assistant_uses_nested_label_when_thinking_shown() {
 fn truncated_tool_call_header_carries_expected_tool_output_id() {
     let entries = vec![RenderableEntry {
         entry_index: 7,
+        jsonl_line: 8,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_xyz","name":"Bash","input":{"command":"ls"}}]}}"#,
         )
@@ -983,6 +1198,7 @@ fn truncated_tool_call_header_carries_expected_tool_output_id() {
 fn full_tool_mode_lines_are_not_clickable() {
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"one\ntwo\nthree\nfour\nfive"}}]}}"#,
         )
@@ -1006,6 +1222,7 @@ fn tool_result_string_content_renders_as_text() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"echo hi"}}]}}"#,
             )
@@ -1013,6 +1230,7 @@ fn tool_result_string_content_renders_as_text() {
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(
                 r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"hello-world-output"}]}}"#,
             )
@@ -1036,6 +1254,7 @@ fn assistant_with_reordered_blocks_entry() -> RenderableEntry {
     // must reorder to text → tool/summary → thinking.
     RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[
                 {"type":"thinking","thinking":"THINK_BLOCK","signature":"sig"},
@@ -1323,6 +1542,7 @@ fn pending_summary_flushes_at_eof() {
     // result still flushes at EOF and produces a message range.
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"x"}}]}}"#,
         )
@@ -1345,6 +1565,7 @@ fn pending_summary_flushes_before_non_tool_message() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(
                 r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"Grep","input":{"pattern":"x"}}]}}"#,
             )
@@ -1406,6 +1627,7 @@ fn assistant_template_order_is_text_then_tool_then_thinking() {
     // (text → tool → thinking) must override that.
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"assistant","message":{"role":"assistant","content":[
                 {"type":"thinking","thinking":"deep thought","signature":"sig"},
@@ -1436,6 +1658,7 @@ fn assistant_template_order_is_text_then_tool_then_thinking() {
 fn skill_marker_user_message_renders_dimmed_but_top_level() {
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"user","message":{"role":"user","content":"Base directory for this skill: /tmp/x"}}"#,
         )
@@ -1459,6 +1682,7 @@ fn agent_progress_user_with_text_and_result_keeps_template_order() {
     // results. Both must appear, in that order.
     let entries = vec![RenderableEntry {
         entry_index: 0,
+        jsonl_line: 1,
         entry: serde_json::from_str(
             r#"{"type":"progress","data":{"type":"agent_progress","agentId":"agent-abc1234","message":{"type":"user","message":{"role":"user","content":[
                 {"type":"text","text":"agent says hi"},
@@ -1485,10 +1709,12 @@ fn excluded_entry_kinds_produce_no_lines() {
     let entries = vec![
         RenderableEntry {
             entry_index: 0,
+            jsonl_line: 1,
             entry: serde_json::from_str(r#"{"type":"summary","summary":"x"}"#).unwrap(),
         },
         RenderableEntry {
             entry_index: 1,
+            jsonl_line: 2,
             entry: serde_json::from_str(r#"{"type":"system","subtype":"info","message":"sys"}"#)
                 .unwrap(),
         },
@@ -1497,4 +1723,50 @@ fn excluded_entry_kinds_produce_no_lines() {
         render_parsed_conversation(&entries, &test_render_options(ToolDisplayMode::Hidden));
     assert!(rendered.lines.is_empty());
     assert!(rendered.messages.is_empty());
+}
+
+#[test]
+fn a_note_prints_the_label_of_the_annotator_holding_it() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "recap", "cache rewrite reverted", vec![1]);
+    note.annotator = "chsum".to_string();
+    let mut options = annotated_options(vec![note], true);
+    options
+        .annotator_labels
+        .insert("chsum".to_string(), "Chsum".to_string());
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    assert!(rendered.contains("Chsum"), "{rendered}");
+    assert!(!rendered.contains("Note"), "{rendered}");
+}
+
+#[test]
+fn a_note_from_an_unlabelled_annotator_prints_its_key_capitalised() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "note", "by hand", vec![1]);
+    note.annotator = "file".to_string();
+    let options = annotated_options(vec![note], true);
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    assert!(rendered.contains("File"), "{rendered}");
+}
+
+#[test]
+fn a_label_longer_than_the_name_column_is_truncated() {
+    let entries = vec![user_entry(0, "first message", None)];
+    let mut note = annotation("n1", "finding", "unchecked index", vec![1]);
+    note.annotator = "review".to_string();
+    let mut options = annotated_options(vec![note], true);
+    options
+        .annotator_labels
+        .insert("review".to_string(), "CodeReviewer".to_string());
+
+    let rendered = rendered_text(&render_parsed_conversation(&entries, &options));
+
+    // Nine characters is the width every other name in the ledger occupies;
+    // a wider one would push this row's text out of the shared column.
+    assert!(rendered.contains("CodeRevie"), "{rendered}");
+    assert!(!rendered.contains("CodeReviewer"), "{rendered}");
 }

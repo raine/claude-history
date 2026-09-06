@@ -37,3 +37,4 @@ tempfile = "3"
 indicatif = "0.17"
 fastembed = { version = "5.13", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic"], optional = true }
+toml_edit = "0.25.13"

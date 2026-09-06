@@ -123,6 +123,232 @@ impl App {
         self.dialog_mode = DialogMode::Rename { input, cursor };
     }
 
+    /// Open the annotate prompt for the conversation being viewed.
+    ///
+    /// The focused message supplies the line through two hops: `focused_message`
+    /// indexes `message_ranges`, whose `entry_index` counts parsed entries after
+    /// filtering rather than file lines, so the matching entry carries the line.
+    /// With no focused message the annotation attaches to the session.
+    pub(super) fn start_annotate(&mut self) {
+        let line = match &self.app_mode {
+            AppMode::View(state) => state
+                .focused_message
+                .and_then(|index| state.message_ranges.get(index))
+                .and_then(|range| {
+                    let entries = state.parsed_entries.as_ref()?;
+                    entries
+                        .iter()
+                        .find(|entry| entry.entry_index == range.entry_index)
+                        .map(|entry| entry.jsonl_line)
+                }),
+            _ => return,
+        };
+        self.dialog_mode = DialogMode::Annotate {
+            input: String::new(),
+            cursor: 0,
+            line,
+            replacing: None,
+        };
+    }
+
+    /// Open the annotate prompt on the selected note, pre-filled with its text.
+    pub(super) fn start_edit_annotation(&mut self) {
+        let AppMode::View(state) = &self.app_mode else {
+            return;
+        };
+        let Some(id) = state.focused_annotation.clone() else {
+            return;
+        };
+        let Some(annotation) = state
+            .annotations
+            .session
+            .iter()
+            .chain(state.annotations.positioned.iter())
+            .find(|annotation| annotation.id == id)
+        else {
+            return;
+        };
+        let input = annotation.text.clone();
+        let cursor = input.chars().count();
+        let line = annotation.anchor_line();
+        self.dialog_mode = DialogMode::Annotate {
+            input,
+            cursor,
+            line,
+            replacing: Some(id),
+        };
+    }
+
+    /// Remove the selected note.
+    /// Copies the selected note's text to the clipboard.
+    pub(super) fn copy_focused_annotation(&mut self) {
+        let AppMode::View(state) = &self.app_mode else {
+            return;
+        };
+        let Some(id) = state.focused_annotation.as_deref() else {
+            return;
+        };
+        let Some(annotation) = find_annotation(&state.annotations, id) else {
+            return;
+        };
+        let text = annotation_yank_text(annotation, &state.conversation_path);
+        let message = match crate::tui::export::copy_to_system_clipboard(&text) {
+            Ok(crate::tui::export::ClipboardDestination::System) => {
+                "Note copied to clipboard".to_string()
+            }
+            Ok(crate::tui::export::ClipboardDestination::Terminal) => {
+                "Note sent to terminal clipboard".to_string()
+            }
+            Err(e) => e,
+        };
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
+    pub(super) fn delete_focused_annotation(&mut self, viewport_height: usize) {
+        let AppMode::View(state) = &self.app_mode else {
+            return;
+        };
+        let Some(id) = state.focused_annotation.clone() else {
+            return;
+        };
+        let path = state.conversation_path.clone();
+        // The annotator holding the note is carried on the note itself, so the
+        // delete reaches the store it came from rather than the one writes go
+        // to.
+        let annotator = state
+            .annotations
+            .session
+            .iter()
+            .chain(state.annotations.positioned.iter())
+            .find(|annotation| annotation.id == id)
+            .map(|annotation| annotation.annotator.clone())
+            .unwrap_or_default();
+        if self.annotators().delete(&path, &id, &annotator).is_err() {
+            return;
+        }
+        let annotations = self.annotators().read_one(&path);
+        if let AppMode::View(state) = &mut self.app_mode {
+            state.annotations = annotations;
+            state.focused_annotation = None;
+        }
+        self.refresh_annotation_count(&path);
+        self.refresh_conversation_annotations(&path);
+        self.re_render_view(viewport_height);
+    }
+
+    pub(super) fn submit_annotate(&mut self, viewport_height: usize) {
+        let (text, line, replacing) = match &self.dialog_mode {
+            DialogMode::Annotate {
+                input,
+                line,
+                replacing,
+                ..
+            } => (input.trim().to_string(), *line, replacing.clone()),
+            _ => return,
+        };
+        self.dialog_mode = DialogMode::None;
+        if text.is_empty() {
+            return;
+        }
+        let AppMode::View(state) = &self.app_mode else {
+            return;
+        };
+        let path = state.conversation_path.clone();
+
+        let replaced_annotator = replacing.as_ref().and_then(|id| {
+            state
+                .annotations
+                .session
+                .iter()
+                .chain(state.annotations.positioned.iter())
+                .find(|annotation| annotation.id == *id)
+                .map(|annotation| annotation.annotator.clone())
+        });
+
+        // The replacement is written before the original is removed, so a
+        // failure part-way leaves the note present rather than lost.
+        let annotation = crate::annotations::Annotation {
+            id: crate::annotations::generated_id(),
+            targets: line
+                .map(crate::annotations::TargetSpan::single)
+                .into_iter()
+                .collect(),
+            kind: "note".to_string(),
+            text,
+            annotator: String::new(),
+            origin: None,
+        };
+        if self.annotators().write(&path, &annotation).is_err() {
+            return;
+        }
+        if let Some(id) = replacing {
+            let _ = self
+                .annotators()
+                .delete(&path, &id, &replaced_annotator.unwrap_or_default());
+        }
+        // Re-read rather than appending in memory, so the viewer renders what
+        // the annotators hold rather than the record this process sent them.
+        let annotations = self.annotators().read_one(&path);
+        if let AppMode::View(state) = &mut self.app_mode {
+            state.annotations = annotations;
+            state.focused_annotation = None;
+        }
+        self.refresh_annotation_count(&path);
+        self.refresh_conversation_annotations(&path);
+        // Without this the written annotation sits in state unseen until the
+        // next redraw is triggered by something else.
+        self.re_render_view(viewport_height);
+    }
+
+    pub(super) fn handle_annotate_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+        viewport_height: usize,
+    ) -> Option<Action> {
+        match code {
+            KeyCode::Esc => {
+                self.dialog_mode = DialogMode::None;
+            }
+            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.dialog_mode = DialogMode::None;
+            }
+            KeyCode::Enter => self.submit_annotate(viewport_height),
+            KeyCode::Left => {
+                if let DialogMode::Annotate { cursor, .. } = &mut self.dialog_mode {
+                    *cursor = cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Right => {
+                if let DialogMode::Annotate { input, cursor, .. } = &mut self.dialog_mode {
+                    *cursor = (*cursor + 1).min(input.chars().count());
+                }
+            }
+            KeyCode::Backspace => {
+                if let DialogMode::Annotate { input, cursor, .. } = &mut self.dialog_mode
+                    && *cursor > 0
+                    && let Some((byte_pos, _)) = input.char_indices().nth(*cursor - 1)
+                {
+                    input.remove(byte_pos);
+                    *cursor -= 1;
+                }
+            }
+            KeyCode::Char(character) => {
+                if let DialogMode::Annotate { input, cursor, .. } = &mut self.dialog_mode {
+                    let byte_pos = input
+                        .char_indices()
+                        .nth(*cursor)
+                        .map(|(pos, _)| pos)
+                        .unwrap_or(input.len());
+                    input.insert(byte_pos, character);
+                    *cursor += 1;
+                }
+            }
+            _ => {}
+        }
+        None
+    }
+
     pub(super) fn handle_rename_key(
         &mut self,
         code: KeyCode,
@@ -274,5 +500,125 @@ impl App {
         };
 
         self.status_message = Some((result.message, std::time::Instant::now()));
+    }
+}
+
+/// The note with this id, from either the session-level or the positioned
+/// notes of a conversation.
+fn find_annotation<'a>(
+    annotations: &'a crate::annotations::ConversationAnnotations,
+    id: &str,
+) -> Option<&'a crate::annotations::Annotation> {
+    annotations
+        .session
+        .iter()
+        .chain(annotations.positioned.iter())
+        .find(|annotation| annotation.id == id)
+}
+
+/// The clipboard text for a note: its text, then a locator naming the
+/// annotator, the kind, the conversation and the lines targeted, and the
+/// origin when the note carries one. A note pasted elsewhere then leads back
+/// to the transcript it describes and to the file it summarised.
+fn annotation_yank_text(
+    annotation: &crate::annotations::Annotation,
+    conversation: &std::path::Path,
+) -> String {
+    let target = match annotation.targets.as_slice() {
+        [] => "session".to_string(),
+        targets => targets
+            .iter()
+            .map(|span| {
+                if span.start == span.end {
+                    span.start.to_string()
+                } else {
+                    format!("{}..{}", span.start, span.end)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    };
+    let mut out = format!(
+        "{}\n\n— {} · {} · {} @{target}",
+        annotation.text.trim_end(),
+        annotation.annotator,
+        annotation.kind,
+        conversation.display()
+    );
+    if let Some(origin) = &annotation.origin {
+        out.push_str(&format!("\n  origin {}", origin.long()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod annotation_copy_tests {
+    use super::{annotation_yank_text, find_annotation};
+    use crate::annotations::{Annotation, AnnotationOrigin, ConversationAnnotations, TargetSpan};
+    use std::path::{Path, PathBuf};
+
+    fn note(id: &str, targets: Vec<TargetSpan>, text: &str) -> Annotation {
+        Annotation {
+            id: id.to_string(),
+            targets,
+            kind: "recap".to_string(),
+            text: text.to_string(),
+            annotator: "chsum".to_string(),
+            origin: None,
+        }
+    }
+
+    #[test]
+    fn the_selected_note_resolves_to_its_own_text_only() {
+        let annotations = ConversationAnnotations::from_flat(vec![
+            note("s1", Vec::new(), "session-level remark"),
+            note("p1", vec![TargetSpan::single(4)], "the line four remark"),
+        ]);
+
+        assert_eq!(
+            find_annotation(&annotations, "p1").map(|a| a.text.as_str()),
+            Some("the line four remark")
+        );
+        assert_eq!(
+            find_annotation(&annotations, "s1").map(|a| a.text.as_str()),
+            Some("session-level remark")
+        );
+        assert!(find_annotation(&annotations, "missing").is_none());
+    }
+
+    #[test]
+    fn a_yanked_note_carries_its_locator() {
+        let annotation = note(
+            "p1",
+            vec![TargetSpan::single(443)],
+            "Agent removed the wizard.\n",
+        );
+
+        let text = annotation_yank_text(&annotation, Path::new("/tmp/proj/session.jsonl"));
+
+        assert_eq!(
+            text,
+            "Agent removed the wizard.\n\n— chsum · recap · /tmp/proj/session.jsonl @443"
+        );
+    }
+
+    #[test]
+    fn a_yanked_note_with_an_origin_names_the_file_it_summarised() {
+        let mut annotation = note(
+            "p1",
+            vec![TargetSpan::single(443)],
+            "Agent removed the wizard.",
+        );
+        annotation.origin = Some(AnnotationOrigin {
+            path: PathBuf::from("/tmp/proj/subagents/agent-ac1cffaa.jsonl"),
+            lines: "412..430".to_string(),
+        });
+
+        let text = annotation_yank_text(&annotation, Path::new("/tmp/proj/session.jsonl"));
+
+        assert!(
+            text.ends_with("\n  origin /tmp/proj/subagents/agent-ac1cffaa.jsonl @412..430"),
+            "{text}"
+        );
     }
 }

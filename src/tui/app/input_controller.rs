@@ -132,6 +132,9 @@ impl App {
                 return None;
             }
             DialogMode::Rename { .. } => return self.handle_rename_key(code, modifiers),
+            DialogMode::Annotate { .. } => {
+                return self.handle_annotate_key(code, modifiers, viewport_height);
+            }
             DialogMode::None => {}
         }
 
@@ -162,6 +165,40 @@ impl App {
             return self.handle_search_typing_key(code, modifiers);
         }
 
+        // A selected note takes d, e and y ahead of every other binding, so
+        // the keys act on the selection rather than on the conversation. Without
+        // the y arm the key falls to the yank menu, whose every option copies
+        // the whole conversation.
+        if let AppMode::View(ref state) = self.app_mode
+            && state.focused_annotation.is_some()
+        {
+            match code {
+                KeyCode::Char('d') if modifiers.is_empty() => {
+                    self.delete_focused_annotation(viewport_height);
+                    return None;
+                }
+                KeyCode::Char('y') if modifiers.is_empty() => {
+                    self.copy_focused_annotation();
+                    return None;
+                }
+                KeyCode::Char('e') if modifiers.is_empty() => {
+                    self.start_edit_annotation();
+                    return None;
+                }
+                KeyCode::Esc => {
+                    if let AppMode::View(ref mut state) = self.app_mode {
+                        state.focused_annotation = None;
+                    }
+                    self.re_render_view(viewport_height);
+                    return None;
+                }
+                _ => {}
+            }
+        }
+        if self.keys.annotate.matches(code, modifiers) {
+            self.start_annotate();
+            return None;
+        }
         if self.keys.delete.matches(code, modifiers) {
             if !self.single_file_mode {
                 self.dialog_mode = DialogMode::ConfirmDelete;
@@ -296,6 +333,10 @@ impl App {
             }
             KeyCode::Char('i') => {
                 self.toggle_view_timing(viewport_height);
+                None
+            }
+            KeyCode::Char('A') => {
+                self.toggle_view_annotations(viewport_height);
                 None
             }
             KeyCode::Char('p') => {

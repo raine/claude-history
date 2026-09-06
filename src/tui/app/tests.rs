@@ -35,6 +35,102 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
 }
 
 #[test]
+fn annotating_takes_its_line_from_the_focused_message() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"summary","summary":"dropped from the message list"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(20);
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = Some(0);
+    }
+
+    app.start_annotate();
+
+    // The first message is on file line 2: line 1 is a summary record, which
+    // carries no ordinal but still consumes a line.
+    match app.dialog_mode {
+        DialogMode::Annotate { line, .. } => assert_eq!(line, Some(2)),
+        _ => panic!("annotate prompt opened"),
+    }
+}
+
+#[test]
+fn annotating_without_a_focused_message_attaches_to_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = None;
+    }
+
+    app.start_annotate();
+
+    match app.dialog_mode {
+        DialogMode::Annotate { line, .. } => assert_eq!(line, None),
+        _ => panic!("annotate prompt opened"),
+    }
+}
+
+#[test]
+fn an_empty_annotation_closes_the_prompt_without_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.start_annotate();
+    app.submit_annotate(20);
+
+    assert!(matches!(app.dialog_mode, DialogMode::None));
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("still in view mode");
+    };
+    assert!(state.annotations.is_empty());
+}
+
+#[test]
 fn mixed_sources_are_identified_and_pi_local_filter_uses_header_cwd() {
     let mut claude = conversation(Some("project"), "-tmp-project", "claude-id", "claude");
     let mut pi = conversation(Some("project"), "ignored", "pi-id", "pi");
@@ -1616,4 +1712,125 @@ fn single_file_mode_has_no_project_exclusions() {
 
     assert!(app.excluded_projects.is_empty());
     assert!(app.is_single_file_mode());
+}
+
+/// An annotator set holding only the file annotator, rooted at `root`.
+fn annotator_set_rooted_at(root: PathBuf) -> crate::annotations::AnnotatorSet {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(
+        crate::config::DEFAULT_ANNOTATOR.to_string(),
+        crate::config::AnnotatorConfig {
+            root: Some(root),
+            ..crate::config::AnnotatorConfig::default()
+        },
+    );
+    crate::annotations::AnnotatorSet::from_config(&crate::config::ConfigFile {
+        annotators: Some(table),
+        ..crate::config::ConfigFile::default()
+    })
+}
+
+/// Writes one sidecar for `conversation` under a fresh annotations root and
+/// returns that root, mirroring the layout the file annotator reads.
+fn annotations_root_with_note(
+    dir: &std::path::Path,
+    conversation: &Conversation,
+    text: &str,
+) -> PathBuf {
+    let root = dir.join("annotations");
+    let project = conversation
+        .path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .expect("conversation sits under a project directory");
+    let project_dir = root.join(project);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let sidecar = project_dir.join(format!("{}.jsonl", conversation.session_id));
+    std::fs::write(
+        sidecar,
+        format!(
+            "{}\n",
+            serde_json::json!({"id": "note-1", "kind": "note", "text": text})
+        ),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn a_note_makes_its_conversation_match_a_list_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body with no such word",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+
+    app.query = "pelican".to_string();
+    app.update_filter();
+
+    assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+}
+
+#[test]
+fn note_text_reaches_the_field_the_evidence_line_is_drawn_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body with no such word",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+
+    // The evidence builder reads full_text and skips what the preview already
+    // shows, so the note's presence there is what puts it on the row.
+    assert!(
+        app.conversations()[0]
+            .full_text
+            .contains("pelican crossing"),
+        "{}",
+        app.conversations()[0].full_text
+    );
+    let evidence = crate::search::build_lexical_evidence(
+        &app.conversations()[0],
+        &crate::search::query::ParsedQuery::parse("pelican"),
+    )
+    .expect("evidence for a note-only match");
+    assert!(!evidence.context_ranges.is_empty());
+}
+
+#[test]
+fn enrichment_appends_one_copy_of_a_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+    // A second pass would double the note's text and with it its lexical weight.
+    app.finish_loading();
+
+    assert_eq!(
+        app.conversations()[0].full_text.matches("pelican").count(),
+        1,
+        "{}",
+        app.conversations()[0].full_text
+    );
 }

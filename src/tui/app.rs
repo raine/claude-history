@@ -99,6 +99,18 @@ pub struct App {
     semantic_search: SemanticSearchState,
     /// Cached lexical evidence produced outside the render path
     lexical_evidence: HashMap<usize, search::LexicalEvidence>,
+    /// The registered annotators, read together and written to one at a time.
+    annotators: crate::annotations::AnnotatorSet,
+    /// Note count per conversation, read when loading completes and refreshed
+    /// for one conversation after a write. The list row states a count per row,
+    /// and a per-row read would invoke every annotator once per visible row on
+    /// every frame.
+    annotation_counts: HashMap<PathBuf, usize>,
+    /// Whether note text has been appended to the corpus's lexical fields.
+    /// The append is not idempotent, so a second pass over the same
+    /// conversations would double every note's text and double its scoring
+    /// weight.
+    annotations_enriched: bool,
 }
 
 struct AppParts {
@@ -157,6 +169,55 @@ impl App {
             list_search_mode: parts.list_search_mode,
             semantic_search: parts.semantic_search,
             lexical_evidence: HashMap::new(),
+            annotators: crate::annotations::AnnotatorSet::from_current_config(),
+            annotation_counts: HashMap::new(),
+            annotations_enriched: false,
+        }
+    }
+
+    /// The registered annotators.
+    pub(super) fn annotators(&self) -> &crate::annotations::AnnotatorSet {
+        &self.annotators
+    }
+
+    /// The number of notes attached to one conversation.
+    pub fn annotation_count(&self, conversation: &std::path::Path) -> usize {
+        self.annotation_counts
+            .get(conversation)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Places a note count for one conversation without reading any annotator.
+    #[cfg(test)]
+    pub fn set_annotation_count_for_test(&mut self, conversation: &std::path::Path, count: usize) {
+        self.annotation_counts
+            .insert(conversation.to_path_buf(), count);
+    }
+
+    /// Replaces the registered annotators and drops the enrichment guard, so a
+    /// test corpus is read instead of the configured store.
+    #[cfg(test)]
+    pub fn set_annotators_for_test(&mut self, annotators: crate::annotations::AnnotatorSet) {
+        self.annotators = annotators;
+        self.annotations_enriched = false;
+    }
+
+    /// Re-reads one conversation's notes after a write or a delete, so the list
+    /// row states the count the annotators hold rather than the count read when
+    /// loading completed.
+    pub(super) fn refresh_annotation_count(&mut self, conversation: &std::path::Path) {
+        let count = self
+            .annotators
+            .counts(&[conversation])
+            .get(conversation)
+            .copied()
+            .unwrap_or(0);
+        if count == 0 {
+            self.annotation_counts.remove(conversation);
+        } else {
+            self.annotation_counts
+                .insert(conversation.to_path_buf(), count);
         }
     }
 
@@ -372,6 +433,72 @@ impl App {
         };
     }
 
+    /// Appends every conversation's note text to its lexical search fields.
+    ///
+    /// A note lives outside the transcript, so lexical search over the parsed
+    /// text alone never matches it and the conversation carrying it stays out
+    /// of the results. The append also reaches `full_text`, which the evidence
+    /// builder draws context from, so a row matched on a note shows that note's
+    /// text as its context line.
+    fn enrich_annotations(&mut self) {
+        if self.annotations_enriched {
+            return;
+        }
+        let scoped = (0..self.conversations.len()).collect::<Vec<_>>();
+        let _ =
+            crate::annotations::enrich_scoped(&mut self.conversations, &scoped, &self.annotators);
+        self.annotations_enriched = true;
+
+        let paths = self
+            .conversations
+            .iter()
+            .map(|conversation| conversation.path.as_path())
+            .collect::<Vec<_>>();
+        self.annotation_counts = self.annotators.counts(&paths);
+    }
+
+    /// Rebuilds one conversation's lexical fields after its notes change.
+    ///
+    /// The append in `enrich_annotations` cannot be undone in place, so the
+    /// transcript is re-parsed and the current notes appended to the fresh
+    /// text; without the re-parse a deleted note stays searchable and an edited
+    /// one is searchable under both its texts.
+    pub(super) fn refresh_conversation_annotations(&mut self, conversation: &std::path::Path) {
+        let Some(index) = self
+            .conversations
+            .iter()
+            .position(|conv| conv.path == conversation)
+        else {
+            return;
+        };
+        let modified = std::fs::metadata(conversation)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let Ok(Some(reparsed)) =
+            process_conversation_file(conversation.to_path_buf(), modified, None)
+        else {
+            return;
+        };
+        let conv = &mut self.conversations[index];
+        conv.full_text = reparsed.full_text;
+        conv.search_text_lower = reparsed.search_text_lower;
+        conv.agent_search_text = reparsed.agent_search_text;
+
+        let _ =
+            crate::annotations::enrich_scoped(&mut self.conversations, &[index], &self.annotators);
+
+        // The worker scores against its own snapshot, so the corpus it holds is
+        // replaced before the next query runs against stale text.
+        self.conversations_snapshot = Arc::new(self.conversations.clone());
+        self.rebuild_semantic_conversations_snapshot();
+        self.searchable = search::precompute_search_text(&self.conversations);
+        let _ = self.search_tx.send(SearchCommand::UpdateData {
+            conversations: self.conversations_snapshot.clone(),
+            searchable: Arc::new(self.searchable.clone()),
+        });
+        self.invalidate_search_generation();
+    }
+
     /// Mark loading as complete: sort, precompute search, and transition to Ready
     pub fn finish_loading(&mut self) {
         // Sort all conversations by timestamp (newest first)
@@ -382,6 +509,10 @@ impl App {
         for (idx, conv) in self.conversations.iter_mut().enumerate() {
             conv.index = idx;
         }
+
+        // Notes join the lexical fields before the snapshot and the precompute,
+        // so the worker's corpus and the searchable text both carry them.
+        self.enrich_annotations();
 
         self.conversations_snapshot = Arc::new(self.conversations.clone());
         self.rebuild_semantic_conversations_snapshot();

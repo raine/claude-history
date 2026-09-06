@@ -21,6 +21,80 @@ pub struct ConfigFile {
     pub tui: Option<TuiConfig>,
     pub search: Option<SearchConfig>,
     pub agent: Option<AgentConfig>,
+    pub annotations: Option<AnnotationsConfig>,
+    pub annotators: Option<std::collections::BTreeMap<String, AnnotatorConfig>>,
+}
+
+/// Where annotations are read from and written to.
+///
+/// Both fields are optional. With neither set, reads and writes use the default
+/// file-annotator directory, so annotating works without configuration.
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationsConfig {
+    /// File-annotator root. Defaults to `~/.local/share/claude-history/annotations`.
+    pub root: Option<PathBuf>,
+    /// Key of the annotator that receives writes. Defaults to `file`.
+    pub write_to: Option<String>,
+}
+
+/// One registered annotator, keyed by name in the `[annotators]` table.
+///
+/// `command` absent names the built-in file annotator; a command is invoked as
+/// `<command> <op>` with one JSON object on stdin and one on stdout.
+#[derive(Deserialize, Debug, Default, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotatorConfig {
+    /// Command line invoked for each operation.
+    pub command: Option<String>,
+    /// Label the viewer prints. With this absent the key is used, first letter
+    /// capitalised.
+    pub name: Option<String>,
+    /// File-annotator root, read for the `file` entry.
+    pub root: Option<PathBuf>,
+}
+
+/// Key of the annotator that receives writes.
+pub const DEFAULT_ANNOTATOR: &str = "file";
+
+/// The annotator writes are dispatched to: the configured key, else `file`.
+pub fn annotation_write_target(config: &ConfigFile) -> String {
+    config
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.write_to.clone())
+        .unwrap_or_else(|| DEFAULT_ANNOTATOR.to_string())
+}
+
+/// The file-annotator root: the configured path, else
+/// `~/.local/share/claude-history/annotations`.
+///
+/// A missing home directory leaves no default path, and the caller reads no
+/// annotations. A relative fallback would resolve against the working
+/// directory and name a different root per invocation.
+pub fn annotations_root(config: &ConfigFile) -> Option<PathBuf> {
+    if let Some(root) = config
+        .annotators
+        .as_ref()
+        .and_then(|annotators| annotators.get(DEFAULT_ANNOTATOR))
+        .and_then(|file| file.root.clone())
+    {
+        return Some(root);
+    }
+    if let Some(root) = config
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.root.clone())
+    {
+        return Some(root);
+    }
+    home::home_dir().map(|mut path| {
+        path.push(".local");
+        path.push("share");
+        path.push("claude-history");
+        path.push("annotations");
+        path
+    })
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -245,6 +319,7 @@ pub struct KeysConfig {
     pub fork: Option<KeyBinding>,
     pub rename: Option<KeyBinding>,
     pub delete: Option<KeyBinding>,
+    pub annotate: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,6 +419,7 @@ pub struct KeyBindings {
     pub fork: KeyBinding,
     pub rename: KeyBinding,
     pub delete: KeyBinding,
+    pub annotate: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -365,6 +441,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('x'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            annotate: KeyBinding {
+                code: KeyCode::Char('a'),
+                modifiers: KeyModifiers::NONE,
+            },
         }
     }
 }
@@ -379,6 +459,7 @@ impl KeyBindings {
                 fork: cfg.fork.unwrap_or(defaults.fork),
                 rename: cfg.rename.unwrap_or(defaults.rename),
                 delete: cfg.delete.unwrap_or(defaults.delete),
+                annotate: cfg.annotate.unwrap_or(defaults.annotate),
             },
         }
     }
@@ -386,7 +467,7 @@ impl KeyBindings {
 
 /// Returns the path to the configuration file: ~/.config/claude-history/config.toml
 /// This path is used for all platforms.
-fn get_config_path() -> Option<PathBuf> {
+pub fn get_config_path() -> Option<PathBuf> {
     home::home_dir().map(|mut path| {
         path.push(".config");
         path.push("claude-history");

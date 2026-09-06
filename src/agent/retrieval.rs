@@ -17,6 +17,9 @@ pub enum AgentHitSource {
     Dialogue,
     Tool,
     Thinking,
+    /// Text a producer attached to the conversation. Named separately so a hit
+    /// on an annotation does not read as something said in the conversation.
+    Annotation,
 }
 
 pub type AgentHitRenderOptions = ContentVisibility;
@@ -578,6 +581,7 @@ fn source_rank(source: AgentHitSource) -> u8 {
         AgentHitSource::Dialogue => 0,
         AgentHitSource::Tool => 1,
         AgentHitSource::Thinking => 2,
+        AgentHitSource::Annotation => 3,
     }
 }
 

@@ -505,6 +505,19 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::Annotate {
+            input,
+            cursor,
+            line,
+            replacing,
+        } => {
+            let verb = if replacing.is_some() { "Edit" } else { "Note" };
+            let title = match line {
+                Some(line) => format!(" {verb} on line {line} "),
+                None => format!(" {verb} on session "),
+            };
+            render_text_prompt(frame, input, *cursor, &title);
+        }
         DialogMode::None => {}
     }
 }
@@ -709,8 +722,16 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
     let visible_height = area.height as usize;
     let query_lower = state.search_query.to_lowercase();
 
-    // Determine focused message line range (only when nav mode active)
-    let focused_range = if state.message_nav_active {
+    // Determine the focused line range. A selected note takes the range first,
+    // so the gutter marks the selection the d and e keys act on; message nav
+    // supplies the range the rest of the time.
+    let focused_range = if let Some(id) = state.focused_annotation.as_deref() {
+        state
+            .annotation_ranges
+            .iter()
+            .find(|range| range.id == id)
+            .map(|range| range.start_line..range.end_line)
+    } else if state.message_nav_active {
         state
             .focused_message
             .and_then(|idx| state.message_ranges.get(idx))
@@ -718,6 +739,10 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
     } else {
         None
     };
+    // The gutter column is drawn while either selection is live. Without the
+    // note case the marker stays hidden, because clicking a note clears
+    // message_nav_active.
+    let gutter_active = state.message_nav_active || state.focused_annotation.is_some();
 
     let visible_lines: Vec<Line> = state
         .rendered_lines
@@ -733,8 +758,8 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
                 .as_ref()
                 .is_some_and(|r| r.contains(&line_idx));
 
-            // Gutter indicator (only shown in message nav mode)
-            let gutter = if state.message_nav_active {
+            // Gutter indicator (shown for a nav-focused message or a selected note)
+            let gutter = if gutter_active {
                 if is_focused {
                     Span::styled("▌ ", Style::default().fg(rgb(th().accent)))
                 } else {
@@ -820,6 +845,7 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
     let tools_status = state.tool_display.status_label();
     let thinking_status = if state.show_thinking { "on " } else { "off" };
     let timing_status = if state.show_timing { "on " } else { "off" };
+    let notes_status = if state.show_annotations { "on " } else { "off" };
 
     let mut spans = vec![
         Span::raw("  "),
@@ -830,13 +856,29 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         Span::styled("T", key_style),
         Span::styled(format!("hink·{} ", thinking_status), label_style),
         Span::styled("i", key_style),
-        Span::styled(format!("nfo·{}", timing_status), label_style),
+        Span::styled(format!("nfo·{} ", timing_status), label_style),
+        Span::styled("A", key_style),
+        Span::styled(format!("notes·{}", notes_status), label_style),
         Span::raw("  "),
         Span::styled("│", label_style),
         Span::raw("  "),
     ];
 
-    if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
+    // A selected note takes d, e, y and Esc ahead of every other binding, so
+    // the row names the note's keys instead of export, delete and yank. Without
+    // the swap the footer prints bindings that do not fire.
+    if state.focused_annotation.is_some() {
+        spans.extend([
+            Span::styled("e", key_style),
+            Span::styled("dit note  ", label_style),
+            Span::styled("d", key_style),
+            Span::styled("elete note  ", label_style),
+            Span::styled("y", key_style),
+            Span::styled("ank note  ", label_style),
+            Span::styled("Esc", key_style),
+            Span::styled(" deselect", label_style),
+        ]);
+    } else if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
         spans.extend([
             Span::styled("n", key_style),
             Span::styled("ext  ", label_style),
@@ -855,6 +897,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         ]);
     } else {
         spans.extend([
+            Span::styled("a", key_style),
+            Span::styled("note  ", label_style),
             Span::styled("?", key_style),
             Span::styled("help  ", label_style),
             Span::styled("/", key_style),
@@ -1175,6 +1219,10 @@ fn render_confirm_dialog(frame: &mut Frame, area: Rect) {
 }
 
 fn render_rename_dialog(frame: &mut Frame, input: &str, cursor: usize) {
+    render_text_prompt(frame, input, cursor, " Rename session ")
+}
+
+fn render_text_prompt(frame: &mut Frame, input: &str, cursor: usize, title: &str) {
     let area = frame.area();
     let menu_width = area.width.saturating_sub(4).clamp(30, 70);
     let menu_height = 4;
@@ -1190,7 +1238,7 @@ fn render_rename_dialog(frame: &mut Frame, input: &str, cursor: usize) {
     frame.render_widget(background, menu_area);
 
     let block = Block::default()
-        .title(" Rename session ")
+        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(rgb(th().accent)));
@@ -1494,6 +1542,14 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 }
             });
 
+            // Note count, stated only where notes exist, so a row without them
+            // keeps its width for the summary.
+            let note_count = match app.annotation_count(&conv.path) {
+                0 => None,
+                1 => Some("1 note".to_string()),
+                n => Some(format!("{n} notes")),
+            };
+
             // Selection indicator: vertical bar for all rows (with left padding)
             let indicator = " ▌ ";
             let indicator_style = if is_selected {
@@ -1515,7 +1571,12 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 .as_ref()
                 .map(|d| UnicodeWidthStr::width(d.as_str()) + 3)
                 .unwrap_or(0);
+            let note_count_len = note_count
+                .as_ref()
+                .map(|n| UnicodeWidthStr::width(n.as_str()) + 3)
+                .unwrap_or(0);
             let right_len = UnicodeWidthStr::width(msg_count.as_str())
+                + note_count_len
                 + duration_len
                 + semantic_meta_len
                 + 3
@@ -1645,6 +1706,16 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 msg_count,
                 Style::default().fg(rgb(th().msg_count)),
             ));
+            if let Some(ref notes) = note_count {
+                header_spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(rgb(th().dot_separator)),
+                ));
+                header_spans.push(Span::styled(
+                    notes.clone(),
+                    Style::default().fg(rgb(th().annotation)),
+                ));
+            }
             if let Some(ref metadata_text) = semantic_meta_part {
                 header_spans.push(Span::styled(
                     " · ",
@@ -4119,5 +4190,121 @@ mod tests {
         assert_eq!(ranges.len(), 1);
         let ranges = find_normalized_match_ranges("the red", "red");
         assert_eq!(ranges.len(), 1);
+    }
+
+    /// The transcript and app used by the note-selection chrome tests: one
+    /// user message, viewed as a single file.
+    fn app_viewing_one_message(dir: &std::path::Path) -> App {
+        let transcript = dir.join("abc.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let mut app = App::new_single_file(
+            transcript,
+            ToolDisplayMode::Hidden,
+            false,
+            KeyBindings::default(),
+        );
+        // The single-file view opens at width 0 and renders no lines until a
+        // frame reports its size, so the gutter column would have nothing to
+        // sit beside.
+        app.check_view_resize(60, 4);
+        app
+    }
+
+    #[test]
+    fn a_selected_note_swaps_the_status_row_for_its_own_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_viewing_one_message(root.path());
+        app.select_annotation_for_test("note-1", 0, 1);
+
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("still in view mode");
+        };
+        let backend = TestBackend::new(100, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_view_status_bar(frame, &app, state, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains("edit note"), "{contents:?}");
+        assert!(contents.contains("elete note"), "{contents:?}");
+        assert!(contents.contains("ank note"), "{contents:?}");
+        // e is bound to export until a selection takes it: naming export here
+        // would print a binding that does not fire.
+        assert!(!contents.contains("xport"), "{contents:?}");
+    }
+
+    #[test]
+    fn a_selected_note_draws_the_focus_gutter() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_viewing_one_message(root.path());
+        app.select_annotation_for_test("note-1", 0, 1);
+
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("still in view mode");
+        };
+        // message_nav_active stays false, the state a note click leaves behind.
+        assert!(!state.message_nav_active);
+
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_view_content(frame, state, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains('\u{258c}'), "{contents:?}");
+    }
+
+    #[test]
+    fn a_list_row_states_its_note_count_beside_the_other_metadata() {
+        let conversation = test_conversation();
+        let path = conversation.path.clone();
+        let mut app = App::new(
+            vec![conversation],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+        app.set_annotation_count_for_test(&path, 2);
+
+        let backend = TestBackend::new(120, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_list(frame, &app, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains("2 notes"), "{contents:?}");
+        // The count joins the existing metadata rather than displacing it.
+        assert!(contents.contains("1 msg"), "{contents:?}");
+    }
+
+    #[test]
+    fn a_list_row_without_notes_states_no_count() {
+        let app = App::new(
+            vec![test_conversation()],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+
+        let backend = TestBackend::new(120, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_list(frame, &app, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(!contents.contains("note"), "{contents:?}");
     }
 }

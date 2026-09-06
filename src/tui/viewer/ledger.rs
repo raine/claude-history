@@ -383,5 +383,7 @@ mod tests {
             assert_eq!(UnicodeWidthStr::width(fitted.as_str()), NAME_WIDTH);
         }
         assert_eq!(padded_name("Branch summary"), "Branch s…");
+        // The annotation label is sized to the existing column.
+        assert_eq!(padded_name("Note"), "     Note");
     }
 }

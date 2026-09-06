@@ -35,9 +35,14 @@ where
             })
             .collect::<Vec<_>>();
 
+        // Annotations group independently: each is a discrete statement, and
+        // concatenating two into one chunk would return a hit that names lines
+        // from both.
         let grouped = if matches!(
             source,
-            SemanticChunkSource::AgentTool | SemanticChunkSource::AgentSubagentTool
+            SemanticChunkSource::AgentTool
+                | SemanticChunkSource::AgentSubagentTool
+                | SemanticChunkSource::Annotation
         ) {
             independent_turns(&semantic_turns, config)
         } else {
