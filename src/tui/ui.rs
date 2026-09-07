@@ -505,6 +505,26 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::Annotate {
+            input,
+            cursor,
+            line,
+            anchor,
+            replacing,
+        } => {
+            let verb = if replacing.is_some() { "Edit" } else { "Note" };
+            let title = match line {
+                Some(line) => format!(" {verb} on line {line} "),
+                None => format!(" {verb} on session "),
+            };
+            // The Tab hint appears where an anchor line exists, which is the
+            // condition under which the key moves the target.
+            let hint = match anchor {
+                Some(_) => "Enter save · Alt+Enter newline · Tab scope · Esc cancel",
+                None => "Enter save · Alt+Enter newline · Esc cancel",
+            };
+            render_text_prompt(frame, input, *cursor, &title, hint, ANNOTATE_PROMPT_ROWS);
+        }
         DialogMode::None => {}
     }
 }
@@ -709,8 +729,16 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
     let visible_height = area.height as usize;
     let query_lower = state.search_query.to_lowercase();
 
-    // Determine focused message line range (only when nav mode active)
-    let focused_range = if state.message_nav_active {
+    // Determine the focused line range. A selected note takes the range first,
+    // so the gutter marks the selection the d and e keys act on; message nav
+    // supplies the range the rest of the time.
+    let focused_range = if let Some(id) = state.focused_annotation.as_deref() {
+        state
+            .annotation_ranges
+            .iter()
+            .find(|range| range.id == id)
+            .map(|range| range.start_line..range.end_line)
+    } else if state.message_nav_active {
         state
             .focused_message
             .and_then(|idx| state.message_ranges.get(idx))
@@ -718,6 +746,10 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
     } else {
         None
     };
+    // The gutter column is drawn while either selection is live. Without the
+    // note case the marker stays hidden, because clicking a note clears
+    // message_nav_active.
+    let gutter_active = state.message_nav_active || state.focused_annotation.is_some();
 
     let visible_lines: Vec<Line> = state
         .rendered_lines
@@ -733,8 +765,8 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
                 .as_ref()
                 .is_some_and(|r| r.contains(&line_idx));
 
-            // Gutter indicator (only shown in message nav mode)
-            let gutter = if state.message_nav_active {
+            // Gutter indicator (shown for a nav-focused message or a selected note)
+            let gutter = if gutter_active {
                 if is_focused {
                     Span::styled("▌ ", Style::default().fg(rgb(th().accent)))
                 } else {
@@ -820,6 +852,7 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
     let tools_status = state.tool_display.status_label();
     let thinking_status = if state.show_thinking { "on " } else { "off" };
     let timing_status = if state.show_timing { "on " } else { "off" };
+    let notes_status = if state.show_annotations { "on " } else { "off" };
 
     let mut spans = vec![
         Span::raw("  "),
@@ -830,13 +863,40 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         Span::styled("T", key_style),
         Span::styled(format!("hink·{} ", thinking_status), label_style),
         Span::styled("i", key_style),
-        Span::styled(format!("nfo·{}", timing_status), label_style),
+        Span::styled(format!("nfo·{} ", timing_status), label_style),
+        Span::styled("A", key_style),
+        Span::styled(format!("notes·{}", notes_status), label_style),
         Span::raw("  "),
         Span::styled("│", label_style),
         Span::raw("  "),
     ];
 
-    if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
+    // A note under a move takes the arrows, Enter and Esc, and a selected note
+    // takes d, e, y and Esc, ahead of every other binding. The row names the
+    // keys that fire in each state instead of export, delete and yank.
+    if state.moving_annotation.is_some() {
+        spans.extend([
+            Span::styled("↑↓", key_style),
+            Span::styled(" move note  ", label_style),
+            Span::styled("Enter", key_style),
+            Span::styled(" save  ", label_style),
+            Span::styled("Esc", key_style),
+            Span::styled(" cancel", label_style),
+        ]);
+    } else if state.focused_annotation.is_some() {
+        spans.extend([
+            Span::styled("e", key_style),
+            Span::styled("dit  ", label_style),
+            Span::styled("m", key_style),
+            Span::styled("ove  ", label_style),
+            Span::styled("d", key_style),
+            Span::styled("elete  ", label_style),
+            Span::styled("y", key_style),
+            Span::styled("ank  ", label_style),
+            Span::styled("Esc", key_style),
+            Span::styled(" deselect", label_style),
+        ]);
+    } else if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
         spans.extend([
             Span::styled("n", key_style),
             Span::styled("ext  ", label_style),
@@ -855,6 +915,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         ]);
     } else {
         spans.extend([
+            Span::styled("a", key_style),
+            Span::styled("nnotate  ", label_style),
             Span::styled("?", key_style),
             Span::styled("help  ", label_style),
             Span::styled("/", key_style),
@@ -1175,9 +1237,125 @@ fn render_confirm_dialog(frame: &mut Frame, area: Rect) {
 }
 
 fn render_rename_dialog(frame: &mut Frame, input: &str, cursor: usize) {
+    render_text_prompt(
+        frame,
+        input,
+        cursor,
+        " Rename session ",
+        " Enter save · Esc cancel",
+        1,
+    )
+}
+
+/// Rows the annotate prompt grows to before it holds its height and scrolls.
+const ANNOTATE_PROMPT_ROWS: usize = 8;
+
+/// Break `input` into rows no wider than `width` display columns.
+///
+/// Each row carries the char index it starts at, so a cursor's char index
+/// resolves to a row and a column within it. A newline ends a row and occupies
+/// no column. Otherwise a row ends at the last space it holds, and a word wider
+/// than the row breaks at the row edge. An input ending at a row edge or on a
+/// newline gains a trailing empty row, which is where the cursor sits after the
+/// final character.
+fn wrap_rows(input: &str, width: usize) -> Vec<(usize, String)> {
+    let width = width.max(1);
+    let chars: Vec<char> = input.chars().collect();
+    let mut rows: Vec<(usize, String)> = Vec::new();
+    let mut start = 0usize;
+    while start < chars.len() {
+        let mut end = start;
+        let mut used = 0usize;
+        let mut last_space = None;
+        let mut newline = false;
+        while end < chars.len() {
+            if chars[end] == '\n' {
+                newline = true;
+                break;
+            }
+            let char_width = UnicodeWidthChar::width(chars[end]).unwrap_or(0);
+            if used + char_width > width {
+                break;
+            }
+            if chars[end] == ' ' {
+                last_space = Some(end);
+            }
+            used += char_width;
+            end += 1;
+        }
+        if !newline
+            && end < chars.len()
+            && let Some(space) = last_space
+            && space >= start
+        {
+            end = space + 1;
+        }
+        // A single char wider than the row still advances, so the loop ends.
+        if end == start && !newline {
+            end = start + 1;
+        }
+        rows.push((start, chars[start..end].iter().collect()));
+        if newline {
+            start = end + 1;
+            if start == chars.len() {
+                rows.push((start, String::new()));
+            }
+        } else {
+            if end == chars.len() && used == width {
+                rows.push((end, String::new()));
+            }
+            start = end;
+        }
+    }
+    if rows.is_empty() {
+        rows.push((0, String::new()));
+    }
+    rows
+}
+
+/// Render a bordered input prompt holding `input`, wrapped across at most
+/// `max_rows` rows. The box grows with the text; past `max_rows` it holds its
+/// height and shows the rows ending at the cursor.
+fn render_text_prompt(
+    frame: &mut Frame,
+    input: &str,
+    cursor: usize,
+    title: &str,
+    hint: &str,
+    max_rows: usize,
+) {
     let area = frame.area();
-    let menu_width = area.width.saturating_sub(4).clamp(30, 70);
-    let menu_height = 4;
+    // The lower clamp holds a readable box on an ordinary terminal. The hint
+    // widens it further where the terminal has the columns, so the keys it
+    // names sit on one row. The frame width caps the result, so a terminal
+    // narrower than the clamp draws inside its own buffer rather than past the
+    // right edge.
+    let hint_width = UnicodeWidthStr::width(hint).saturating_add(4) as u16;
+    let menu_width = area
+        .width
+        .saturating_sub(4)
+        .clamp(30, 70)
+        .max(hint_width)
+        .min(area.width);
+    let input_width = menu_width.saturating_sub(4) as usize;
+
+    let rows = wrap_rows(input, input_width);
+    let cursor_row = rows
+        .iter()
+        .rposition(|(start, _)| *start <= cursor)
+        .unwrap_or(0);
+    let visible = rows.len().min(max_rows.max(1));
+    let first_row = if cursor_row >= visible {
+        cursor_row + 1 - visible
+    } else {
+        0
+    };
+
+    // The hint wraps like the body, so a prompt naming several keys states them
+    // all rather than clipping the last at the border.
+    let hint_rows = wrap_rows(hint, input_width);
+    // borders (2) + text rows + hint rows
+    let menu_height = (visible as u16 + hint_rows.len() as u16 + 2).min(area.height);
     let menu_area = Rect {
         x: (area.width.saturating_sub(menu_width)) / 2,
         y: (area.height.saturating_sub(menu_height)) / 2,
@@ -1190,37 +1368,54 @@ fn render_rename_dialog(frame: &mut Frame, input: &str, cursor: usize) {
     frame.render_widget(background, menu_area);
 
     let block = Block::default()
-        .title(" Rename session ")
+        .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(rgb(th().accent)));
     let inner = block.inner(menu_area);
     frame.render_widget(block, menu_area);
 
-    let input_width = inner.width.saturating_sub(2) as usize;
-    let display = simple_truncate(input, input_width);
-    let lines = vec![
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .skip(first_row)
+        .take(visible)
+        .map(|(_, text)| {
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled(text.clone(), Style::default().fg(rgb(th().text_primary))),
+            ])
+        })
+        .collect();
+    lines.extend(hint_rows.iter().map(|(_, text)| {
         Line::from(vec![
             Span::raw(" "),
-            Span::styled(display, Style::default().fg(rgb(th().text_primary))),
-        ]),
-        Line::styled(
-            " Enter save · Esc cancel",
-            Style::default().fg(rgb(th().text_muted)),
-        ),
-    ];
+            Span::styled(text.clone(), Style::default().fg(rgb(th().text_muted))),
+        ])
+    }));
     frame.render_widget(Paragraph::new(lines), inner);
 
+    let (row_start, _) = rows[cursor_row];
     let cursor_offset: u16 = input
         .chars()
-        .take(cursor)
+        .skip(row_start)
+        .take(cursor.saturating_sub(row_start))
         .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
         .sum::<usize>()
         .min(input_width) as u16;
-    frame.set_cursor_position(Position::new(
-        inner.x.saturating_add(1).saturating_add(cursor_offset),
-        inner.y,
-    ));
+    // A box narrower or shorter than its borders leaves no cell for a cursor,
+    // and a position outside the frame is what the buffer rejects.
+    if inner.width > 0 && inner.height > 0 {
+        let x = inner
+            .x
+            .saturating_add(1)
+            .saturating_add(cursor_offset)
+            .min(area.width.saturating_sub(1));
+        let y = inner
+            .y
+            .saturating_add((cursor_row - first_row) as u16)
+            .min(area.height.saturating_sub(1));
+        frame.set_cursor_position(Position::new(x, y));
+    }
 }
 
 fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
@@ -1494,6 +1689,14 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 }
             });
 
+            // Note count, stated only where notes exist, so a row without them
+            // keeps its width for the summary.
+            let note_count = match app.annotation_count(&conv.path) {
+                0 => None,
+                1 => Some("1 note".to_string()),
+                n => Some(format!("{n} notes")),
+            };
+
             // Selection indicator: vertical bar for all rows (with left padding)
             let indicator = " ▌ ";
             let indicator_style = if is_selected {
@@ -1515,7 +1718,12 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 .as_ref()
                 .map(|d| UnicodeWidthStr::width(d.as_str()) + 3)
                 .unwrap_or(0);
+            let note_count_len = note_count
+                .as_ref()
+                .map(|n| UnicodeWidthStr::width(n.as_str()) + 3)
+                .unwrap_or(0);
             let right_len = UnicodeWidthStr::width(msg_count.as_str())
+                + note_count_len
                 + duration_len
                 + semantic_meta_len
                 + 3
@@ -1645,6 +1853,16 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 msg_count,
                 Style::default().fg(rgb(th().msg_count)),
             ));
+            if let Some(ref notes) = note_count {
+                header_spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(rgb(th().dot_separator)),
+                ));
+                header_spans.push(Span::styled(
+                    notes.clone(),
+                    Style::default().fg(rgb(th().annotation)),
+                ));
+            }
             if let Some(ref metadata_text) = semantic_meta_part {
                 header_spans.push(Span::styled(
                     " · ",
@@ -1777,7 +1995,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 /// Recency level for timestamp color grading
-enum Recency {
+pub(super) enum Recency {
     Now,
     Minutes,
     Hours,
@@ -1787,7 +2005,10 @@ enum Recency {
 
 /// Format a timestamp as relative time for recent entries, absolute for older ones.
 /// Returns (formatted_string, recency) for color grading.
-fn format_timestamp(timestamp: DateTime<Local>, now: DateTime<Local>) -> (String, Recency) {
+pub(super) fn format_timestamp(
+    timestamp: DateTime<Local>,
+    now: DateTime<Local>,
+) -> (String, Recency) {
     let age = now.signed_duration_since(timestamp);
 
     // Future timestamps (clock skew): show absolute
@@ -2643,6 +2864,58 @@ fn highlight_ranges(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn wrap_rows_breaks_at_a_space_and_records_each_row_start() {
+        let rows = super::wrap_rows("alpha beta gamma", 11);
+        let texts: Vec<&str> = rows.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, vec!["alpha beta ", "gamma"]);
+        let starts: Vec<usize> = rows.iter().map(|(start, _)| *start).collect();
+        assert_eq!(starts, vec![0, 11]);
+    }
+
+    #[test]
+    fn wrap_rows_breaks_a_word_wider_than_the_row_at_the_row_edge() {
+        let rows = super::wrap_rows("aaaaaaaa", 3);
+        let texts: Vec<&str> = rows.iter().map(|(_, text)| text.as_str()).collect();
+        assert_eq!(texts, vec!["aaa", "aaa", "aa"]);
+    }
+
+    #[test]
+    fn wrap_rows_returns_one_row_for_an_empty_input() {
+        assert_eq!(super::wrap_rows("", 10), vec![(0, String::new())]);
+    }
+
+    #[test]
+    fn wrap_rows_ends_a_row_at_a_newline() {
+        let rows = super::wrap_rows("one\ntwo", 20);
+        assert_eq!(rows, vec![(0, "one".to_string()), (4, "two".to_string())]);
+    }
+
+    #[test]
+    fn wrap_rows_holds_an_empty_row_for_a_blank_line() {
+        let rows = super::wrap_rows("one\n\ntwo", 20);
+        assert_eq!(
+            rows,
+            vec![
+                (0, "one".to_string()),
+                (4, String::new()),
+                (5, "two".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn wrap_rows_adds_a_trailing_row_after_a_closing_newline() {
+        let rows = super::wrap_rows("one\n", 20);
+        assert_eq!(rows, vec![(0, "one".to_string()), (4, String::new())]);
+    }
+
+    #[test]
+    fn wrap_rows_adds_a_trailing_row_when_the_text_fills_the_last_one() {
+        let rows = super::wrap_rows("abc", 3);
+        assert_eq!(rows, vec![(0, "abc".to_string()), (3, String::new())]);
+    }
     use super::*;
     use crate::history::Conversation;
     use crate::semantic::types::{
@@ -2680,6 +2953,60 @@ mod tests {
             terminal
                 .draw(|frame| {
                     render_help_overlay(frame, false, false, false, &KeyBindings::default(), 0)
+                })
+                .unwrap();
+        }
+    }
+
+    const ANNOTATE_HINT: &str = "Enter save · Alt+Enter newline · Tab scope · Esc cancel";
+
+    #[test]
+    fn the_box_widens_so_the_hint_sits_on_one_row() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_text_prompt(frame, "body", 4, " Note on line 2 ", ANNOTATE_HINT, 8)
+            })
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains(ANNOTATE_HINT), "{contents:?}");
+    }
+
+    #[test]
+    fn a_hint_wider_than_the_terminal_wraps_with_nothing_dropped() {
+        let backend = TestBackend::new(50, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                render_text_prompt(frame, "body", 4, " Note on line 2 ", ANNOTATE_HINT, 8)
+            })
+            .unwrap();
+
+        // The wrap falls between words, so the assertions name the pieces
+        // rather than the whole string.
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains("Alt+Enter newline"), "{contents:?}");
+        assert!(contents.contains("Tab scope"), "{contents:?}");
+        assert!(contents.contains("cancel"), "{contents:?}");
+    }
+
+    #[test]
+    fn a_prompt_survives_a_tiny_terminal() {
+        for (width, height) in [(20, 8), (10, 3), (2, 2), (1, 1)] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_text_prompt(
+                        frame,
+                        "body text that runs past a narrow box",
+                        4,
+                        " Note on line 2 ",
+                        ANNOTATE_HINT,
+                        8,
+                    )
                 })
                 .unwrap();
         }
@@ -4119,5 +4446,149 @@ mod tests {
         assert_eq!(ranges.len(), 1);
         let ranges = find_normalized_match_ranges("the red", "red");
         assert_eq!(ranges.len(), 1);
+    }
+
+    /// The transcript and app used by the note-selection chrome tests: one
+    /// user message, viewed as a single file.
+    fn app_viewing_one_message(dir: &std::path::Path) -> App {
+        let transcript = dir.join("abc.jsonl");
+        std::fs::write(
+            &transcript,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let mut app = App::new_single_file(
+            transcript,
+            ToolDisplayMode::Hidden,
+            false,
+            KeyBindings::default(),
+        );
+        // The single-file view opens at width 0 and renders no lines until a
+        // frame reports its size, so the gutter column would have nothing to
+        // sit beside.
+        app.check_view_resize(60, 4);
+        app
+    }
+
+    #[test]
+    fn a_selected_note_swaps_the_status_row_for_its_own_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_viewing_one_message(root.path());
+        app.select_annotation_for_test("note-1", 0, 1);
+
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("still in view mode");
+        };
+        let backend = TestBackend::new(100, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_view_status_bar(frame, &app, state, frame.area()))
+            .unwrap();
+
+        // The row drops the repeated "note" so five keys fit in one hundred
+        // columns; the notes indicator to its left already names the subject.
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains("edit"), "{contents:?}");
+        assert!(contents.contains("move"), "{contents:?}");
+        assert!(contents.contains("delete"), "{contents:?}");
+        assert!(contents.contains("yank"), "{contents:?}");
+        assert!(contents.contains("deselect"), "{contents:?}");
+        // e is bound to export until a selection takes it: naming export here
+        // would print a binding that does not fire.
+        assert!(!contents.contains("xport"), "{contents:?}");
+    }
+
+    #[test]
+    fn a_click_away_from_a_note_clears_the_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_viewing_one_message(root.path());
+        // The note covers the first rendered line only, so a click on a later
+        // row lands outside it.
+        app.select_annotation_for_test("note-1", 0, 1);
+
+        let frame_area = Rect::new(0, 0, 60, 10);
+        let content_y = {
+            let AppMode::View(state) = app.app_mode() else {
+                panic!("still in view mode");
+            };
+            view_layout_rects(frame_area, &app, state).content.y
+        };
+
+        app.handle_view_click(content_y + 1, frame_area, 4);
+
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("still in view mode");
+        };
+        assert_eq!(state.focused_annotation, None);
+    }
+
+    #[test]
+    fn a_selected_note_draws_the_focus_gutter() {
+        let root = tempfile::tempdir().unwrap();
+        let mut app = app_viewing_one_message(root.path());
+        app.select_annotation_for_test("note-1", 0, 1);
+
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("still in view mode");
+        };
+        // message_nav_active stays false, the state a note click leaves behind.
+        assert!(!state.message_nav_active);
+
+        let backend = TestBackend::new(60, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_view_content(frame, state, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains('\u{258c}'), "{contents:?}");
+    }
+
+    #[test]
+    fn a_list_row_states_its_note_count_beside_the_other_metadata() {
+        let conversation = test_conversation();
+        let path = conversation.path.clone();
+        let mut app = App::new(
+            vec![conversation],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+        app.set_annotation_count_for_test(&path, 2);
+
+        let backend = TestBackend::new(120, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_list(frame, &app, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(contents.contains("2 notes"), "{contents:?}");
+        // The count joins the existing metadata rather than displacing it.
+        assert!(contents.contains("1 msg"), "{contents:?}");
+    }
+
+    #[test]
+    fn a_list_row_without_notes_states_no_count() {
+        let app = App::new(
+            vec![test_conversation()],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+
+        let backend = TestBackend::new(120, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| render_list(frame, &app, frame.area()))
+            .unwrap();
+
+        let contents = terminal_contents(&terminal);
+        assert!(!contents.contains("note"), "{contents:?}");
     }
 }

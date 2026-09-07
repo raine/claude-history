@@ -1,4 +1,5 @@
 mod agent;
+mod annotations;
 mod claude;
 mod cli;
 mod config;
@@ -148,6 +149,12 @@ fn run() -> Result<()> {
             }),
             Commands::DeleteEmpty { yes, local, all } => {
                 run_delete_empty_command(DeleteEmptyArgs { yes, local, all })
+            }
+            Commands::Annotate(args) => {
+                annotations::run_annotate(args).map(|output| print!("{output}"))
+            }
+            Commands::Annotators { command } => {
+                annotations::run_annotators(command).map(|output| print!("{output}"))
             }
             Commands::Update => update::run(),
         };

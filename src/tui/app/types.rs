@@ -33,6 +33,39 @@ pub enum DialogMode {
     SemanticDebug,
     /// Rename the selected conversation
     Rename { input: String, cursor: usize },
+    /// Write an annotation against the conversation being viewed.
+    ///
+    /// `line` is the JSONL line the focused message came from. With no focused
+    /// message it is `None`, and the annotation attaches to the session.
+    Annotate {
+        input: String,
+        cursor: usize,
+        /// The note's target: a file line, or `None` for the whole session.
+        /// Tab moves it between the two.
+        line: Option<usize>,
+        /// The line Tab returns to after the target has been set to the
+        /// session. Held separately so the message the prompt opened on
+        /// survives a round trip through session scope.
+        anchor: Option<usize>,
+        /// Id being replaced when editing. Writing removes it and appends the
+        /// new text, so an edit never leaves both versions in the store.
+        replacing: Option<String>,
+    },
+}
+
+/// A note under a move, and the target it held when the move started.
+///
+/// `original` is written back when the move is cancelled, so a cancelled move
+/// leaves the store untouched and the viewer showing what the store holds.
+#[derive(Clone, Debug)]
+pub struct AnnotationMove {
+    pub id: String,
+    pub original: Vec<crate::annotations::TargetSpan>,
+    /// The line the note sits on now, which a save writes as its target.
+    pub line: usize,
+    /// The scroll position when the move started. A cancel returns the viewport
+    /// to it, so leaving the move restores the screen as well as the note.
+    pub scroll_offset: usize,
 }
 
 /// Main application mode
@@ -62,6 +95,20 @@ pub struct ViewState {
     pub tool_display: ToolDisplayMode,
     /// Whether to show thinking blocks
     pub show_thinking: bool,
+    /// Whether to show annotations attached to this conversation
+    pub show_annotations: bool,
+    /// Annotations for the conversation being viewed, read once on entry so a
+    /// re-render does not touch the filesystem again.
+    pub annotations: crate::annotations::ConversationAnnotations,
+    /// Line spans of the rendered annotation blocks, kept apart from
+    /// `message_ranges` so the scroll anchor's search over `entry_index` is not
+    /// disturbed by blocks that carry no entry.
+    pub annotation_ranges: Vec<crate::tui::viewer::AnnotationRange>,
+    /// Id of the selected annotation, if one is selected.
+    pub focused_annotation: Option<String>,
+    /// The note being moved, present while the viewer is in move mode. Its
+    /// keys take the arrows, Enter and Esc for as long as it is set.
+    pub moving_annotation: Option<AnnotationMove>,
     /// Whether to show timing information (timestamps + durations)
     pub show_timing: bool,
     /// Content width used for rendering (for resize detection)
@@ -125,6 +172,10 @@ impl ViewState {
         show_timing: bool,
         content_width: usize,
     ) -> Self {
+        // Read here as well as on the list-to-viewer path: opening a transcript
+        // directly builds its state through this constructor and would otherwise
+        // show none.
+        let annotations = crate::annotations::for_conversation(&conversation_path);
         Self {
             conversation_path,
             parsed_entries: None,
@@ -133,6 +184,11 @@ impl ViewState {
             total_lines: 0,
             tool_display,
             show_thinking,
+            show_annotations: true,
+            annotations,
+            annotation_ranges: Vec::new(),
+            focused_annotation: None,
+            moving_annotation: None,
             show_timing,
             content_width,
             search_mode: ViewSearchMode::Off,

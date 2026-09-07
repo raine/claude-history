@@ -35,6 +35,790 @@ fn conversation(project: Option<&str>, project_dir: &str, uuid: &str, text: &str
 }
 
 #[test]
+fn annotating_takes_its_line_from_the_focused_message() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"summary","summary":"dropped from the message list"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(20);
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = Some(0);
+    }
+
+    app.start_annotate();
+
+    // The first message is on file line 2: line 1 is a summary record, which
+    // carries no ordinal but still consumes a line.
+    match app.dialog_mode {
+        DialogMode::Annotate { line, .. } => assert_eq!(line, Some(2)),
+        _ => panic!("annotate prompt opened"),
+    }
+}
+
+#[test]
+fn annotating_without_a_focused_message_attaches_to_the_session() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = None;
+    }
+
+    app.start_annotate();
+
+    match app.dialog_mode {
+        DialogMode::Annotate { line, .. } => assert_eq!(line, None),
+        _ => panic!("annotate prompt opened"),
+    }
+}
+
+/// Builds a viewer over a one-message transcript with that message focused.
+/// The directory is returned with the app, so the transcript outlives the test
+/// body rather than being removed when the helper returns.
+fn viewer_with_one_focused_message() -> (tempfile::TempDir, App) {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"summary","summary":"s","leafUuid":"x"}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(20);
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = Some(0);
+    }
+    (root, app)
+}
+
+fn dialog_line(app: &App) -> Option<usize> {
+    match app.dialog_mode {
+        DialogMode::Annotate { line, .. } => line,
+        _ => panic!("annotate prompt open"),
+    }
+}
+
+#[test]
+fn tab_moves_a_new_note_between_the_line_and_the_session() {
+    let (_root, mut app) = viewer_with_one_focused_message();
+
+    app.start_annotate();
+    assert_eq!(dialog_line(&app), Some(2));
+
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, 20);
+    assert_eq!(dialog_line(&app), None);
+
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, 20);
+    assert_eq!(dialog_line(&app), Some(2));
+}
+
+#[test]
+fn alt_enter_inserts_a_newline_and_plain_enter_still_saves() {
+    // The store is a temporary directory: the save at the end of this test
+    // writes, and the app's own annotators resolve to the user's real
+    // annotation root.
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_one_focused_message();
+    app.annotators = annotators_rooted_at(store.path());
+
+    app.start_annotate();
+    app.handle_key(KeyCode::Char('a'), KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::ALT, 20);
+    app.handle_key(KeyCode::Char('b'), KeyModifiers::NONE, 20);
+
+    match app.dialog_mode {
+        DialogMode::Annotate {
+            ref input, cursor, ..
+        } => {
+            assert_eq!(input, "a\nb");
+            assert_eq!(cursor, 3);
+        }
+        _ => panic!("annotate prompt open"),
+    }
+
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+    assert!(matches!(app.dialog_mode, DialogMode::None));
+}
+
+/// Points the app's annotators at `store`, so a write in a test lands there
+/// rather than in the user's own annotation directory.
+fn annotators_rooted_at(store: &std::path::Path) -> crate::annotations::AnnotatorSet {
+    crate::annotations::AnnotatorSet::from_config(&crate::config::ConfigFile {
+        annotations: Some(crate::config::AnnotationsConfig {
+            root: Some(store.to_path_buf()),
+            write_to: None,
+        }),
+        ..Default::default()
+    })
+}
+
+fn stored_notes(app: &App) -> Vec<crate::annotations::Annotation> {
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("still in view mode");
+    };
+    state
+        .annotations
+        .session
+        .iter()
+        .chain(state.annotations.positioned.iter())
+        .cloned()
+        .collect()
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for character in text.chars() {
+        app.handle_key(KeyCode::Char(character), KeyModifiers::NONE, 20);
+    }
+}
+
+/// Builds a viewer over a three-message transcript with the first focused, so
+/// a note has lines above and below it to move to.
+fn viewer_with_three_messages() -> (tempfile::TempDir, App) {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    let message = |text: &str| {
+        format!(
+            r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"{text}"}}]}}}}"#
+        )
+    };
+    std::fs::write(
+        &transcript,
+        format!(
+            "{}\n{}\n{}\n",
+            message("one"),
+            message("two"),
+            message("three")
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(20);
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_message = Some(0);
+    }
+    (root, app)
+}
+
+/// Places one note on `line` in the viewer's in-memory annotations and selects
+/// it, the state a click inside a note leaves behind.
+fn select_note_on_line(app: &mut App, id: &str, line: usize) {
+    let note = crate::annotations::Annotation {
+        id: id.to_string(),
+        targets: vec![crate::annotations::TargetSpan::single(line)],
+        kind: "note".to_string(),
+        text: "movable".to_string(),
+        annotator: "file".to_string(),
+        origin: None,
+        created: None,
+        modified: None,
+    };
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations.positioned = vec![note];
+        state.focused_annotation = Some(id.to_string());
+    }
+}
+
+fn app_path(app: &App) -> std::path::PathBuf {
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("in view mode");
+    };
+    state.conversation_path.clone()
+}
+
+fn note_line(app: &App, id: &str) -> Option<usize> {
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("in view mode");
+    };
+    state
+        .annotations
+        .positioned
+        .iter()
+        .chain(state.annotations.session.iter())
+        .find(|annotation| annotation.id == id)
+        .and_then(|annotation| annotation.anchor_line())
+}
+
+#[test]
+fn a_move_steps_only_across_lines_the_view_renders() {
+    // The summary record on line 1 is parsed and carries a line, and it draws
+    // no row, so a move must not stop on it.
+    let (_root, app) = viewer_with_one_focused_message();
+
+    assert_eq!(app.rendered_entry_lines(), vec![2]);
+}
+
+#[test]
+fn a_tool_entry_under_the_hidden_filter_still_draws_a_row_and_stays_a_stop() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("filtered.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#,
+            "\n",
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"three"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(20);
+
+    // Hidden tools still draw a row for the entry holding them, so all three
+    // lines are stops. The set follows what is rendered, not what is parsed:
+    // a record drawing no row, such as a summary, is the case that is skipped.
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("in view mode");
+    };
+    assert_eq!(state.message_ranges.len(), 3);
+    assert_eq!(app.rendered_entry_lines(), vec![1, 2, 3]);
+}
+
+#[test]
+fn m_puts_the_selected_note_under_a_move() {
+    let (_root, mut app) = viewer_with_three_messages();
+    select_note_on_line(&mut app, "note-1", 2);
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+
+    match app.app_mode {
+        AppMode::View(ref state) => {
+            let moving = state.moving_annotation.as_ref().expect("under a move");
+            assert_eq!(moving.id, "note-1");
+            assert_eq!(moving.line, 2);
+        }
+        _ => panic!("in view mode"),
+    }
+}
+
+#[test]
+fn a_move_steps_the_note_across_entry_lines_and_holds_at_the_ends() {
+    let (_root, mut app) = viewer_with_three_messages();
+    select_note_on_line(&mut app, "note-1", 2);
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    assert_eq!(note_line(&app, "note-1"), Some(3));
+
+    // Past the last entry line the note holds rather than leaving the file.
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    assert_eq!(note_line(&app, "note-1"), Some(3));
+
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE, 20);
+    assert_eq!(note_line(&app, "note-1"), Some(1));
+
+    app.handle_key(KeyCode::Up, KeyModifiers::NONE, 20);
+    assert_eq!(note_line(&app, "note-1"), Some(1));
+}
+
+#[test]
+fn esc_puts_a_moved_note_back_where_it_started() {
+    let (_root, mut app) = viewer_with_three_messages();
+    select_note_on_line(&mut app, "note-1", 2);
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    assert_eq!(note_line(&app, "note-1"), Some(3));
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 20);
+
+    assert_eq!(note_line(&app, "note-1"), Some(2));
+    match app.app_mode {
+        AppMode::View(ref state) => assert!(state.moving_annotation.is_none()),
+        _ => panic!("in view mode"),
+    }
+}
+
+#[test]
+fn a_move_scrolls_the_note_back_into_view() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("long.jsonl");
+    let body: String = (1..=30)
+        .map(|n| {
+            format!(
+                "{}\n",
+                format_args!(
+                    r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"text","text":"message {n}"}}]}}}}"#
+                )
+            )
+        })
+        .collect();
+    std::fs::write(&transcript, body).unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    app.re_render_view(4);
+    select_note_on_line(&mut app, "note-1", 1);
+    app.re_render_view(4);
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 4);
+    let start = match app.app_mode {
+        AppMode::View(ref state) => state.scroll_offset,
+        _ => panic!("in view mode"),
+    };
+
+    // Far enough down that the note leaves a four-row viewport.
+    for _ in 0..20 {
+        app.handle_key(KeyCode::Down, KeyModifiers::NONE, 4);
+    }
+
+    let (offset, note_start) = match app.app_mode {
+        AppMode::View(ref state) => (
+            state.scroll_offset,
+            state
+                .annotation_ranges
+                .iter()
+                .find(|range| range.id == "note-1")
+                .map(|range| range.start_line)
+                .expect("the note is rendered"),
+        ),
+        _ => panic!("in view mode"),
+    };
+    assert!(offset > start, "the viewport followed the note");
+    assert!(
+        note_start >= offset && note_start < offset + 4,
+        "note at {note_start}, viewport {offset}..{}",
+        offset + 4
+    );
+}
+
+#[test]
+fn esc_returns_the_viewport_to_where_the_move_started() {
+    let (_root, mut app) = viewer_with_three_messages();
+    select_note_on_line(&mut app, "note-1", 2);
+    let total = match app.app_mode {
+        AppMode::View(ref state) => state.total_lines,
+        _ => panic!("in view mode"),
+    };
+    // The restore is clamped to what the render holds, so the test scrolls
+    // inside that range rather than to an offset the transcript cannot reach.
+    assert!(total > 3, "transcript renders {total} lines");
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.scroll_offset = 2;
+    }
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 1);
+    if let AppMode::View(ref mut state) = app.app_mode {
+        // The scroll the move itself performed, which the cancel undoes.
+        state.scroll_offset = 0;
+    }
+
+    app.handle_key(KeyCode::Esc, KeyModifiers::NONE, 1);
+
+    match app.app_mode {
+        AppMode::View(ref state) => assert_eq!(state.scroll_offset, 2),
+        _ => panic!("in view mode"),
+    }
+}
+
+/// Points the app at the `file` annotator plus a command annotator that acts on
+/// `replaces`, with new notes routed to `file`. An edit of a note held by the
+/// command annotator must reach that annotator rather than the write target.
+fn annotators_with_a_replacing_command(
+    file_root: &std::path::Path,
+    store: &std::path::Path,
+) -> crate::annotations::AnnotatorSet {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/annotators/replacing.sh");
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(
+        "file".to_string(),
+        crate::config::AnnotatorConfig {
+            root: Some(file_root.to_path_buf()),
+            ..Default::default()
+        },
+    );
+    table.insert(
+        "replacing".to_string(),
+        crate::config::AnnotatorConfig {
+            command: Some(format!("{} {}", fixture.display(), store.display())),
+            ..Default::default()
+        },
+    );
+    crate::annotations::AnnotatorSet::from_config(&crate::config::ConfigFile {
+        annotations: Some(crate::config::AnnotationsConfig {
+            root: None,
+            write_to: Some("file".to_string()),
+        }),
+        annotators: Some(table),
+        ..Default::default()
+    })
+}
+
+#[test]
+fn a_move_writes_back_to_the_annotator_holding_the_note() {
+    let file_root = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_three_messages();
+    app.annotators = annotators_with_a_replacing_command(file_root.path(), store.path());
+    let path = app_path(&app);
+
+    // The note is created in the command annotator, not the write target.
+    app.annotators()
+        .write_to_annotator(
+            "replacing",
+            &path,
+            &crate::annotations::Annotation {
+                targets: vec![crate::annotations::TargetSpan::single(1)],
+                kind: "note".to_string(),
+                text: "held elsewhere".to_string(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let annotations = app.annotators().read_one(&path);
+    let id = annotations.positioned[0].id.clone();
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations = annotations;
+        state.focused_annotation = Some(id.clone());
+    }
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let stored = stored_notes(&app);
+    assert_eq!(stored.len(), 1, "one record, not one per store");
+    assert_eq!(stored[0].annotator, "replacing", "still held by its store");
+    assert_eq!(stored[0].anchor_line(), Some(2));
+    // The annotator acted on `replaces`, so the id survived and no delete
+    // removed the record it had just written.
+    assert_eq!(stored[0].id, id);
+    assert!(
+        crate::annotations::sidecar_path(file_root.path(), &path)
+            .is_none_or(|sidecar| !sidecar.exists()),
+        "the write target holds nothing"
+    );
+}
+
+#[test]
+fn an_edit_writes_back_to_the_annotator_holding_the_note() {
+    let file_root = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_three_messages();
+    app.annotators = annotators_with_a_replacing_command(file_root.path(), store.path());
+    let path = app_path(&app);
+
+    app.annotators()
+        .write_to_annotator(
+            "replacing",
+            &path,
+            &crate::annotations::Annotation {
+                targets: vec![crate::annotations::TargetSpan::single(1)],
+                kind: "note".to_string(),
+                text: "before".to_string(),
+                ..Default::default()
+            },
+            None,
+        )
+        .unwrap();
+    let annotations = app.annotators().read_one(&path);
+    let id = annotations.positioned[0].id.clone();
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations = annotations;
+        state.focused_annotation = Some(id.clone());
+    }
+
+    app.start_edit_annotation();
+    type_text(&mut app, " and after");
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let stored = stored_notes(&app);
+    assert_eq!(stored.len(), 1, "one record, not one per store");
+    assert_eq!(stored[0].annotator, "replacing", "still held by its store");
+    assert_eq!(stored[0].text, "before and after");
+    assert_eq!(stored[0].id, id, "the annotator kept the id");
+}
+
+#[test]
+fn a_move_keeps_the_length_of_a_multi_line_span() {
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_three_messages();
+    app.annotators = annotators_rooted_at(store.path());
+
+    let note = crate::annotations::Annotation {
+        id: "note-1".to_string(),
+        targets: vec![crate::annotations::TargetSpan { start: 1, end: 2 }],
+        kind: "note".to_string(),
+        text: "spanning".to_string(),
+        annotator: String::new(),
+        origin: None,
+        created: None,
+        modified: None,
+    };
+    app.annotators()
+        .write(&app_path(&app), &note, None)
+        .unwrap();
+    let annotations = app.annotators().read_one(&app_path(&app));
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations = annotations;
+        state.focused_annotation = Some(state.annotations.positioned[0].id.clone());
+    }
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let stored = stored_notes(&app);
+    assert_eq!(stored.len(), 1);
+    assert_eq!(
+        stored[0].targets,
+        vec![crate::annotations::TargetSpan { start: 2, end: 3 }]
+    );
+}
+
+#[test]
+fn ctrl_c_leaves_the_process_from_inside_a_move() {
+    let (_root, mut app) = viewer_with_three_messages();
+    select_note_on_line(&mut app, "note-1", 2);
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+
+    let action = app.handle_key(KeyCode::Char('c'), KeyModifiers::CONTROL, 20);
+
+    assert!(matches!(action, Some(Action::Quit)));
+    // The move is abandoned on the way out, so the note is left as the store
+    // holds it rather than at the line the move reached.
+    match app.app_mode {
+        AppMode::View(ref state) => assert!(state.moving_annotation.is_none()),
+        _ => panic!("in view mode"),
+    }
+}
+
+#[test]
+fn m_on_a_session_note_leaves_the_viewer_as_it_was() {
+    let (_root, mut app) = viewer_with_three_messages();
+    let note = crate::annotations::Annotation {
+        id: "note-1".to_string(),
+        targets: Vec::new(),
+        kind: "note".to_string(),
+        text: "session".to_string(),
+        annotator: "file".to_string(),
+        origin: None,
+        created: None,
+        modified: None,
+    };
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations.session = vec![note];
+        state.focused_annotation = Some("note-1".to_string());
+    }
+
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+
+    match app.app_mode {
+        AppMode::View(ref state) => assert!(state.moving_annotation.is_none()),
+        _ => panic!("in view mode"),
+    }
+}
+
+#[test]
+fn enter_writes_the_note_at_the_line_the_move_reached() {
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_three_messages();
+    app.annotators = annotators_rooted_at(store.path());
+
+    app.start_annotate();
+    type_text(&mut app, "movable");
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let written = stored_notes(&app);
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0].anchor_line(), Some(1));
+    let id = written[0].id.clone();
+    let created = written[0].created.clone();
+
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_annotation = Some(id.clone());
+    }
+    app.handle_key(KeyCode::Char('m'), KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Down, KeyModifiers::NONE, 20);
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let moved = stored_notes(&app);
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].anchor_line(), Some(2));
+    assert_eq!(moved[0].text, "movable");
+    // The move is an edit: the creation stamp survives and the edit stamp moves.
+    assert_eq!(moved[0].created, created);
+    assert_ne!(moved[0].modified, moved[0].created);
+}
+
+#[test]
+fn an_edit_carries_the_creation_stamp_forward_and_moves_the_edit_stamp() {
+    let store = tempfile::tempdir().unwrap();
+    let (_root, mut app) = viewer_with_one_focused_message();
+    app.annotators = annotators_rooted_at(store.path());
+
+    app.start_annotate();
+    type_text(&mut app, "first");
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let written = stored_notes(&app);
+    assert_eq!(written.len(), 1);
+    let created = written[0].created.clone().expect("a write stamps created");
+    assert_eq!(written[0].modified, Some(created.clone()));
+
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.focused_annotation = Some(written[0].id.clone());
+    }
+    app.start_edit_annotation();
+    type_text(&mut app, " again");
+    app.handle_key(KeyCode::Enter, KeyModifiers::NONE, 20);
+
+    let edited = stored_notes(&app);
+    assert_eq!(edited.len(), 1);
+    assert_eq!(edited[0].text, "first again");
+    assert_eq!(edited[0].created, Some(created.clone()));
+    assert_ne!(edited[0].modified, Some(created));
+}
+
+#[test]
+fn tab_moves_an_edited_line_note_to_the_session_and_back() {
+    let (_root, mut app) = viewer_with_one_focused_message();
+    let note = crate::annotations::Annotation {
+        id: "note-1".to_string(),
+        targets: vec![crate::annotations::TargetSpan::single(2)],
+        kind: "note".to_string(),
+        text: "text".to_string(),
+        annotator: "file".to_string(),
+        origin: None,
+        created: None,
+        modified: None,
+    };
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations.positioned = vec![note];
+        state.focused_annotation = Some("note-1".to_string());
+    }
+
+    app.start_edit_annotation();
+    assert_eq!(dialog_line(&app), Some(2));
+
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, 20);
+    assert_eq!(dialog_line(&app), None);
+
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, 20);
+    assert_eq!(dialog_line(&app), Some(2));
+}
+
+#[test]
+fn tab_moves_an_edited_session_note_onto_the_focused_message() {
+    let (_root, mut app) = viewer_with_one_focused_message();
+    let note = crate::annotations::Annotation {
+        id: "note-1".to_string(),
+        targets: Vec::new(),
+        kind: "note".to_string(),
+        text: "text".to_string(),
+        annotator: "file".to_string(),
+        origin: None,
+        created: None,
+        modified: None,
+    };
+    if let AppMode::View(ref mut state) = app.app_mode {
+        state.annotations.session = vec![note];
+        state.focused_annotation = Some("note-1".to_string());
+    }
+
+    app.start_edit_annotation();
+    assert_eq!(dialog_line(&app), None);
+
+    app.handle_key(KeyCode::Tab, KeyModifiers::NONE, 20);
+    assert_eq!(dialog_line(&app), Some(2));
+}
+
+#[test]
+fn an_empty_annotation_closes_the_prompt_without_writing() {
+    let root = tempfile::tempdir().unwrap();
+    let transcript = root.path().join("abc.jsonl");
+    std::fs::write(
+        &transcript,
+        concat!(
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hello"}]}}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+
+    let mut app = App::new_single_file(
+        transcript,
+        crate::tui::ToolDisplayMode::Hidden,
+        false,
+        crate::config::KeyBindings::default(),
+    );
+    // A temporary store even though the empty text returns before writing, so
+    // a regression writes into the test's own directory rather than the user's
+    // annotation root.
+    let store = tempfile::tempdir().unwrap();
+    app.annotators = annotators_rooted_at(store.path());
+
+    app.start_annotate();
+    app.submit_annotate(20);
+
+    assert!(matches!(app.dialog_mode, DialogMode::None));
+    let AppMode::View(state) = &app.app_mode else {
+        panic!("still in view mode");
+    };
+    assert!(state.annotations.is_empty());
+}
+
+#[test]
 fn mixed_sources_are_identified_and_pi_local_filter_uses_header_cwd() {
     let mut claude = conversation(Some("project"), "-tmp-project", "claude-id", "claude");
     let mut pi = conversation(Some("project"), "ignored", "pi-id", "pi");
@@ -1616,4 +2400,125 @@ fn single_file_mode_has_no_project_exclusions() {
 
     assert!(app.excluded_projects.is_empty());
     assert!(app.is_single_file_mode());
+}
+
+/// An annotator set holding only the file annotator, rooted at `root`.
+fn annotator_set_rooted_at(root: PathBuf) -> crate::annotations::AnnotatorSet {
+    let mut table = std::collections::BTreeMap::new();
+    table.insert(
+        crate::config::DEFAULT_ANNOTATOR.to_string(),
+        crate::config::AnnotatorConfig {
+            root: Some(root),
+            ..crate::config::AnnotatorConfig::default()
+        },
+    );
+    crate::annotations::AnnotatorSet::from_config(&crate::config::ConfigFile {
+        annotators: Some(table),
+        ..crate::config::ConfigFile::default()
+    })
+}
+
+/// Writes one sidecar for `conversation` under a fresh annotations root and
+/// returns that root, mirroring the layout the file annotator reads.
+fn annotations_root_with_note(
+    dir: &std::path::Path,
+    conversation: &Conversation,
+    text: &str,
+) -> PathBuf {
+    let root = dir.join("annotations");
+    let project = conversation
+        .path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .expect("conversation sits under a project directory");
+    let project_dir = root.join(project);
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let sidecar = project_dir.join(format!("{}.jsonl", conversation.session_id));
+    std::fs::write(
+        sidecar,
+        format!(
+            "{}\n",
+            serde_json::json!({"id": "note-1", "kind": "note", "text": text})
+        ),
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn a_note_makes_its_conversation_match_a_list_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body with no such word",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+
+    app.query = "pelican".to_string();
+    app.update_filter();
+
+    assert_eq!(filtered_projects(&app), vec![Some("Visible")]);
+}
+
+#[test]
+fn note_text_reaches_the_field_the_evidence_line_is_drawn_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body with no such word",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+
+    // The evidence builder reads full_text and skips what the preview already
+    // shows, so the note's presence there is what puts it on the row.
+    assert!(
+        app.conversations()[0]
+            .full_text
+            .contains("pelican crossing"),
+        "{}",
+        app.conversations()[0].full_text
+    );
+    let evidence = crate::search::build_lexical_evidence(
+        &app.conversations()[0],
+        &crate::search::query::ParsedQuery::parse("pelican"),
+    )
+    .expect("evidence for a note-only match");
+    assert!(!evidence.context_ranges.is_empty());
+}
+
+#[test]
+fn enrichment_appends_one_copy_of_a_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let conv = conversation(
+        Some("Visible"),
+        "-tmp-visible",
+        "22222222-2222-4222-8222-222222222222",
+        "transcript body",
+    );
+    let root = annotations_root_with_note(dir.path(), &conv, "pelican crossing");
+
+    let mut app = app(vec![conv], vec![]);
+    app.set_annotators_for_test(annotator_set_rooted_at(root));
+    app.finish_loading();
+    // A second pass would double the note's text and with it its lexical weight.
+    app.finish_loading();
+
+    assert_eq!(
+        app.conversations()[0].full_text.matches("pelican").count(),
+        1,
+        "{}",
+        app.conversations()[0].full_text
+    );
 }

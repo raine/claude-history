@@ -62,8 +62,75 @@ pub enum Commands {
         #[arg(long, group = "delete_empty_scope")]
         all: bool,
     },
+    /// Attach an annotation to a conversation, or remove one
+    Annotate(AnnotateArgs),
+    /// Register the tools annotations are read from and written to
+    Annotators {
+        #[command(subcommand)]
+        command: AnnotatorsCommand,
+    },
     /// Update claude-history to the latest version
     Update,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AnnotatorsCommand {
+    /// List the registered annotators and which one receives writes
+    List,
+    /// Register an annotator, or replace one registered under the same key
+    Add(AnnotatorAddArgs),
+    /// Drop an annotator's registration
+    Remove {
+        /// Key the annotator is registered under
+        key: String,
+    },
+    /// Name the annotator that receives writes
+    WriteTo {
+        /// Key of a registered annotator
+        key: String,
+    },
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AnnotatorAddArgs {
+    /// Key to register under, used in config and as the fallback label
+    pub key: String,
+    /// Command line invoked as `<command> read|write|delete`
+    #[arg(long)]
+    pub command: String,
+    /// Label the viewer prints, truncated to nine characters. With this absent
+    /// the key is used, first letter capitalised.
+    #[arg(long)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, ClapArgs)]
+pub struct AnnotateArgs {
+    /// Conversation to annotate: a ch_ ref or a transcript path. With none, the
+    /// annotation lands on the transcript the running session writes to.
+    pub reference: Option<String>,
+    /// Annotation text. A write carries it; --delete names an existing
+    /// annotation and carries none.
+    #[arg(long, required_unless_present = "delete")]
+    pub text: Option<String>,
+    /// JSONL line the annotation attaches to. Repeat for several; a bare
+    /// `--line 7` names one line and `--line 7..9` a run of them. With none, the
+    /// annotation lands on the last prompt typed into the transcript.
+    #[arg(long = "line", value_name = "LINE|START..END")]
+    pub lines: Vec<String>,
+    /// Attach the annotation to the conversation as a whole instead of a line
+    #[arg(long, conflicts_with = "lines")]
+    pub session: bool,
+    /// Producer's label for this annotation. Free text, passed through
+    /// unchanged; the producer sets the vocabulary.
+    #[arg(long, default_value = "note")]
+    pub kind: String,
+    /// Identifier for the annotation. Generated when omitted.
+    #[arg(long)]
+    pub id: Option<String>,
+    /// Remove the annotation with this id instead of writing one
+    #[arg(long, conflicts_with_all = ["text", "lines", "kind", "id", "session"])]
+    pub delete: Option<String>,
 }
 
 #[derive(Debug, ClapArgs)]

@@ -34,6 +34,10 @@ pub struct Theme {
     pub heading: Rgb,
     pub thinking_text: Rgb,
     pub tool_text: Rgb,
+    /// Annotations: text attached to a conversation from outside it. Held apart
+    /// from `accent` and `text_primary` so an annotation never reads as a
+    /// message either party wrote.
+    pub annotation: Rgb,
 
     // List view specific
     pub custom_title: Rgb,
@@ -76,6 +80,7 @@ impl Theme {
         Self {
             accent: (78, 201, 176),
             accent_dim: (60, 160, 140),
+            annotation: (97, 175, 239),
 
             text_primary: (255, 255, 255),
             text_secondary: (140, 140, 140),
@@ -130,6 +135,7 @@ impl Theme {
         Self {
             accent: (13, 128, 118),     // Deep teal - legible on white
             accent_dim: (45, 115, 105), // Muted teal for secondary elements
+            annotation: (32, 96, 184),  // Blue, legible on white
 
             text_primary: (36, 45, 53),     // Deep slate for body text
             text_secondary: (88, 101, 112), // Cool gray for metadata
