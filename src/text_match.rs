@@ -47,8 +47,44 @@ pub fn normalize_for_search(text: &str) -> String {
     out
 }
 
+/// Markdown/code punctuation that a viewer renders away (inline code
+/// backticks, emphasis markers, headings, tables, blockquote/strike
+/// markers) or that otherwise brackets/delimits words without being part
+/// of an identifier. Treated as a word boundary so a phrase copied from
+/// the rendered viewer (no backticks) still tokenizes the same as the
+/// stored markdown source (backticks intact). `.` is deliberately excluded
+/// so identifiers and filenames like `fold.ts` or `toolu_01AS52` stay
+/// searchable as a single token.
+fn is_markdown_punctuation(c: char) -> bool {
+    matches!(
+        c,
+        '`' | '{'
+            | '}'
+            | '['
+            | ']'
+            | '('
+            | ')'
+            | '<'
+            | '>'
+            | ','
+            | ';'
+            | ':'
+            | '"'
+            | '\''
+            | '*'
+            | '#'
+            | '|'
+            | '~'
+    )
+}
+
 pub fn is_word_separator(c: char) -> bool {
-    c.is_whitespace() || c == '_' || c == '-' || c == '/' || is_cjk_punctuation(c)
+    c.is_whitespace()
+        || c == '_'
+        || c == '-'
+        || c == '/'
+        || is_markdown_punctuation(c)
+        || is_cjk_punctuation(c)
 }
 
 pub fn is_word_start(text: &str, pos: usize) -> bool {
@@ -99,5 +135,24 @@ mod tests {
     fn prefix_match_respects_word_start() {
         assert!(contains_prefix_match("redaction plan", "red"));
         assert!(!contains_prefix_match("fired plan", "red"));
+    }
+
+    #[test]
+    fn normalizes_markdown_code_punctuation_as_separators() {
+        let normalized = normalize_for_search(
+            "today: `person {name}`, `message {said, by}`, both `delivery: held`",
+        );
+        assert_eq!(
+            normalized.split_whitespace().collect::<Vec<_>>(),
+            vec![
+                "today", "person", "name", "message", "said", "by", "both", "delivery", "held"
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_dotted_identifiers_and_filenames_glued() {
+        assert_eq!(normalize_for_search("src/fold.ts:24"), "src fold.ts 24");
+        assert_eq!(normalize_for_search("toolu_01AS52"), "toolu 01as52");
     }
 }
