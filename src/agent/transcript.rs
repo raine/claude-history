@@ -271,6 +271,41 @@ impl AgentTranscript {
                 } => {
                     custom_title = (!value.trim().is_empty()).then_some(value);
                 }
+                // Slash commands Claude Code logs as system entries (e.g.
+                // /btw) are user input, and are counted as messages by the
+                // history parser — keep the ordinals in step.
+                LogEntry::System {
+                    subtype,
+                    content: Some(content),
+                    timestamp,
+                    ..
+                } if subtype == "local_command" => {
+                    let Some(text) = extract_skill_preview(&content) else {
+                        continue;
+                    };
+                    let ordinal = messages.len() + 1;
+                    seen_real_user_message = true;
+                    messages.push(AgentMessage {
+                        ordinal,
+                        role: AgentMessageRole::User,
+                        timestamp: timestamp.clone(),
+                        jsonl_line,
+                        assistant_message_id: None,
+                        parent_tool_use_id: None,
+                        parts: vec![AgentMessagePart::Text {
+                            text,
+                            source: AgentPartSource {
+                                role: AgentMessageRole::User,
+                                timestamp,
+                                jsonl_line,
+                                part_index: 0,
+                                assistant_message_id: None,
+                                parent_tool_use_id: None,
+                                tool_name: None,
+                            },
+                        }],
+                    });
+                }
                 LogEntry::FileHistorySnapshot { .. }
                 | LogEntry::System { .. }
                 | LogEntry::AgentName { .. }

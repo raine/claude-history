@@ -454,6 +454,27 @@ pub fn process_conversation_reader<R: BufRead>(
                         }
                     }
                     LogEntry::AgentName { .. } => {}
+                    // Slash commands that Claude Code logs as system entries
+                    // (e.g. /btw) are user input — index them like a skill
+                    // invocation so they reach previews and search.
+                    LogEntry::System {
+                        subtype,
+                        content: Some(content),
+                        ..
+                    } if subtype == "local_command" => {
+                        if let Some(command_preview) = extract_skill_preview(&content) {
+                            all_parts.push(command_preview.clone());
+                            message_count += 1;
+                            // The semantic filter takes the raw entry, as it
+                            // does for a user-typed slash command.
+                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &content) {
+                                semantic_turns.push(turn);
+                                semantic_turn_ranges.push(MessageRange::single(message_count));
+                            }
+                            preview_parts.push(command_preview);
+                            seen_real_user_message = true;
+                        }
+                    }
                     LogEntry::System { .. } => {}
                     _ => {}
                 }
@@ -1704,6 +1725,31 @@ mod tests {
         assert!(!conv.full_text.contains("/cwd/private-sentinel"));
         assert_eq!(conv.project_name, None);
         assert_eq!(conv.project_path, None);
+    }
+
+    #[test]
+    fn btw_system_command_enters_preview_and_search() {
+        let content = [
+            user_msg("Real question", None),
+            assistant_msg("Real answer"),
+            r#"{"type": "system", "subtype": "local_command", "level": "info", "content": "<command-name>/btw</command-name>\n<command-message>btw</command-message>\n<command-args>can we extend the chat UI</command-args>"}"#.to_owned(),
+            r#"{"type": "system", "subtype": "local_command", "level": "info", "content": "<local-command-stdout>\u2442 forked can-we-extend (9b27)</local-command-stdout>"}"#.to_owned(),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert!(conv.preview_last.contains("/btw can we extend the chat UI"));
+        assert!(conv.full_text.contains("/btw can we extend the chat UI"));
+        assert!(
+            conv.search_text_lower
+                .contains("btw can we extend the chat ui")
+        );
+        // The command counts as a message; its stdout echo does not.
+        assert_eq!(conv.message_count, 3);
+        assert_eq!(
+            conv.semantic_turns,
+            vec!["Real question", "Real answer", "can we extend the chat UI"]
+        );
     }
 
     #[test]
