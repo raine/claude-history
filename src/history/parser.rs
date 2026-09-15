@@ -577,11 +577,7 @@ pub fn process_conversation_reader<R: BufRead>(
 
     Ok(Some(Conversation {
         source: super::Source::Claude,
-        session_id: path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned(),
+        session_id: super::session_id_from_path(&path),
         path,
         index: 0,
         timestamp,

@@ -328,6 +328,7 @@ fn find_all_jsonl_by_uuid(uuid: &str) -> Result<Vec<PathBuf>> {
 
     let filename = format!("{}.jsonl", uuid);
     let mut matches = Vec::new();
+    let mut project_dirs = Vec::new();
 
     for entry in read_dir(&root)? {
         let entry = entry?;
@@ -337,6 +338,35 @@ fn find_all_jsonl_by_uuid(uuid: &str) -> Result<Vec<PathBuf>> {
         }
         let candidate = project_dir.join(&filename);
         if candidate.exists() {
+            matches.push(candidate);
+        }
+        project_dirs.push(project_dir);
+    }
+
+    if matches.is_empty() {
+        // Forked sidecars are named after their agent id, one level deeper.
+        for project_dir in project_dirs {
+            matches.extend(find_sidecars_by_id(&project_dir, uuid)?);
+        }
+    }
+
+    Ok(matches)
+}
+
+/// Find forked sidecars of a project by agent id, accepting both the session id
+/// (`<agentId>`) and the transcript stem (`agent-<agentId>`).
+fn find_sidecars_by_id(project_dir: &Path, id: &str) -> Result<Vec<PathBuf>> {
+    let stem = id.strip_prefix("agent-").unwrap_or(id);
+    let filename = format!("agent-{stem}.jsonl");
+    let mut matches = Vec::new();
+
+    for entry in read_dir(project_dir)? {
+        let session_dir = entry?.path();
+        if !session_dir.is_dir() {
+            continue;
+        }
+        let candidate = session_dir.join(super::SUBAGENTS_DIR).join(&filename);
+        if candidate.is_file() {
             matches.push(candidate);
         }
     }
@@ -361,6 +391,16 @@ pub fn delete_session_by_uuid(uuid: &str) -> Result<usize> {
     let count = matches.len();
     for jsonl_path in &matches {
         std::fs::remove_file(jsonl_path)?;
+
+        // A forked sidecar owns nothing but its own transcript and meta file —
+        // the session it was forked from must survive.
+        if super::is_sidecar_path(jsonl_path) {
+            let meta_path = jsonl_path.with_extension("meta.json");
+            if meta_path.is_file() {
+                std::fs::remove_file(&meta_path)?;
+            }
+            continue;
+        }
 
         // Also remove the session subdirectory if it exists
         if let Some(project_dir) = jsonl_path.parent() {
@@ -581,6 +621,77 @@ pub fn list_projects(root: &Path) -> Result<Vec<Project>> {
     Ok(projects)
 }
 
+/// A forked `/btw` transcript, stored beside its parent session.
+struct ForkSidecar {
+    path: PathBuf,
+    /// Short name the fork was created with, used as its list title.
+    title: Option<String>,
+}
+
+/// Paths of every user-driven fork stored beneath a project's sessions.
+pub(crate) fn project_fork_sidecars(project_dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = read_dir(project_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .flat_map(|session_dir| fork_sidecars(&session_dir))
+        .map(|sidecar| sidecar.path)
+        .collect()
+}
+
+/// Collect the user-driven forks stored under `<session uuid>/subagents/`.
+fn fork_sidecars(session_dir: &Path) -> Vec<ForkSidecar> {
+    let subagents_dir = session_dir.join(super::SUBAGENTS_DIR);
+    let Ok(entries) = read_dir(&subagents_dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta_path = entry.path();
+            let stem = meta_path
+                .file_name()
+                .and_then(|name| name.to_str())?
+                .strip_suffix(".meta.json")?;
+            let title = fork_meta_title(&meta_path)?;
+            let path = subagents_dir.join(format!("{stem}.jsonl"));
+            path.is_file().then_some(ForkSidecar { path, title })
+        })
+        .collect()
+}
+
+/// Read a sidecar's meta file, returning its name when it describes a fork the
+/// user made. Subagents are not forks, and forks the Agent tool spawned always
+/// carry a `toolUseId` — neither is a session of its own.
+fn fork_meta_title(meta_path: &Path) -> Option<Option<String>> {
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(meta_path).ok()?).ok()?;
+    let meta = meta.as_object()?;
+    if meta.get("isFork") != Some(&serde_json::Value::Bool(true)) || meta.contains_key("toolUseId")
+    {
+        return None;
+    }
+    let title = meta
+        .get("name")
+        .and_then(|name| name.as_str())
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned);
+    Some(title)
+}
+
+/// Key a file takes in its project's cache: the path below the project
+/// directory, so sidecars in different sessions stay distinct.
+fn cache_key(projects_dir: &Path, path: &Path) -> String {
+    path.strip_prefix(projects_dir)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Find and process all conversation files in one pass, using per-project cache
 pub fn load_conversations(
     projects_dir: &Path,
@@ -594,10 +705,16 @@ pub fn load_conversations(
     // Find all JSONL files and capture metadata in one pass
     let mut files_with_meta = Vec::new();
     let mut skipped_agent_files = 0;
+    let mut session_dirs = Vec::new();
 
     for entry in read_dir(projects_dir)? {
         let entry = entry?;
         let path = entry.path();
+
+        if path.is_dir() {
+            session_dirs.push(path);
+            continue;
+        }
 
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
             if let Some(filename) = path.file_name().and_then(|f| f.to_str())
@@ -613,6 +730,21 @@ pub fn load_conversations(
             let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
 
             files_with_meta.push((path, modified, file_size));
+        }
+    }
+
+    // Forked `/btw` sidecars are sessions in their own right, so load them
+    // alongside the top-level transcripts of the project.
+    let mut fork_titles: HashMap<PathBuf, String> = HashMap::new();
+    for session_dir in &session_dirs {
+        for sidecar in fork_sidecars(session_dir) {
+            let metadata = std::fs::metadata(&sidecar.path).ok();
+            let modified = metadata.as_ref().and_then(|m| m.modified().ok());
+            let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            if let Some(title) = sidecar.title {
+                fork_titles.insert(sidecar.path.clone(), title);
+            }
+            files_with_meta.push((sidecar.path, modified, file_size));
         }
     }
 
@@ -635,24 +767,18 @@ pub fn load_conversations(
     let mut files_to_parse: Vec<(PathBuf, Option<SystemTime>, u64)> = Vec::new();
 
     for (path, modified, file_size) in &files_with_meta {
-        let filename = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("unknown");
+        let key = cache_key(projects_dir, path);
 
         if let Some(mtime) = modified
-            && let Some(entry) = cached_entries.get(filename)
+            && let Some(entry) = cached_entries.get(&key)
             && cache::entry_matches(entry, *file_size, *mtime)
         {
             if entry.is_empty {
                 // Negative cache hit — file was previously parsed and yielded nothing
-                debug::debug(debug_level, &format!("Cache hit (empty) {}", filename));
+                debug::debug(debug_level, &format!("Cache hit (empty) {}", key));
             } else {
                 let conv = cache::conversation_from_entry(entry, path.clone(), show_last);
-                debug::debug(
-                    debug_level,
-                    &format!("Cache hit {}: {}", filename, conv.preview),
-                );
+                debug::debug(debug_level, &format!("Cache hit {}: {}", key, conv.preview));
                 conversations.push(conv);
             }
         } else {
@@ -681,11 +807,7 @@ pub fn load_conversations(
         files_to_parse
             .into_par_iter()
             .map(|(path, modified, file_size)| {
-                let filename = path
-                    .file_name()
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("unknown")
-                    .to_owned();
+                let filename = cache_key(projects_dir, &path);
 
                 match process_conversation_file(path, modified, debug_level) {
                     Ok(Some(mut conversation)) => {
@@ -735,6 +857,14 @@ pub fn load_conversations(
         let project_path = conv.cwd.clone().unwrap_or_else(|| fallback_path.clone());
         conv.project_name = Some(format_short_name_from_path(&project_path));
         conv.project_path = Some(project_path);
+
+        // Name a fork after the meta the fork was created with, unless the
+        // user has since renamed it.
+        if conv.custom_title.is_none()
+            && let Some(title) = fork_titles.get(&conv.path)
+        {
+            conv.custom_title = Some(title.clone());
+        }
     }
 
     // Write updated cache if anything changed
@@ -743,19 +873,13 @@ pub fn load_conversations(
 
         // Add existing conversations (both cache hits and fresh parses)
         for conv in &conversations {
-            let filename = conv
-                .path
-                .file_name()
-                .and_then(|f| f.to_str())
-                .unwrap_or("unknown");
-
             if let Some((_, modified, file_size)) = files_with_meta
                 .iter()
-                .find(|(p, _, _)| p.file_name() == conv.path.file_name())
+                .find(|(path, _, _)| path == &conv.path)
                 && let Some(mtime) = modified
             {
                 new_cache.insert(
-                    filename.to_owned(),
+                    cache_key(projects_dir, &conv.path),
                     cache::entry_from_conversation(conv, *file_size, *mtime),
                 );
             }
@@ -785,6 +909,84 @@ pub fn load_conversations(
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Lay out a project directory holding one session, its forked `/btw`
+    /// sidecar, a fork the Agent tool spawned, and a plain subagent.
+    fn project_with_sidecars() -> (tempfile::TempDir, PathBuf) {
+        let project = tempfile::tempdir().unwrap();
+        let parent = "68103a38-79f9-4775-9712-144eaf243082";
+        std::fs::write(project.path().join(format!("{parent}.jsonl")), "").unwrap();
+
+        let subagents = project
+            .path()
+            .join(parent)
+            .join(super::super::SUBAGENTS_DIR);
+        std::fs::create_dir_all(&subagents).unwrap();
+        for (name, meta) in [
+            (
+                "agent-acan-we-extend-0ddcd29cffa99b27",
+                r#"{"agentType":"fork","isFork":true,"description":"can we extend","name":"can-we-extend"}"#,
+            ),
+            (
+                "agent-a14ee1c313ce9a8c3",
+                r#"{"agentType":"fork","isFork":true,"description":"spawned","toolUseId":"toolu_017A"}"#,
+            ),
+            (
+                "agent-ab49f2c11c88acd6b",
+                r#"{"agentType":"general-purpose","description":"subagent","toolUseId":"toolu_01Pd"}"#,
+            ),
+        ] {
+            std::fs::write(subagents.join(format!("{name}.meta.json")), meta).unwrap();
+            std::fs::write(subagents.join(format!("{name}.jsonl")), "").unwrap();
+        }
+        // A fork whose transcript is gone is not a session.
+        std::fs::write(
+            subagents.join("agent-agone.meta.json"),
+            r#"{"agentType":"fork","isFork":true,"name":"gone"}"#,
+        )
+        .unwrap();
+
+        let sidecar = subagents.join("agent-acan-we-extend-0ddcd29cffa99b27.jsonl");
+        (project, sidecar)
+    }
+
+    #[test]
+    fn only_user_driven_forks_count_as_sessions() {
+        let (project, sidecar) = project_with_sidecars();
+        assert_eq!(project_fork_sidecars(project.path()), vec![sidecar]);
+    }
+
+    #[test]
+    fn a_fork_is_found_by_agent_id_and_by_transcript_stem() {
+        let (project, sidecar) = project_with_sidecars();
+        let id = "acan-we-extend-0ddcd29cffa99b27";
+        assert_eq!(
+            find_sidecars_by_id(project.path(), id).unwrap(),
+            vec![sidecar.clone()]
+        );
+        assert_eq!(
+            find_sidecars_by_id(project.path(), &format!("agent-{id}")).unwrap(),
+            vec![sidecar]
+        );
+    }
+
+    #[test]
+    fn a_fork_resumes_the_session_it_was_forked_from() {
+        let (project, sidecar) = project_with_sidecars();
+        let parent = "68103a38-79f9-4775-9712-144eaf243082";
+        let conversation = cache::conversation_from_entry(
+            &cache::empty_entry(0, SystemTime::now()),
+            sidecar,
+            false,
+        );
+
+        assert_eq!(conversation.session_id, "acan-we-extend-0ddcd29cffa99b27");
+        assert_eq!(conversation.fork_parent_session_id(), Some(parent));
+        assert_eq!(
+            conversation.resume_path(),
+            project.path().join(format!("{parent}.jsonl"))
+        );
+    }
 
     fn write_transcript(lines: &[&str]) -> tempfile::NamedTempFile {
         let mut file = tempfile::Builder::new()
