@@ -503,6 +503,21 @@ fn discover_agent_keys(
                 ));
             }
         }
+        // Forked `/btw` transcripts are sessions of their own, one level below.
+        for path in history::project_fork_sidecars(&project_path) {
+            let Some(filename) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            keys.push(agent::refs::AgentConversationKey::new(
+                project_name,
+                filename,
+                path,
+            ));
+        }
     }
     if let Ok(pi_root) = history::pi_loader::session_root()
         && let Ok(pi_files) = history::pi_loader::discover_files(&pi_root)

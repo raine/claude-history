@@ -28,6 +28,31 @@ pub(super) fn render_entry(
     options: &RenderOptions,
 ) {
     match entry {
+        // Slash commands Claude Code logs as system entries (e.g. /btw) are
+        // user input — render them as such so in-conversation search finds them.
+        LogEntry::System {
+            subtype,
+            content: Some(content),
+            timestamp,
+            ..
+        } if subtype == "local_command"
+            && crate::history::extract_skill_preview(content).is_some() =>
+        {
+            let content = UserContent::String(content.clone());
+            let ctx = EntryCtx {
+                style: MessageStyle::for_user(None, &content),
+                parent_id: None,
+                entry_index,
+                options,
+            };
+            let ts = entry_timestamp(options, timestamp.as_deref());
+            render_user_message(
+                lines,
+                &ctx,
+                RowTiming::new(options.show_timing, ts.as_deref()),
+                &content,
+            );
+        }
         LogEntry::Summary { .. }
         | LogEntry::FileHistorySnapshot { .. }
         | LogEntry::System { .. }

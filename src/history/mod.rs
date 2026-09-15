@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 
 // Re-export public API
+pub(crate) use loader::project_fork_sidecars;
 pub use loader::{
     DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
     load_all_conversations, load_all_conversations_streaming,
@@ -132,6 +133,56 @@ pub struct Conversation {
     pub total_tokens: u64,
     /// Conversation duration in minutes (from first to last message)
     pub duration_minutes: Option<u64>,
+}
+
+/// Name of the directory holding a session's forked/subagent transcripts.
+pub(crate) const SUBAGENTS_DIR: &str = "subagents";
+
+/// Session id for a transcript path. Sidecar transcripts live in
+/// `<project>/<parent uuid>/subagents/agent-<agentId>.jsonl`, and their session
+/// id is the agent id, without the filename's `agent-` prefix.
+pub(crate) fn session_id_from_path(path: &std::path::Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    if is_sidecar_path(path) {
+        return stem.strip_prefix("agent-").unwrap_or(stem).to_owned();
+    }
+    stem.to_owned()
+}
+
+/// True when the path points at a transcript inside a session's `subagents/` directory.
+pub(crate) fn is_sidecar_path(path: &std::path::Path) -> bool {
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|name| name == SUBAGENTS_DIR)
+}
+
+impl Conversation {
+    /// Parent session id when this conversation is a forked sidecar transcript,
+    /// read back from its location under `<parent uuid>/subagents/`.
+    pub fn fork_parent_session_id(&self) -> Option<&str> {
+        if !is_sidecar_path(&self.path) {
+            return None;
+        }
+        self.path
+            .parent()?
+            .parent()?
+            .file_name()
+            .and_then(|name| name.to_str())
+    }
+
+    /// Transcript to resume for this conversation. A forked sidecar cannot be
+    /// resumed on its own, so it resumes the session it was forked from.
+    pub fn resume_path(&self) -> PathBuf {
+        let parent_transcript = self.fork_parent_session_id().and_then(|parent_id| {
+            let project_dir = self.path.parent()?.parent()?.parent()?;
+            let candidate = project_dir.join(format!("{parent_id}.jsonl"));
+            candidate.is_file().then_some(candidate)
+        });
+        parent_transcript.unwrap_or_else(|| self.path.clone())
+    }
 }
 
 pub(crate) fn semantic_route_text(full_text: &str, agent_search_text: &str) -> String {

@@ -452,6 +452,7 @@ fn run() -> Result<()> {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
+            let path = conv.map(|c| c.resume_path()).unwrap_or(path);
             resume_with_agent(source, &path, project_path, default_args, false)?;
             return Ok(());
         }
@@ -459,6 +460,7 @@ fn run() -> Result<()> {
             let conv = convs.iter().find(|c| c.path == path);
             let project_path = conv.and_then(|c| c.project_path.as_ref());
             let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
+            let path = conv.map(|c| c.resume_path()).unwrap_or(path);
             resume_with_agent(source, &path, project_path, default_args, true)?;
             return Ok(());
         }
@@ -505,9 +507,13 @@ fn run() -> Result<()> {
         }
         let project_path = conv.and_then(|c| c.project_path.as_ref());
         let source = conv.map(|c| c.source).unwrap_or(history::Source::Claude);
+        // A forked sidecar cannot be resumed on its own — resume its parent.
+        let resume_path = conv
+            .map(|c| c.resume_path())
+            .unwrap_or_else(|| selected_path.clone());
         resume_with_agent(
             source,
-            &selected_path,
+            &resume_path,
             project_path,
             default_args,
             args.fork_session,

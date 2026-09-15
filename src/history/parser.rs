@@ -228,8 +228,17 @@ pub fn process_conversation_reader<R: BufRead>(
                             extracted_cwd = Some(PathBuf::from(cwd_str));
                         }
 
-                        let preview_text = extract_text_from_user(&message);
-                        let search_text = extract_search_text_from_user(&message);
+                        let mut preview_text = extract_text_from_user(&message);
+                        let mut search_text = extract_search_text_from_user(&message);
+
+                        // Mid-turn messages arrive wrapped in Claude Code
+                        // boilerplate that would otherwise dominate the preview.
+                        if let Some(stripped) = strip_mid_turn_wrapper(&preview_text) {
+                            preview_text = stripped;
+                        }
+                        if let Some(stripped) = strip_mid_turn_wrapper(&search_text) {
+                            search_text = stripped;
+                        }
 
                         if preview_text.is_empty() && search_text.is_empty() {
                             continue;
@@ -445,6 +454,27 @@ pub fn process_conversation_reader<R: BufRead>(
                         }
                     }
                     LogEntry::AgentName { .. } => {}
+                    // Slash commands that Claude Code logs as system entries
+                    // (e.g. /btw) are user input — index them like a skill
+                    // invocation so they reach previews and search.
+                    LogEntry::System {
+                        subtype,
+                        content: Some(content),
+                        ..
+                    } if subtype == "local_command" => {
+                        if let Some(command_preview) = extract_skill_preview(&content) {
+                            all_parts.push(command_preview.clone());
+                            message_count += 1;
+                            // The semantic filter takes the raw entry, as it
+                            // does for a user-typed slash command.
+                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &content) {
+                                semantic_turns.push(turn);
+                                semantic_turn_ranges.push(MessageRange::single(message_count));
+                            }
+                            preview_parts.push(command_preview);
+                            seen_real_user_message = true;
+                        }
+                    }
                     LogEntry::System { .. } => {}
                     _ => {}
                 }
@@ -577,11 +607,7 @@ pub fn process_conversation_reader<R: BufRead>(
 
     Ok(Some(Conversation {
         source: super::Source::Claude,
-        session_id: path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or_default()
-            .to_owned(),
+        session_id: super::session_id_from_path(&path),
         path,
         index: 0,
         timestamp,
@@ -655,6 +681,22 @@ pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
     }
 
     Some(command_name.to_string())
+}
+
+/// Strip the wrapper Claude Code puts around a message the user sent while a
+/// turn was still running. Without this every such prompt previews and indexes
+/// as the same boilerplate. Returns None when the message is not wrapped.
+pub(crate) fn strip_mid_turn_wrapper(message: &str) -> Option<String> {
+    const PREFIX: &str = "The user sent a new message while you were working:";
+    const TRAILER: &str = "This is how Claude Code surfaces";
+
+    let rest = message.trim().strip_prefix(PREFIX)?;
+    let body = match rest.find(TRAILER) {
+        Some(trailer_start) => &rest[..trailer_start],
+        None => rest,
+    };
+    let body = body.trim();
+    (!body.is_empty()).then(|| body.to_owned())
 }
 
 pub(crate) fn is_clear_only_conversation(user_messages: &[String]) -> bool {
@@ -1683,6 +1725,73 @@ mod tests {
         assert!(!conv.full_text.contains("/cwd/private-sentinel"));
         assert_eq!(conv.project_name, None);
         assert_eq!(conv.project_path, None);
+    }
+
+    #[test]
+    fn btw_system_command_enters_preview_and_search() {
+        let content = [
+            user_msg("Real question", None),
+            assistant_msg("Real answer"),
+            r#"{"type": "system", "subtype": "local_command", "level": "info", "content": "<command-name>/btw</command-name>\n<command-message>btw</command-message>\n<command-args>can we extend the chat UI</command-args>"}"#.to_owned(),
+            r#"{"type": "system", "subtype": "local_command", "level": "info", "content": "<local-command-stdout>\u2442 forked can-we-extend (9b27)</local-command-stdout>"}"#.to_owned(),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert!(conv.preview_last.contains("/btw can we extend the chat UI"));
+        assert!(conv.full_text.contains("/btw can we extend the chat UI"));
+        assert!(
+            conv.search_text_lower
+                .contains("btw can we extend the chat ui")
+        );
+        // The command counts as a message; its stdout echo does not.
+        assert_eq!(conv.message_count, 3);
+        assert_eq!(
+            conv.semantic_turns,
+            vec!["Real question", "Real answer", "can we extend the chat UI"]
+        );
+    }
+
+    #[test]
+    fn mid_turn_wrapper_is_stripped_from_preview_and_search() {
+        let wrapped = concat!(
+            "The user sent a new message while you were working:\\n",
+            "the root holder would carry one SQL\\n\\n",
+            "This is how Claude Code surfaces messages the user sends mid-turn - within the ",
+            "running turn, often alongside the next tool result, rather than as a separate ",
+            "conversation turn. Address the message above as you continue this turn."
+        );
+        let content = [
+            user_msg("First prompt", None),
+            assistant_msg("An answer"),
+            user_msg(wrapped, None),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert!(
+            conv.preview_last
+                .contains("the root holder would carry one SQL")
+        );
+        assert!(!conv.preview_last.contains("The user sent a new message"));
+        assert!(!conv.full_text.contains("This is how Claude Code surfaces"));
+    }
+
+    #[test]
+    fn strip_mid_turn_wrapper_leaves_ordinary_messages_alone() {
+        assert_eq!(strip_mid_turn_wrapper("just a question"), None);
+        assert_eq!(
+            strip_mid_turn_wrapper(
+                "The user sent a new message while you were working:\n/imp\n\nThis is how Claude Code surfaces messages the user sends mid-turn."
+            )
+            .as_deref(),
+            Some("/imp")
+        );
+        // A wrapper with nothing in it yields nothing to prefer over the raw text.
+        assert_eq!(
+            strip_mid_turn_wrapper("The user sent a new message while you were working:\n\n"),
+            None
+        );
     }
 
     #[test]

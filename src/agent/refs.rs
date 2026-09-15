@@ -31,8 +31,7 @@ impl AgentConversationRef {
     pub fn from_parts(project_dir_name: &str, session_filename: &str) -> Self {
         let digest = digest_parts([REF_NAMESPACE, project_dir_name, session_filename]);
         Self {
-            uuid: session_uuid(session_filename)
-                .filter(|uuid| is_uuid(uuid))
+            uuid: session_display_id(session_filename)
                 .unwrap_or("none")
                 .to_ascii_lowercase(),
             digest_hex: format!("{digest:032x}"),
@@ -108,11 +107,7 @@ impl AgentConversationKey {
                 .to_string_lossy()
                 .into_owned()
         } else {
-            conversation
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
+            project_dir_name_from_path(&conversation.path)
                 .ok_or_else(|| {
                     AppError::ConfigError("conversation path has no project directory".to_string())
                 })?
@@ -470,8 +465,31 @@ fn validate_conversation_ref(reference: &str) -> Result<ConversationRefInput> {
     Err(AgentError::invalid_ref(reference, "use ref=ch_... from agent search output").into())
 }
 
+/// The project directory a transcript belongs to. Forked sidecars sit two
+/// levels deeper, under `<project>/<parent uuid>/subagents/`, and must resolve
+/// to the same project as their parent rather than to `subagents`.
+fn project_dir_name_from_path(path: &std::path::Path) -> Option<&str> {
+    let parent = path.parent()?;
+    let directory = if parent.file_name()? == crate::history::SUBAGENTS_DIR {
+        parent.parent()?.parent()?
+    } else {
+        parent
+    };
+    directory.file_name()?.to_str()
+}
+
 fn session_uuid(session_filename: &str) -> Option<&str> {
     session_filename.strip_suffix(".jsonl")
+}
+
+/// The id a transcript is reported under: its session uuid, or — for a forked
+/// sidecar, whose filename carries an agent id instead — that agent id.
+fn session_display_id(session_filename: &str) -> Option<&str> {
+    let stem = session_uuid(session_filename)?;
+    match stem.strip_prefix("agent-") {
+        Some(agent_id) if !agent_id.is_empty() => Some(agent_id),
+        _ => is_uuid(stem).then_some(stem),
+    }
 }
 
 fn is_uuid(value: &str) -> bool {

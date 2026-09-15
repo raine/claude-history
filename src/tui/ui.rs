@@ -28,6 +28,15 @@ fn rgb(c: (u8, u8, u8)) -> Color {
 /// Duration before status messages auto-clear
 const STATUS_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
+/// Shorten a session id for display (e.g., "68103a38-79f9-…" → "68103a38")
+fn short_session_id(session_id: &str) -> String {
+    session_id
+        .split('-')
+        .next()
+        .unwrap_or(session_id)
+        .to_owned()
+}
+
 /// Format model name for display (e.g., "claude-opus-4-5-20251101" → "opus-4.5")
 fn format_model_name(model: &str) -> String {
     // Handle claude-opus-4-5-YYYYMMDD format
@@ -385,6 +394,12 @@ fn header_fits_single_line(conv: &crate::history::Conversation, terminal_width: 
         .map(|t| t.chars().count() + 3) // + " · "
         .unwrap_or(0);
 
+    // Calculate the fork origin length if present
+    let forked_from_len = conv
+        .fork_parent_session_id()
+        .map(|parent| short_session_id(parent).len() + "forked from ".len() + 3) // + " · "
+        .unwrap_or(0);
+
     // Calculate model length if present
     let model_len = conv
         .model
@@ -422,6 +437,7 @@ fn header_fits_single_line(conv: &crate::history::Conversation, terminal_width: 
     let total_len = 2
         + project.len()
         + 3
+        + forked_from_len
         + custom_title_len
         + model_len
         + msg_count_len
@@ -518,6 +534,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
 
     let (
         project,
+        forked_from,
         custom_title,
         model,
         msg_count,
@@ -578,6 +595,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
         let fits = header_fits_single_line(conv, area.width);
         (
             project.to_string(),
+            conv.fork_parent_session_id().map(short_session_id),
             custom_title,
             model,
             msg_count,
@@ -599,6 +617,7 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
             project,
             None,
             None,
+            None,
             "".to_string(),
             None,
             None,
@@ -617,6 +636,15 @@ fn render_view_header(frame: &mut Frame, app: &App, state: &ViewState, area: Rec
                 Style::default().fg(rgb(th().accent)).bold(),
             ),
         ];
+
+        // Name the session a fork came from, which is where it resumes
+        if let Some(ref parent) = forked_from {
+            spans.push(Span::raw(" · "));
+            spans.push(Span::styled(
+                format!("forked from {parent}"),
+                Style::default().fg(rgb(th().text_secondary)),
+            ));
+        }
 
         // Add custom title if present
         if let Some(ref t) = custom_title {

@@ -59,6 +59,12 @@ pub enum LogEntry {
     System {
         subtype: String,
         level: Option<String>,
+        /// Text body of the entry (local_command entries carry the command XML here)
+        #[serde(default)]
+        content: Option<String>,
+        /// ISO 8601 timestamp when this entry was written
+        #[serde(default)]
+        timestamp: Option<String>,
         /// Duration in milliseconds for turn_duration entries
         #[serde(rename = "durationMs")]
         duration_ms: Option<u64>,
