@@ -228,8 +228,17 @@ pub fn process_conversation_reader<R: BufRead>(
                             extracted_cwd = Some(PathBuf::from(cwd_str));
                         }
 
-                        let preview_text = extract_text_from_user(&message);
-                        let search_text = extract_search_text_from_user(&message);
+                        let mut preview_text = extract_text_from_user(&message);
+                        let mut search_text = extract_search_text_from_user(&message);
+
+                        // Mid-turn messages arrive wrapped in Claude Code
+                        // boilerplate that would otherwise dominate the preview.
+                        if let Some(stripped) = strip_mid_turn_wrapper(&preview_text) {
+                            preview_text = stripped;
+                        }
+                        if let Some(stripped) = strip_mid_turn_wrapper(&search_text) {
+                            search_text = stripped;
+                        }
 
                         if preview_text.is_empty() && search_text.is_empty() {
                             continue;
@@ -651,6 +660,22 @@ pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
     }
 
     Some(command_name.to_string())
+}
+
+/// Strip the wrapper Claude Code puts around a message the user sent while a
+/// turn was still running. Without this every such prompt previews and indexes
+/// as the same boilerplate. Returns None when the message is not wrapped.
+pub(crate) fn strip_mid_turn_wrapper(message: &str) -> Option<String> {
+    const PREFIX: &str = "The user sent a new message while you were working:";
+    const TRAILER: &str = "This is how Claude Code surfaces";
+
+    let rest = message.trim().strip_prefix(PREFIX)?;
+    let body = match rest.find(TRAILER) {
+        Some(trailer_start) => &rest[..trailer_start],
+        None => rest,
+    };
+    let body = body.trim();
+    (!body.is_empty()).then(|| body.to_owned())
 }
 
 pub(crate) fn is_clear_only_conversation(user_messages: &[String]) -> bool {
@@ -1679,6 +1704,48 @@ mod tests {
         assert!(!conv.full_text.contains("/cwd/private-sentinel"));
         assert_eq!(conv.project_name, None);
         assert_eq!(conv.project_path, None);
+    }
+
+    #[test]
+    fn mid_turn_wrapper_is_stripped_from_preview_and_search() {
+        let wrapped = concat!(
+            "The user sent a new message while you were working:\\n",
+            "the root holder would carry one SQL\\n\\n",
+            "This is how Claude Code surfaces messages the user sends mid-turn - within the ",
+            "running turn, often alongside the next tool result, rather than as a separate ",
+            "conversation turn. Address the message above as you continue this turn."
+        );
+        let content = [
+            user_msg("First prompt", None),
+            assistant_msg("An answer"),
+            user_msg(wrapped, None),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert!(
+            conv.preview_last
+                .contains("the root holder would carry one SQL")
+        );
+        assert!(!conv.preview_last.contains("The user sent a new message"));
+        assert!(!conv.full_text.contains("This is how Claude Code surfaces"));
+    }
+
+    #[test]
+    fn strip_mid_turn_wrapper_leaves_ordinary_messages_alone() {
+        assert_eq!(strip_mid_turn_wrapper("just a question"), None);
+        assert_eq!(
+            strip_mid_turn_wrapper(
+                "The user sent a new message while you were working:\n/imp\n\nThis is how Claude Code surfaces messages the user sends mid-turn."
+            )
+            .as_deref(),
+            Some("/imp")
+        );
+        // A wrapper with nothing in it yields nothing to prefer over the raw text.
+        assert_eq!(
+            strip_mid_turn_wrapper("The user sent a new message while you were working:\n\n"),
+            None
+        );
     }
 
     #[test]
