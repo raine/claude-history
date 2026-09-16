@@ -38,7 +38,9 @@ impl Literal {
         }
 
         match self.case_mode {
-            CaseMode::Sensitive => text.contains(&self.text),
+            CaseMode::Sensitive => {
+                text.contains(&self.text) || contains_ignoring_markdown_noise(text, &self.text)
+            }
             CaseMode::Insensitive => contains_case_insensitive(text, &self.text),
         }
     }
@@ -49,7 +51,14 @@ impl Literal {
         }
 
         match self.case_mode {
-            CaseMode::Sensitive => find_substring_ranges(text, &self.text),
+            CaseMode::Sensitive => {
+                let ranges = find_substring_ranges(text, &self.text);
+                if !ranges.is_empty() {
+                    ranges
+                } else {
+                    find_ranges_ignoring_markdown_noise(text, &self.text)
+                }
+            }
             CaseMode::Insensitive => find_case_insensitive_ranges(text, &self.text),
         }
     }
@@ -121,15 +130,55 @@ pub fn exact_fallback(
     matches.into_iter().map(|(index, _)| index).collect()
 }
 
+/// Markdown punctuation the rendered viewer strips away (inline code
+/// backticks, emphasis asterisks) so a phrase copied from the viewer
+/// (e.g. `person {name}`) doesn't include it even though the stored
+/// transcript text does (`` `person {name}` ``). Ignored on both sides of
+/// a literal comparison; callers that need highlight ranges must map
+/// matches found this way back through the original (unstripped) text,
+/// which is what the `_ignoring_markdown_noise` range functions below do.
+fn is_markdown_noise(c: char) -> bool {
+    matches!(c, '`' | '*')
+}
+
 fn contains_case_insensitive(text: &str, needle: &str) -> bool {
-    let needle_chars: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    let needle_chars: Vec<char> = needle
+        .chars()
+        .filter(|c| !is_markdown_noise(*c))
+        .flat_map(char::to_lowercase)
+        .collect();
     if needle_chars.is_empty() {
         return false;
     }
 
     let mut window = VecDeque::with_capacity(needle_chars.len());
-    for folded in text.chars().flat_map(char::to_lowercase) {
+    for folded in text
+        .chars()
+        .filter(|c| !is_markdown_noise(*c))
+        .flat_map(char::to_lowercase)
+    {
         window.push_back(folded);
+        if window.len() > needle_chars.len() {
+            window.pop_front();
+        }
+        if window.len() == needle_chars.len()
+            && window.iter().copied().eq(needle_chars.iter().copied())
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_ignoring_markdown_noise(text: &str, needle: &str) -> bool {
+    let needle_chars: Vec<char> = needle.chars().filter(|c| !is_markdown_noise(*c)).collect();
+    if needle_chars.is_empty() {
+        return false;
+    }
+
+    let mut window = VecDeque::with_capacity(needle_chars.len());
+    for ch in text.chars().filter(|c| !is_markdown_noise(*c)) {
+        window.push_back(ch);
         if window.len() > needle_chars.len() {
             window.pop_front();
         }
@@ -154,8 +203,45 @@ fn find_substring_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
+/// Like `find_substring_ranges`, but ignores markdown noise (backticks,
+/// `*`) on both sides of the comparison, mapping any match back to the
+/// byte range it spans in the original (unstripped) `text`.
+fn find_ranges_ignoring_markdown_noise(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let needle_chars: Vec<char> = needle.chars().filter(|c| !is_markdown_noise(*c)).collect();
+    if needle_chars.is_empty() {
+        return Vec::new();
+    }
+
+    let mut chars = Vec::new();
+    let mut map = Vec::new();
+    for (start, ch) in text.char_indices() {
+        if is_markdown_noise(ch) {
+            continue;
+        }
+        let end = start + ch.len_utf8();
+        chars.push(ch);
+        map.push((start, end));
+    }
+
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i + needle_chars.len() <= chars.len() {
+        if chars[i..i + needle_chars.len()] == needle_chars[..] {
+            ranges.push((map[i].0, map[i + needle_chars.len() - 1].1));
+            i += needle_chars.len();
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
 fn find_case_insensitive_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
-    let needle_chars: Vec<char> = needle.chars().flat_map(char::to_lowercase).collect();
+    let needle_chars: Vec<char> = needle
+        .chars()
+        .filter(|c| !is_markdown_noise(*c))
+        .flat_map(char::to_lowercase)
+        .collect();
     if needle_chars.is_empty() {
         return Vec::new();
     }
@@ -163,6 +249,9 @@ fn find_case_insensitive_ranges(text: &str, needle: &str) -> Vec<(usize, usize)>
     let mut folded_chars = Vec::new();
     let mut folded_map = Vec::new();
     for (start, ch) in text.char_indices() {
+        if is_markdown_noise(ch) {
+            continue;
+        }
         let end = start + ch.len_utf8();
         for folded in ch.to_lowercase() {
             folded_chars.push(folded);
@@ -255,6 +344,40 @@ mod tests {
 
         assert!(literal.matches("pre İSTANBUL post"));
         assert!(!literal.matches("pre constantinople post"));
+    }
+
+    #[test]
+    fn quoted_literal_matches_phrase_copied_from_rendered_markdown() {
+        // The viewer renders inline code away, so a phrase copied from it
+        // (no backticks) must still match the stored markdown source
+        // (backticks intact). This literal has an uppercase letter, so
+        // it exercises the case-sensitive path.
+        let text = "What the example holds today: `person {name}`, `message {said, by}`, both `delivery: held`";
+        let literal = Literal::new("What the example holds today: person {name}".to_string());
+
+        assert!(literal.matches(text));
+    }
+
+    #[test]
+    fn quoted_literal_ignoring_backticks_matches_lowercase_too() {
+        let text = "notes: `person {name}` shows up twice";
+        let literal = Literal::new("person {name}".to_string());
+
+        assert!(literal.matches(text));
+    }
+
+    #[test]
+    fn backtick_spanning_match_range_is_original_text_boundary() {
+        let text = "today: `person {name}`, more text";
+        let literal = Literal::new("person {name}".to_string());
+        let ranges = literal.match_ranges(text);
+
+        assert_eq!(ranges.len(), 1);
+        let (start, end) = ranges[0];
+        // Backticks are ignored, not highlighted: the range covers the
+        // matched characters' own positions in the original text, which
+        // must be a valid (non-panicking) boundary either side of them.
+        assert_eq!(&text[start..end], "person {name}");
     }
 
     #[test]

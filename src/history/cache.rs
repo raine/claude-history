@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
 const PI_CACHE_MAGIC: [u8; 8] = *b"PIHIST01";
 const OMP_CACHE_MAGIC: [u8; 8] = *b"OMHIST01";
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 const PI_SCHEMA_VERSION: u32 = 1;
 const OMP_SCHEMA_VERSION: u32 = 1;
 

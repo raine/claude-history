@@ -895,6 +895,43 @@ mod tests {
     }
 
     #[test]
+    fn search_matches_phrase_copied_from_rendered_inline_code() {
+        // The viewer renders backticks away, so a phrase copied from it
+        // (unquoted, lexical mode) must still find text stored with
+        // inline-code markdown intact, including nested `{}` placeholders.
+        let now = Local::now();
+        let convs = vec![make_conv(
+            "What the example holds today: `person {name}`, `message {said, by}`, both `delivery: held`",
+            now,
+        )];
+        let searchable = precompute_search_text(&convs);
+        let results = search(
+            &convs,
+            &searchable,
+            "What the example holds today: person {name}",
+            now,
+        );
+        assert_eq!(results, vec![0]);
+    }
+
+    #[test]
+    fn search_keeps_dotted_filenames_and_toolu_ids_findable() {
+        // `.` must stay glued to the identifier around it (fold.ts, not
+        // fold / ts) while surrounding markdown/code punctuation like
+        // backticks and `:` still separates it from neighboring tokens.
+        let now = Local::now();
+        let convs = vec![make_conv(
+            "see `src/fold.ts:24` and tool call toolu_01AS52 for details",
+            now,
+        )];
+        let searchable = precompute_search_text(&convs);
+
+        assert_eq!(search(&convs, &searchable, "fold.ts", now), vec![0]);
+        assert_eq!(search(&convs, &searchable, "src/fold.ts:24", now), vec![0]);
+        assert_eq!(search(&convs, &searchable, "toolu_01AS52", now), vec![0]);
+    }
+
+    #[test]
     fn is_uuid_valid() {
         assert!(is_uuid("e7d318b1-4274-4ee2-a341-e94893b5df49"));
         assert!(is_uuid("00000000-0000-0000-0000-000000000000"));
