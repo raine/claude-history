@@ -58,6 +58,15 @@ impl Drop for TerminalGuard {
 
 const NAME_WIDTH: usize = 9;
 
+fn calculate_content_width(frame_width: usize, show_timing: bool) -> usize {
+    let timing_width = if show_timing {
+        crate::tui::viewer::TIMESTAMP_WIDTH
+    } else {
+        0
+    };
+    frame_width.saturating_sub(NAME_WIDTH + 3 + crate::tui::viewer::GUTTER_WIDTH + timing_width)
+}
+
 struct FrameState {
     frame_area: Rect,
     viewport_height: usize,
@@ -83,8 +92,7 @@ fn read_event(wait: Duration) -> Result<Option<Event>> {
 fn prepare_frame(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stderr>>) -> FrameState {
     let frame_area = terminal.get_frame().area();
     let viewport_height = frame_area.height.saturating_sub(3) as usize;
-    let content_width = (frame_area.width as usize)
-        .saturating_sub(NAME_WIDTH + 3 + crate::tui::viewer::GUTTER_WIDTH);
+    let content_width = calculate_content_width(frame_area.width as usize, app.show_timing());
 
     app.check_view_resize(content_width, viewport_height);
     let viewport_height = match app.app_mode() {
@@ -323,5 +331,20 @@ pub fn run_single_file(
             EventLoopResult::Return(None) => {}
             EventLoopResult::Return(Some(_)) => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_width_keeps_timing_off_behavior() {
+        assert_eq!(calculate_content_width(60, false), 46);
+    }
+
+    #[test]
+    fn content_width_reserves_timestamp_prefix_when_timing_is_on() {
+        assert_eq!(calculate_content_width(60, true), 32);
     }
 }

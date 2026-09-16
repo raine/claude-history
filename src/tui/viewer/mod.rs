@@ -35,8 +35,8 @@ use tools::make_tool_summary_output_id;
 pub const GUTTER_WIDTH: usize = 2;
 
 const NAME_WIDTH: usize = 9;
-/// Width of timestamp prefix when timing is enabled (space + HH:MM + space)
-const TIMESTAMP_WIDTH: usize = 7;
+/// Width of timestamp prefix when timing is enabled (space + Mon DD HH:MM + space)
+pub(crate) const TIMESTAMP_WIDTH: usize = 14;
 
 /// Get the current theme (cached after first detection)
 fn th() -> &'static Theme {
@@ -120,13 +120,13 @@ pub struct RenderedConversation {
     pub messages: Vec<MessageRange>,
 }
 
-/// Format an ISO 8601 timestamp to HH:MM local time
+/// Format an ISO 8601 timestamp to Mon DD HH:MM in local time
 fn format_timestamp(iso_timestamp: &str) -> Option<String> {
     use chrono::{DateTime, Local};
     // Parse RFC 3339 timestamp (handles timezone offsets) and convert to local time
     DateTime::parse_from_rfc3339(iso_timestamp)
         .ok()
-        .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
+        .map(|dt| dt.with_timezone(&Local).format("%b %d %H:%M").to_string())
 }
 
 #[derive(Debug)]

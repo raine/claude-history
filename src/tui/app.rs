@@ -471,6 +471,10 @@ impl App {
         self.single_file_mode
     }
 
+    pub(crate) fn show_timing(&self) -> bool {
+        self.show_timing
+    }
+
     pub fn workspace_filter(&self) -> bool {
         self.workspace_filter
     }

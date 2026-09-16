@@ -1,6 +1,8 @@
 use super::markdown::render_markdown_to_lines;
 use super::tools::{ToolCallRenderSpec, ToolOutputKind, make_tool_output_id, render_tool_call};
 use super::*;
+use chrono::{Local, TimeZone};
+use unicode_width::UnicodeWidthStr;
 
 /// Helper to render markdown and extract just the content text (without styling)
 fn render_to_text(input: &str, width: usize) -> String {
@@ -309,6 +311,13 @@ fn line_text(line: &RenderedLine) -> String {
     line.spans.iter().map(|(text, _)| text.as_str()).collect()
 }
 
+fn line_width(line: &RenderedLine) -> usize {
+    line.spans
+        .iter()
+        .map(|(text, _)| UnicodeWidthStr::width(text.as_str()))
+        .sum()
+}
+
 fn rendered_text(conversation: &RenderedConversation) -> String {
     conversation
         .lines
@@ -390,6 +399,26 @@ fn hidden_tool_mode_coalesces_tool_only_entries_across_results() {
     assert!(text.contains("Searched for 1 pattern, read 1 file, ran 1 shell command"));
     assert_eq!(text.matches("Claude").count(), 1);
     assert!(!text.contains("Result"));
+}
+
+#[test]
+fn collapsed_tool_summary_uses_fixed_timestamp_format() {
+    let timestamp = Local.with_ymd_and_hms(2026, 9, 4, 13, 59, 0).unwrap();
+    let entry = RenderableEntry {
+        entry_index: 0,
+        entry: serde_json::from_str(&format!(
+            r#"{{"type":"assistant","timestamp":"{}","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"toolu_1","name":"Bash","input":{{"command":"pwd"}}}}]}}}}"#,
+            timestamp.to_rfc3339()
+        ))
+        .unwrap(),
+    };
+    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    options.show_timing = true;
+
+    let rendered = render_parsed_conversation(&[entry], &options);
+
+    assert_eq!(rendered.lines[0].spans[0].0, " Sep 04 13:59 ");
+    assert_eq!(rendered.lines[0].spans[0].0.len(), TIMESTAMP_WIDTH);
 }
 
 #[test]
@@ -709,23 +738,28 @@ fn tool_call_metadata_tracks_truncated_and_expanded_state() {
 
 #[test]
 fn test_format_timestamp() {
-    // UTC timestamp with Z suffix
-    let ts = "2026-02-04T19:46:38.440Z";
-    let result = format_timestamp(ts);
-    assert!(result.is_some(), "Should parse UTC timestamp");
-    let formatted = result.unwrap();
-    // Should be HH:MM format (local time)
-    assert_eq!(formatted.len(), 5, "Should be HH:MM format: {}", formatted);
-    assert!(
-        formatted.contains(':'),
-        "Should contain colon: {}",
-        formatted
-    );
+    let first = Local.with_ymd_and_hms(2026, 9, 4, 13, 59, 38).unwrap();
+    let second = Local.with_ymd_and_hms(2026, 9, 5, 13, 59, 38).unwrap();
 
-    // Timestamp with timezone offset
-    let ts2 = "2026-02-04T14:46:38-05:00";
-    let result2 = format_timestamp(ts2);
-    assert!(result2.is_some(), "Should parse timestamp with offset");
+    let first_formatted = format_timestamp(&first.to_rfc3339()).unwrap();
+    let second_formatted = format_timestamp(&second.to_rfc3339()).unwrap();
+
+    assert_eq!(first_formatted, "Sep 04 13:59");
+    assert_eq!(second_formatted, "Sep 05 13:59");
+    assert_ne!(first_formatted, second_formatted);
+    assert_eq!(format!(" {first_formatted} ").len(), TIMESTAMP_WIDTH);
+
+    let utc = "2026-02-04T19:46:38.440Z";
+    let expected_utc = chrono::DateTime::parse_from_rfc3339(utc)
+        .unwrap()
+        .with_timezone(&Local)
+        .format("%b %d %H:%M")
+        .to_string();
+    assert_eq!(format_timestamp(utc), Some(expected_utc));
+
+    // RFC 3339 timestamps with explicit offsets still convert to local time.
+    let offset = format_timestamp("2026-02-04T14:46:38-05:00");
+    assert!(offset.is_some(), "Should parse timestamp with offset");
 }
 
 // -----------------------------------------------------------------
@@ -827,7 +861,8 @@ fn message_ranges_skip_non_message_entries() {
 
 #[test]
 fn timing_enabled_renders_timestamp_prefix_span() {
-    let entries = vec![user_entry(0, "Hello", Some("2026-02-04T12:34:56Z"))];
+    let timestamp = Local.with_ymd_and_hms(2026, 9, 4, 12, 34, 56).unwrap();
+    let entries = vec![user_entry(0, "Hello", Some(&timestamp.to_rfc3339()))];
     let mut options = test_render_options(ToolDisplayMode::Hidden);
     options.show_timing = true;
 
@@ -835,17 +870,8 @@ fn timing_enabled_renders_timestamp_prefix_span() {
     let first = &rendered.lines[0];
     let ts_span = &first.spans[0].0;
 
-    assert_eq!(
-        ts_span.len(),
-        TIMESTAMP_WIDTH,
-        "timestamp prefix span width: {:?}",
-        ts_span
-    );
-    assert!(
-        ts_span.starts_with(' ') && ts_span.ends_with(' ') && ts_span.contains(':'),
-        "timestamp prefix should be ' HH:MM ', got {:?}",
-        ts_span
-    );
+    assert_eq!(ts_span, " Sep 04 12:34 ");
+    assert_eq!(ts_span.len(), TIMESTAMP_WIDTH);
 }
 
 #[test]
@@ -901,6 +927,33 @@ fn assistant_continuation_line_aligns_under_timestamp() {
     assert!(
         has_padded_continuation,
         "expected a continuation line padded to TIMESTAMP_WIDTH"
+    );
+}
+
+#[test]
+fn timing_enabled_wrapping_leaves_room_for_timestamp_prefix() {
+    let entries = vec![user_entry(
+        0,
+        "one two three four five six seven eight nine ten eleven twelve",
+        Some("2026-09-04T12:34:56Z"),
+    )];
+    let mut options = test_render_options(ToolDisplayMode::Hidden);
+    options.show_timing = true;
+    options.content_width = 32;
+
+    let rendered = render_parsed_conversation(&entries, &options);
+    let max_line_width = 60 - GUTTER_WIDTH;
+    assert!(
+        rendered
+            .lines
+            .iter()
+            .all(|line| line_width(line) <= max_line_width),
+        "timing-enabled lines must fit 60 columns including the gutter: {:?}",
+        rendered.lines.iter().map(line_width).collect::<Vec<_>>()
+    );
+    assert!(
+        rendered.lines.len() > 2,
+        "long content should wrap at the timing-adjusted width"
     );
 }
 

@@ -12,8 +12,8 @@
 /// Above the ledger layer this is the only shape callers pass to
 /// describe "what does this row's timing column look like." The ledger
 /// writer turns it into either zero spans (`Disabled`),
-/// `TIMESTAMP_WIDTH` blank spaces (`Pad`), or a styled `" HH:MM "`
-/// span (`Stamp`).
+/// `TIMESTAMP_WIDTH` blank spaces (`Pad`), or a styled
+/// `" Mon DD HH:MM "` span (`Stamp`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TimingSlot<'a> {
     /// Timing column entirely absent for this row.
