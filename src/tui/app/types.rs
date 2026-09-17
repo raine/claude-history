@@ -33,6 +33,11 @@ pub enum DialogMode {
     SemanticDebug,
     /// Rename the selected conversation
     Rename { input: String, cursor: usize },
+    /// Pick a subagent transcript to open (sidecar `agent-*.jsonl` files)
+    SubagentPicker {
+        entries: Vec<crate::history::SubagentEntry>,
+        selected: usize,
+    },
 }
 
 /// Main application mode
@@ -50,6 +55,9 @@ pub enum AppMode {
 pub struct ViewState {
     /// Path to the conversation file (stable identity)
     pub conversation_path: PathBuf,
+    /// Session we came from when drilling into a subagent, so `Esc` returns to
+    /// the parent session rather than the conversation list.
+    pub parent_path: Option<PathBuf>,
     /// Parsed renderable entries for the currently open view.
     pub parsed_entries: Option<Arc<Vec<RenderableEntry>>>,
     /// Current scroll position (line offset)
@@ -127,6 +135,7 @@ impl ViewState {
     ) -> Self {
         Self {
             conversation_path,
+            parent_path: None,
             parsed_entries: None,
             scroll_offset: 0,
             rendered_lines: Vec::new(),

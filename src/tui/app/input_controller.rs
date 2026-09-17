@@ -132,6 +132,7 @@ impl App {
                 return None;
             }
             DialogMode::Rename { .. } => return self.handle_rename_key(code, modifiers),
+            DialogMode::SubagentPicker { .. } => return self.handle_subagent_picker_key(code),
             DialogMode::None => {}
         }
 
@@ -204,6 +205,16 @@ impl App {
                     self.clear_view_search();
                     return None;
                 }
+                // Drilled into a subagent: Esc returns to the parent session
+                // rather than the conversation list. Checked before
+                // single_file_mode so the feature works in single-file view.
+                if let AppMode::View(ref state) = self.app_mode
+                    && let Some(parent) = state.parent_path.clone()
+                {
+                    let width = state.content_width;
+                    self.open_conversation_path(parent, width);
+                    return None;
+                }
                 if self.single_file_mode {
                     return Some(Action::Quit);
                 }
@@ -211,6 +222,15 @@ impl App {
                 None
             }
             KeyCode::Char('q') => {
+                // Match Esc: return to the parent session when drilling into a
+                // subagent, so `q` and Esc behave consistently.
+                if let AppMode::View(ref state) = self.app_mode
+                    && let Some(parent) = state.parent_path.clone()
+                {
+                    let width = state.content_width;
+                    self.open_conversation_path(parent, width);
+                    return None;
+                }
                 if self.single_file_mode {
                     return Some(Action::Quit);
                 }
@@ -356,6 +376,10 @@ impl App {
             }
             KeyCode::Char('e') => {
                 self.dialog_mode = DialogMode::ExportMenu { selected: 0 };
+                None
+            }
+            KeyCode::Char('s') => {
+                self.open_subagent_picker();
                 None
             }
             KeyCode::Char('y') => {

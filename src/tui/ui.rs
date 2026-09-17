@@ -505,6 +505,9 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
         }
         DialogMode::SemanticDebug => render_semantic_debug_popup(frame, app),
         DialogMode::Rename { input, cursor } => render_rename_dialog(frame, input, *cursor),
+        DialogMode::SubagentPicker { entries, selected } => {
+            render_subagent_picker(frame, entries, *selected)
+        }
         DialogMode::None => {}
     }
 }
@@ -859,6 +862,8 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled("help  ", label_style),
             Span::styled("/", key_style),
             Span::styled("search  ", label_style),
+            Span::styled("s", key_style),
+            Span::styled("ubagents  ", label_style),
             Span::styled("e", key_style),
             Span::styled("xport  ", label_style),
             Span::styled("y", key_style),
@@ -1161,6 +1166,27 @@ fn centered_modal_area(area: Rect, preferred_width: u16, preferred_height: u16) 
     }
 }
 
+/// Render the shared modal chrome (Clear → background → bordered block) and
+/// return the inner area for content. Centralizes the overlay styling used by
+/// the export menu, yank menu, and subagent picker.
+fn render_modal_chrome(frame: &mut Frame, title: String, width: u16, height: u16) -> Rect {
+    let area = frame.area();
+    let menu_area = centered_modal_area(area, width, height);
+
+    frame.render_widget(Clear, menu_area);
+    let background = Block::default().style(Style::default().bg(rgb(th().overlay_bg)));
+    frame.render_widget(background, menu_area);
+
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(rgb(th().accent)));
+    let inner = block.inner(menu_area);
+    frame.render_widget(block, menu_area);
+    inner
+}
+
 fn render_confirm_dialog(frame: &mut Frame, area: Rect) {
     let prompt = Line::from(vec![
         Span::raw(" "),
@@ -1236,28 +1262,8 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
         "[4] JSONL (raw)",
     ];
 
-    let area = frame.area();
-    let menu_width = 35;
     let menu_height = options.len() as u16 + 4; // options + title + border + cancel hint
-
-    let menu_area = centered_modal_area(area, menu_width, menu_height);
-
-    // Clear the area behind the modal first
-    frame.render_widget(Clear, menu_area);
-
-    // Render background
-    let background = Block::default().style(Style::default().bg(rgb(th().overlay_bg)));
-    frame.render_widget(background, menu_area);
-
-    // Render border
-    let block = Block::default()
-        .title(format!(" {} ", title))
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(rgb(th().accent)));
-
-    let inner = block.inner(menu_area);
-    frame.render_widget(block, menu_area);
+    let inner = render_modal_chrome(frame, format!(" {} ", title), 35, menu_height);
 
     // Render options
     let mut lines = Vec::new();
@@ -1279,6 +1285,68 @@ fn render_export_menu(frame: &mut Frame, selected: usize, is_yank: bool) {
     if inner.is_empty() {
         return;
     }
+
+    let menu_content = Paragraph::new(lines);
+    frame.render_widget(menu_content, inner);
+}
+
+fn render_subagent_picker(
+    frame: &mut Frame,
+    entries: &[crate::history::SubagentEntry],
+    selected: usize,
+) {
+    let title = format!(" Subagents ({}) ", entries.len());
+
+    // Precompute labels once to avoid double allocation (width + render).
+    let labels: Vec<String> = entries.iter().map(|e| e.label()).collect();
+
+    // Use display width (not char count) so CJK/emoji labels size the menu
+    // correctly — a CJK char occupies 2 columns but counts as 1 char.
+    let max_label_width = labels
+        .iter()
+        .map(|l| UnicodeWidthStr::width(l.as_str()))
+        .max()
+        .unwrap_or(0);
+    let menu_width = (max_label_width as u16)
+        .saturating_add(6)
+        .clamp(30, frame.area().width.saturating_sub(4).max(30));
+
+    // Leave room for border (2) + blank line (1) + hint line (1).
+    let max_rows = frame.area().height.saturating_sub(6).max(1) as usize;
+    let visible = entries.len().min(max_rows).max(1);
+    let menu_height = (visible as u16) + 4;
+
+    let inner = render_modal_chrome(frame, title, menu_width, menu_height);
+
+    if inner.is_empty() {
+        return;
+    }
+
+    // Scroll window so the selected entry stays visible.
+    let start = if selected >= visible {
+        selected + 1 - visible
+    } else {
+        0
+    };
+    let end = (start + visible).min(entries.len());
+
+    let mut lines = Vec::new();
+    for (offset, label) in labels[start..end].iter().enumerate() {
+        let idx = start + offset;
+        let style = if idx == selected {
+            Style::default().fg(rgb(th().accent)).bold()
+        } else {
+            Style::default().fg(rgb(th().text_primary))
+        };
+        let prefix = if idx == selected { "▶ " } else { "  " };
+        // Paragraph clips (does not wrap) so an overlong label stays on one row.
+        lines.push(Line::styled(format!("{}{}", prefix, label), style));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::styled(
+        "  [↑/↓] Move  [Enter] Open  [Esc] Cancel",
+        Style::default().fg(rgb(th().text_muted)),
+    ));
 
     let menu_content = Paragraph::new(lines);
     frame.render_widget(menu_content, inner);
@@ -1313,6 +1381,7 @@ fn render_help_overlay(
             ("t".into(), "Cycle tools: off/trunc/full"),
             ("T".into(), "Toggle thinking"),
             ("i".into(), "Toggle timing"),
+            ("s".into(), "View subagents"),
             ("e".into(), "Export to file"),
             ("y".into(), "Copy to clipboard / message"),
             ("p".into(), "Show file path"),
