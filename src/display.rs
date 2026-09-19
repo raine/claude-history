@@ -419,9 +419,6 @@ fn stream_log_entries(
     options: &DisplayOptions,
     format: DisplayFormat,
 ) -> Result<()> {
-    let file = File::open(file_path)?;
-    let reader = BufReader::new(file);
-
     // Spawn pager if requested
     let mut pager_child = if options.use_pager {
         pager::spawn_pager().ok()
@@ -436,16 +433,7 @@ fn stream_log_entries(
         &mut stdout_handle
     };
 
-    match format {
-        DisplayFormat::Ledger { content_width } => {
-            let mut formatter = LedgerFormatter::new(writer, content_width);
-            process_log_entries(reader, file_path, options, &mut formatter)?;
-        }
-        DisplayFormat::Plain => {
-            let mut formatter = PlainFormatter { writer };
-            process_log_entries(reader, file_path, options, &mut formatter)?;
-        }
-    }
+    let result = render_log_entries(file_path, options, format, writer);
 
     // Close stdin and wait for pager to finish
     drop(stdout_handle);
@@ -453,15 +441,55 @@ fn stream_log_entries(
         let _ = child.wait();
     }
 
+    result
+}
+
+fn render_log_entries(
+    file_path: &Path,
+    options: &DisplayOptions,
+    format: DisplayFormat,
+    writer: &mut dyn Write,
+) -> Result<()> {
+    match format {
+        DisplayFormat::Ledger { content_width } => {
+            let mut formatter = LedgerFormatter::new(writer, content_width);
+            process_log_entries(file_path, options, &mut formatter)?;
+        }
+        DisplayFormat::Plain => {
+            let mut formatter = PlainFormatter { writer };
+            process_log_entries(file_path, options, &mut formatter)?;
+        }
+    }
+
     Ok(())
 }
 
 fn process_log_entries<F: OutputFormatter>(
-    reader: BufReader<File>,
     file_path: &Path,
     options: &DisplayOptions,
     formatter: &mut F,
 ) -> Result<()> {
+    if crate::history::detect_source(file_path)?.is_some()
+        && let Some(projection) = crate::history::pi::parse_file(file_path)?
+    {
+        if options.debug_level.is_some() {
+            process_raw_log_entries::<F>(file_path, options, None)?;
+        }
+        for (_, entry) in projection.entries {
+            process_entry(formatter, &entry, options.no_tools, options.show_thinking);
+        }
+        return Ok(());
+    }
+
+    process_raw_log_entries(file_path, options, Some(formatter))
+}
+
+fn process_raw_log_entries<F: OutputFormatter>(
+    file_path: &Path,
+    options: &DisplayOptions,
+    mut formatter: Option<&mut F>,
+) -> Result<()> {
+    let reader = BufReader::new(File::open(file_path)?);
     for (line_number, line_result) in reader.lines().enumerate() {
         let line = line_result?;
         if line.trim().is_empty() {
@@ -470,7 +498,9 @@ fn process_log_entries<F: OutputFormatter>(
 
         match serde_json::from_str::<LogEntry>(&line) {
             Ok(entry) => {
-                process_entry(formatter, &entry, options.no_tools, options.show_thinking);
+                if let Some(formatter) = formatter.as_deref_mut() {
+                    process_entry(formatter, &entry, options.no_tools, options.show_thinking);
+                }
             }
             Err(e) => {
                 debug::error(
@@ -883,6 +913,103 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn fixture(path: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
+    }
+
+    fn options() -> DisplayOptions {
+        DisplayOptions {
+            no_tools: true,
+            show_thinking: false,
+            debug_level: None,
+            use_pager: false,
+            no_color: true,
+        }
+    }
+
+    fn render(path: &std::path::Path, options: &DisplayOptions, format: DisplayFormat) -> String {
+        let mut output = Vec::new();
+        render_log_entries(path, options, format, &mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn normalized_display_preserves_claude_plain_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("claude.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"question\"}}\n",
+                "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]}}\n"
+            ),
+        )
+        .unwrap();
+
+        let output = render(&path, &options(), DisplayFormat::Plain);
+        assert_eq!(output, "You: question\n\nClaude: answer\n\n");
+    }
+
+    #[test]
+    fn normalized_display_renders_active_pi_branch_and_visibility() {
+        let path = fixture("tests/fixtures/pi/v3-branched.jsonl");
+        let output = render(&path, &options(), DisplayFormat::Plain);
+        assert!(output.contains("You: active root question"));
+        assert!(output.contains("Claude: root answer"));
+        assert!(output.contains("You: [notice] visible custom searchable"));
+        assert!(!output.contains("ABANDONED_BRANCH_SENTINEL"));
+        assert!(!output.contains("HIDDEN_CUSTOM_SENTINEL"));
+        assert!(!output.contains("private reasoning"));
+        assert!(!output.contains("tool output searchable"));
+        assert!(!output.contains("TOOL_BASE64_SECRET"));
+
+        let visible = DisplayOptions {
+            no_tools: false,
+            show_thinking: true,
+            ..options()
+        };
+        let output = render(&path, &visible, DisplayFormat::Plain);
+        assert!(output.contains("Thinking: private reasoning"));
+        assert!(output.contains("tool output searchable"));
+        assert!(output.contains("bash output searchable"));
+    }
+
+    #[test]
+    fn normalized_display_renders_active_omp_branch_without_relabeling() {
+        let path = fixture("tests/fixtures/omp/v3.jsonl");
+        let output = render(&path, &options(), DisplayFormat::Plain);
+        assert!(output.contains("You: OMP active question"));
+        assert!(output.contains("Claude: OMP active answer"));
+        assert!(!output.contains("OMP_ABANDONED_SENTINEL"));
+        assert!(!output.contains("OMP fixture title"));
+    }
+
+    #[test]
+    fn normalized_display_skips_malformed_records_without_debug() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("pi-malformed.jsonl");
+        let fixture =
+            std::fs::read_to_string(fixture("tests/fixtures/pi/v3-branched.jsonl")).unwrap();
+        std::fs::write(&path, format!("{fixture}not-json\n")).unwrap();
+
+        let output = render(&path, &options(), DisplayFormat::Plain);
+        assert!(output.contains("active root question"));
+        assert!(!output.contains("not-json"));
+    }
+
+    #[test]
+    fn normalized_display_keeps_ledger_formatter_for_supported_sources() {
+        let path = fixture("tests/fixtures/pi/v1.jsonl");
+        let output = render(
+            &path,
+            &options(),
+            DisplayFormat::Ledger { content_width: 80 },
+        );
+        assert!(output.contains("v1 question"));
+        assert!(output.contains("v1 answer"));
+    }
 
     #[test]
     fn process_command_message_skips_local_command_caveat() {

@@ -61,6 +61,8 @@ impl Source {
     }
 }
 
+pub use pi::detect_source;
+
 pub fn normalized_log_entries(
     path: &std::path::Path,
 ) -> Result<Vec<(usize, crate::claude::LogEntry)>> {

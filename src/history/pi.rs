@@ -45,6 +45,16 @@ pub fn parse_file(path: &Path) -> Result<Option<PiProjection>> {
     parse_reader(BufReader::new(file), None)
 }
 
+/// Detect a supported Pi or OMP session without buffering the full file.
+///
+/// This reads only the first one or two non-empty, valid JSON records needed
+/// to apply the same source recognition rules as `parse_reader`, while
+/// skipping malformed records in the leading prefix.
+pub fn detect_source(path: &Path) -> Result<Option<Source>> {
+    let file = File::open(path)?;
+    detect_source_reader(BufReader::new(file))
+}
+
 pub fn parse_omp_file(path: &Path) -> Result<Option<PiProjection>> {
     let file = File::open(path)?;
     parse_reader(BufReader::new(file), Some(Source::Omp))
@@ -78,30 +88,16 @@ fn parse_reader(
         }
     }
 
-    let Some((_, first_value)) = parsed.first() else {
+    let Some((header_index, source)) = detect_source_in_values(&parsed, expected_source) else {
         return Ok(None);
     };
-    let title_slot = first_value
-        .as_object()
-        .filter(|object| object.get("type").and_then(Value::as_str) == Some("title"));
-    let header_index = usize::from(title_slot.is_some());
     let Some((_, header_value)) = parsed.get(header_index) else {
         return Ok(None);
     };
     let Some(header_object) = header_value.as_object() else {
         return Ok(None);
     };
-    if header_object.get("type").and_then(Value::as_str) != Some("session") {
-        return Ok(None);
-    }
-    let source = if title_slot.is_some() {
-        Source::Omp
-    } else {
-        expected_source.unwrap_or(Source::Pi)
-    };
-    if expected_source == Some(Source::Omp) && source != Source::Omp {
-        return Ok(None);
-    }
+    let title_slot = leading_title_slot(&parsed);
     let title = title_slot
         .and_then(|slot| slot.get("title"))
         .and_then(Value::as_str)
@@ -223,6 +219,55 @@ fn parse_reader(
         leaf_id,
         malformed_lines,
     }))
+}
+
+fn detect_source_reader(reader: impl BufRead) -> Result<Option<Source>> {
+    let mut parsed = Vec::with_capacity(2);
+    for line in reader.lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<Value>(&line) {
+            parsed.push((0, value));
+            if parsed.len() == 1 && leading_title_slot(&parsed).is_none() {
+                break;
+            }
+            if parsed.len() == 2 {
+                break;
+            }
+        }
+    }
+    Ok(detect_source_in_values(&parsed, None).map(|(_, source)| source))
+}
+
+fn leading_title_slot(parsed: &[(usize, Value)]) -> Option<&Map<String, Value>> {
+    parsed
+        .first()?
+        .1
+        .as_object()
+        .filter(|object| object.get("type").and_then(Value::as_str) == Some("title"))
+}
+
+fn detect_source_in_values(
+    parsed: &[(usize, Value)],
+    expected_source: Option<Source>,
+) -> Option<(usize, Source)> {
+    let title_slot = leading_title_slot(parsed);
+    let header_index = usize::from(title_slot.is_some());
+    let header_object = parsed.get(header_index)?.1.as_object()?;
+    if header_object.get("type").and_then(Value::as_str) != Some("session") {
+        return None;
+    }
+    let source = if title_slot.is_some() {
+        Source::Omp
+    } else {
+        expected_source.unwrap_or(Source::Pi)
+    };
+    if expected_source == Some(Source::Omp) && source != Source::Omp {
+        return None;
+    }
+    Some((header_index, source))
 }
 
 fn normalize_entry(value: &Value, source: Source) -> Option<LogEntry> {
@@ -710,6 +755,49 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/pi")
             .join(name)
+    }
+
+    #[test]
+    fn detects_supported_sources_from_leading_records() {
+        let pi = concat!(
+            "\n",
+            "not-json\n",
+            "{\"type\":\"session\"}\n",
+            "{\"type\":\"message\"}\n"
+        );
+        assert_eq!(
+            detect_source_reader(std::io::Cursor::new(pi)).unwrap(),
+            Some(Source::Pi)
+        );
+
+        let omp = concat!(
+            "not-json\n",
+            "{\"type\":\"title\",\"title\":\"OMP\"}\n",
+            "\n",
+            "{\"type\":\"session\"}\n"
+        );
+        assert_eq!(
+            detect_source_reader(std::io::Cursor::new(omp)).unwrap(),
+            Some(Source::Omp)
+        );
+    }
+
+    #[test]
+    fn returns_none_for_unknown_first_record() {
+        let claude = concat!("{\"type\":\"user\",\"message\":{}}\n", "not-json\n");
+        assert_eq!(
+            detect_source_reader(std::io::Cursor::new(claude)).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn detects_fixture_sources() {
+        for name in ["v1.jsonl", "v2.jsonl", "v3-branched.jsonl"] {
+            assert_eq!(detect_source(&fixture(name)).unwrap(), Some(Source::Pi));
+        }
+        let omp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/omp/v3.jsonl");
+        assert_eq!(detect_source(&omp).unwrap(), Some(Source::Omp));
     }
 
     #[test]
