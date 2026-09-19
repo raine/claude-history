@@ -7,9 +7,8 @@ use crate::claude::{
     ContentBlock, LogEntry, UserContent, UserMessage, parse_agent_progress,
 };
 use crate::error::Result;
-use crate::history::{extract_skill_preview, is_clear_metadata_message};
+use crate::history::{MessageOrdinals, Placement, extract_skill_preview, retained_user_text};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -119,8 +118,7 @@ impl AgentTranscript {
         let mut valid_records = 0usize;
         let mut summary = None;
         let mut custom_title = None;
-        let mut assistant_id_ordinals = HashMap::new();
-        let mut seen_real_user_message = false;
+        let mut ordinals = MessageOrdinals::new();
         for (line_index, line) in reader.lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
@@ -137,6 +135,7 @@ impl AgentTranscript {
                     continue;
                 }
             };
+            let placement = ordinals.place(&entry);
             match entry {
                 LogEntry::User {
                     message,
@@ -144,34 +143,16 @@ impl AgentTranscript {
                     parent_tool_use_id,
                     ..
                 } => {
-                    let Some(agent_message) = user_message_to_agent(
+                    let Placement::Message(ordinal) = placement else {
+                        continue;
+                    };
+                    messages.push(user_message_to_agent(
                         message,
                         timestamp,
                         jsonl_line,
                         parent_tool_use_id,
-                        messages.len() + 1,
-                    ) else {
-                        continue;
-                    };
-
-                    let effective_text = first_user_text(&agent_message);
-                    if effective_text
-                        .as_deref()
-                        .is_some_and(is_clear_metadata_message)
-                    {
-                        continue;
-                    }
-
-                    if !seen_real_user_message
-                        && effective_text
-                            .as_deref()
-                            .is_some_and(|text| text.trim() == "Warmup")
-                    {
-                        continue;
-                    }
-
-                    seen_real_user_message = true;
-                    messages.push(agent_message);
+                        ordinal,
+                    ));
                 }
                 LogEntry::Assistant {
                     message,
@@ -179,54 +160,41 @@ impl AgentTranscript {
                     parent_tool_use_id,
                     ..
                 } => {
-                    if !seen_real_user_message {
-                        continue;
-                    }
-                    let message_id = message.id.clone();
-                    let ordinal = message_id
-                        .as_ref()
-                        .and_then(|id| assistant_id_ordinals.get(id).copied())
-                        .unwrap_or(messages.len() + 1);
-                    let Some(agent_message) = assistant_message_to_agent(
+                    let ordinal = match placement {
+                        Placement::Message(ordinal) | Placement::Replaces(ordinal) => ordinal,
+                        Placement::Control => continue,
+                    };
+                    let agent_message = assistant_message_to_agent(
                         message,
                         timestamp,
                         jsonl_line,
                         parent_tool_use_id,
                         ordinal,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(id) = message_id {
-                        if let Some(existing_ordinal) = assistant_id_ordinals.insert(id, ordinal) {
-                            if let Some(existing) = messages
-                                .iter_mut()
-                                .find(|message| message.ordinal == existing_ordinal)
-                            {
+                    );
+                    match placement {
+                        Placement::Message(_) => messages.push(agent_message),
+                        Placement::Replaces(_) => {
+                            if let Some(existing) = messages.get_mut(ordinal.saturating_sub(1)) {
                                 *existing = agent_message;
                             }
-                        } else {
-                            messages.push(agent_message);
                         }
-                    } else {
-                        messages.push(agent_message);
+                        Placement::Control => unreachable!("assistant placement was matched above"),
                     }
                 }
                 LogEntry::PiMetadata {
                     label,
                     text,
                     timestamp,
-                    searchable,
                     ..
                 } => {
-                    if !searchable {
+                    let Placement::Message(ordinal) = placement else {
                         continue;
-                    }
+                    };
                     let rendered = if text.is_empty() {
                         format!("[{label}]")
                     } else {
                         format!("[{label}] {text}")
                     };
-                    let ordinal = messages.len() + 1;
                     messages.push(AgentMessage {
                         ordinal,
                         role: AgentMessageRole::User,
@@ -250,10 +218,9 @@ impl AgentTranscript {
                 }
                 LogEntry::Progress { data, .. } => {
                     if let Some(progress) = parse_agent_progress(&data)
-                        && let Some(agent_message) =
-                            progress_message_to_agent(progress, jsonl_line, messages.len() + 1)
+                        && let Placement::Message(ordinal) = ordinals.place_subagent(&progress)
                     {
-                        messages.push(agent_message);
+                        messages.push(progress_message_to_agent(progress, jsonl_line, ordinal));
                     }
                 }
                 LogEntry::Summary { summary: value } => {
@@ -279,9 +246,13 @@ impl AgentTranscript {
             }
         }
 
-        for (index, message) in messages.iter_mut().enumerate() {
-            message.ordinal = index + 1;
-        }
+        debug_assert_eq!(messages.len(), ordinals.count());
+        debug_assert!(
+            messages
+                .iter()
+                .enumerate()
+                .all(|(index, message)| message.ordinal == index + 1)
+        );
 
         if valid_records == 0 && !malformed_lines.is_empty() {
             return Err(AgentError::malformed_transcript(
@@ -429,13 +400,10 @@ fn user_message_to_agent(
     jsonl_line: usize,
     parent_tool_use_id: Option<String>,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let parts = match message.content {
         UserContent::String(text) => {
-            let text = extract_skill_preview(&text).unwrap_or(text);
-            if text.trim().is_empty() {
-                Vec::new()
-            } else {
+            if let Some(text) = retained_user_text(text) {
                 vec![AgentMessagePart::Text {
                     text,
                     source: source(
@@ -448,6 +416,8 @@ fn user_message_to_agent(
                         None,
                     ),
                 }]
+            } else {
+                Vec::new()
             }
         }
         UserContent::Blocks(blocks) => blocks_to_parts(
@@ -459,7 +429,7 @@ fn user_message_to_agent(
             parent_tool_use_id.clone(),
         ),
     };
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role: AgentMessageRole::User,
         timestamp,
@@ -467,7 +437,7 @@ fn user_message_to_agent(
         assistant_message_id: None,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn assistant_message_to_agent(
@@ -476,7 +446,7 @@ fn assistant_message_to_agent(
     jsonl_line: usize,
     parent_tool_use_id: Option<String>,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let assistant_message_id = message.id;
     let parts = blocks_to_parts(
         AgentMessageRole::Assistant,
@@ -486,7 +456,7 @@ fn assistant_message_to_agent(
         assistant_message_id.clone(),
         parent_tool_use_id.clone(),
     );
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role: AgentMessageRole::Assistant,
         timestamp,
@@ -494,18 +464,18 @@ fn assistant_message_to_agent(
         assistant_message_id,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn progress_message_to_agent(
     progress: AgentProgressData,
     jsonl_line: usize,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let role = match progress.message.message_type.as_str() {
         "user" => AgentMessageRole::User,
         "assistant" => AgentMessageRole::Assistant,
-        _ => return None,
+        _ => unreachable!("progress placement was checked above"),
     };
     let ProgressMessage { message, .. } = progress.message;
     let AgentContent::Blocks(blocks) = message.content;
@@ -518,7 +488,7 @@ fn progress_message_to_agent(
         None,
         parent_tool_use_id.clone(),
     );
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role,
         timestamp: None,
@@ -526,7 +496,7 @@ fn progress_message_to_agent(
         assistant_message_id: None,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn blocks_to_parts(
@@ -543,11 +513,11 @@ fn blocks_to_parts(
         .filter_map(|(part_index, block)| match block {
             ContentBlock::Text { text } => {
                 let text = if role == AgentMessageRole::User {
-                    extract_skill_preview(&text).unwrap_or(text)
+                    retained_user_text(text)
                 } else {
-                    text
-                };
-                (!text.trim().is_empty()).then(|| AgentMessagePart::Text {
+                    (!text.trim().is_empty()).then_some(text)
+                }?;
+                Some(AgentMessagePart::Text {
                     text,
                     source: source(
                         role,
@@ -624,15 +594,6 @@ pub(crate) fn agent_part_search_text(part: &AgentMessagePart) -> Option<String> 
         &sanitize_agent_text(&text),
         MAX_AGENT_SEGMENT_CHARS,
     ))
-}
-
-pub(crate) fn content_blocks_count_as_agent_message(blocks: &[ContentBlock]) -> bool {
-    blocks.iter().any(|block| match block {
-        ContentBlock::Text { text } => !text.trim().is_empty(),
-        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
-        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::Image { .. } | ContentBlock::Other => false,
-    })
 }
 
 pub(crate) const MAX_AGENT_SEGMENT_CHARS: usize = 16 * 1024;
@@ -890,17 +851,6 @@ fn source(
     }
 }
 
-fn non_empty_message(message: AgentMessage) -> Option<AgentMessage> {
-    (!message.parts.is_empty()).then_some(message)
-}
-
-fn first_user_text(message: &AgentMessage) -> Option<String> {
-    message.parts.iter().find_map(|part| match part {
-        AgentMessagePart::Text { text, .. } => Some(text.clone()),
-        _ => None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -982,6 +932,37 @@ mod tests {
     }
 
     #[test]
+    fn blank_text_next_to_tool_result_preserves_ordinal() {
+        let content = [
+            user("question"),
+            serde_json::json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "   "},
+                        {"type": "tool_result", "tool_use_id": "toolu_1"}
+                    ]
+                }
+            })
+            .to_string(),
+            assistant("answer"),
+        ]
+        .join("\n");
+
+        let transcript = parse(&content);
+        assert_eq!(transcript.messages.len(), 3);
+        assert_eq!(
+            transcript
+                .messages
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
     fn malformed_lines_are_skipped_without_consuming_ordinals() {
         let content = [
             user("first"),
@@ -1060,27 +1041,28 @@ mod tests {
                 "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "draft"}]}
             })
             .to_string(),
+            user("next"),
             serde_json::json!({
                 "type": "assistant",
                 "timestamp": "2024-01-01T00:00:02Z",
                 "message": {"id": "msg_1", "role": "assistant", "content": [{"type": "text", "text": "final"}]}
             })
             .to_string(),
-            user("next"),
         ]
         .join("\n");
 
         let transcript = parse(&content);
         assert_eq!(transcript.messages.len(), 3);
         assert_eq!(transcript.messages[1].ordinal, 2);
-        assert_eq!(transcript.messages[1].jsonl_line, 3);
+        assert_eq!(transcript.messages[1].jsonl_line, 4);
+        assert_eq!(transcript.messages[2].ordinal, 3);
         assert_eq!(
             transcript.messages[1].assistant_message_id.as_deref(),
             Some("msg_1")
         );
         assert!(matches!(
             &transcript.messages[1].parts[0],
-            AgentMessagePart::Text { text, source } if text == "final" && source.jsonl_line == 3
+            AgentMessagePart::Text { text, source } if text == "final" && source.jsonl_line == 4
         ));
     }
 

@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
 const PI_CACHE_MAGIC: [u8; 8] = *b"PIHIST01";
 const OMP_CACHE_MAGIC: [u8; 8] = *b"OMHIST01";
-const SCHEMA_VERSION: u32 = 11;
-const PI_SCHEMA_VERSION: u32 = 1;
-const OMP_SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 12;
+const PI_SCHEMA_VERSION: u32 = 2;
+const OMP_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize)]
 struct PiCache {
@@ -536,14 +536,48 @@ mod tests {
             // Write valid magic but wrong version
             let cache = ProjectCache {
                 magic: CACHE_MAGIC,
-                schema_version: SCHEMA_VERSION + 1,
+                schema_version: SCHEMA_VERSION - 1,
                 entries: HashMap::new(),
             };
             let data = bincode::serialize(&cache).unwrap();
             let _ = std::fs::write(&path, &data);
             assert!(read_project_cache(&project_name).is_none());
+            write_project_cache(&project_name, HashMap::new());
+            assert!(read_project_cache(&project_name).is_some());
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn wrong_pi_and_omp_versions_return_none() {
+        let root = tempfile::tempdir().unwrap();
+        let pi_path = pi_cache_path(root.path()).unwrap();
+        let omp_path = omp_cache_path(root.path()).unwrap();
+        for (path, magic, version) in [
+            (&pi_path, PI_CACHE_MAGIC, PI_SCHEMA_VERSION - 1),
+            (&omp_path, OMP_CACHE_MAGIC, OMP_SCHEMA_VERSION - 1),
+        ] {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let cache = PiCache {
+                magic,
+                schema_version: version,
+                entries: HashMap::new(),
+            };
+            let data = bincode::serialize(&cache).unwrap();
+            std::fs::write(path, data).unwrap();
+        }
+
+        assert!(read_pi_cache(root.path()).is_none());
+        assert!(read_omp_cache(root.path()).is_none());
+        write_pi_cache(root.path(), HashMap::new());
+        write_omp_cache(root.path(), HashMap::new());
+        assert!(read_pi_cache(root.path()).is_some());
+        assert!(read_omp_cache(root.path()).is_some());
+
+        let _ = std::fs::remove_file(pi_path);
+        let _ = std::fs::remove_file(omp_path);
     }
 
     #[test]

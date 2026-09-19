@@ -3,11 +3,12 @@
 //! This module handles parsing Claude conversation JSONL files and extracting
 //! conversation metadata like preview text, message counts, and working directory.
 
+#[cfg(test)]
+use super::messages::is_clear_metadata_message;
+use super::messages::{MessageOrdinals, Placement, extract_skill_preview};
 use super::{Conversation, ParseError};
 use crate::agent::refs::MessageRange;
-use crate::agent::transcript::{
-    AgentMessageRole, agent_search_text_from_blocks, content_blocks_count_as_agent_message,
-};
+use crate::agent::transcript::{AgentMessageRole, agent_search_text_from_blocks};
 use crate::claude::{
     AgentContent, LogEntry, TokenUsage, extract_search_text_from_assistant,
     extract_search_text_from_user, extract_text_from_assistant, extract_text_from_user,
@@ -156,17 +157,14 @@ pub fn process_conversation_reader<R: BufRead>(
     let mut semantic_turn_ranges = Vec::new();
     let mut preview_parts = Vec::new();
     let mut user_messages = Vec::new();
-    let mut seen_real_user_message = false;
-    let mut skip_next_assistant = false;
     let mut extracted_cwd: Option<PathBuf> = None;
-    let mut message_count: usize = 0;
+    let mut ordinals = MessageOrdinals::new();
     let mut parse_errors: Vec<ParseError> = Vec::new();
     let mut extracted_summary: Option<String> = None;
     let mut extracted_custom_title: Option<String> = None;
     let mut extracted_model: Option<String> = None;
     // Track token usage per message ID to avoid double-counting streaming entries
     let mut token_usage_by_msg: HashMap<String, TokenUsage> = HashMap::new();
-    let mut assistant_id_ordinals: HashMap<String, usize> = HashMap::new();
     let mut assistant_id_semantic_indices: HashMap<String, usize> = HashMap::new();
     let mut assistant_id_preview_indices: HashMap<String, usize> = HashMap::new();
     let mut anonymous_token_count: u64 = 0;
@@ -196,7 +194,7 @@ pub fn process_conversation_reader<R: BufRead>(
 
         match serde_json::from_str::<LogEntry>(&line) {
             Ok(entry) => {
-                // Extract text content
+                let placement = ordinals.place(&entry);
                 match entry {
                     LogEntry::User {
                         message,
@@ -231,64 +229,34 @@ pub fn process_conversation_reader<R: BufRead>(
                         let preview_text = extract_text_from_user(&message);
                         let search_text = extract_search_text_from_user(&message);
 
-                        if preview_text.is_empty() && search_text.is_empty() {
-                            continue;
-                        }
-
                         if !preview_text.is_empty() {
                             user_messages.push(preview_text.clone());
                         }
+                        if !search_text.is_empty() {
+                            all_parts.push(search_text);
+                        }
 
+                        let Placement::Message(ordinal) = placement else {
+                            continue;
+                        };
                         // Check for skill invocations first - extract clean preview
                         // (e.g. "/consult how to do X?" from command XML tags)
                         let semantic_input = preview_text.clone();
                         let effective_preview =
-                            if let Some(skill_preview) = extract_skill_preview(&preview_text) {
-                                skill_preview
-                            } else if !preview_text.is_empty()
-                                && is_clear_metadata_message(&preview_text)
+                            extract_skill_preview(&preview_text).unwrap_or(preview_text);
+                        if !effective_preview.is_empty() {
+                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &semantic_input)
                             {
-                                if !search_text.is_empty() {
-                                    all_parts.push(search_text);
-                                }
-                                continue;
-                            } else {
-                                preview_text
-                            };
-
-                        let has_search_text = !search_text.is_empty();
-                        if has_search_text {
-                            all_parts.push(search_text);
-                        }
-
-                        // Check if this is a warmup message (first user message is "Warmup")
-                        let is_warmup =
-                            !seen_real_user_message && effective_preview.trim() == "Warmup";
-                        if is_warmup {
-                            skip_next_assistant = true;
-                        } else if !effective_preview.is_empty() || has_search_text {
-                            message_count += 1;
-                            let message_range = MessageRange::single(message_count);
-                            if !effective_preview.is_empty() {
-                                if let Some(turn) =
-                                    filter_turn(SemanticTurnRole::User, &semantic_input)
-                                {
-                                    semantic_turns.push(turn);
-                                    semantic_turn_ranges.push(message_range);
-                                }
-                                preview_parts.push(effective_preview);
-                                seen_real_user_message = true;
+                                semantic_turns.push(turn);
+                                semantic_turn_ranges.push(MessageRange::single(ordinal));
                             }
+                            preview_parts.push(effective_preview);
                         }
                     }
                     LogEntry::Assistant {
                         message, timestamp, ..
                     } => {
                         let assistant_message_id = message.id.clone();
-                        let canonical_ordinal = assistant_message_id
-                            .as_ref()
-                            .and_then(|id| assistant_id_ordinals.get(id).copied())
-                            .unwrap_or(message_count + 1);
                         // Track timestamps for conversation duration
                         if let Some(ref ts_str) = timestamp
                             && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str)
@@ -328,16 +296,10 @@ pub fn process_conversation_reader<R: BufRead>(
                             all_parts.push(search_text);
                         }
 
-                        // Skip this assistant message if it follows a warmup user message
-                        if skip_next_assistant {
-                            skip_next_assistant = false;
-                        } else if seen_real_user_message
-                            && content_blocks_count_as_agent_message(&message.content)
+                        if let Placement::Message(ordinal) | Placement::Replaces(ordinal) =
+                            placement
                         {
-                            if canonical_ordinal == message_count + 1 {
-                                message_count += 1;
-                            }
-                            let message_range = MessageRange::single(canonical_ordinal);
+                            let message_range = MessageRange::single(ordinal);
                             let semantic_turn =
                                 filter_turn(SemanticTurnRole::Assistant, &preview_text);
                             if let Some(id) = assistant_message_id.as_ref() {
@@ -368,7 +330,6 @@ pub fn process_conversation_reader<R: BufRead>(
                                         preview_parts.push(preview_text);
                                     }
                                 }
-                                assistant_id_ordinals.insert(id.clone(), canonical_ordinal);
                             } else if !preview_text.is_empty() {
                                 if let Some(turn) = semantic_turn {
                                     semantic_turns.push(turn);
@@ -400,7 +361,7 @@ pub fn process_conversation_reader<R: BufRead>(
                     LogEntry::PiMetadata {
                         label,
                         text,
-                        searchable,
+                        searchable: _,
                         usage,
                         ..
                     } => {
@@ -413,34 +374,31 @@ pub fn process_conversation_reader<R: BufRead>(
                         if label == "Model" && !text.is_empty() {
                             extracted_model = Some(text.clone());
                         }
-                        if searchable && !text.is_empty() {
+                        if let Placement::Message(ordinal) = placement
+                            && !text.is_empty()
+                        {
                             all_parts.push(text.clone());
-                            message_count += 1;
                             if let Some(turn) = filter_turn(SemanticTurnRole::User, &text) {
                                 semantic_turns.push(turn);
-                                semantic_turn_ranges.push(MessageRange::single(message_count));
+                                semantic_turn_ranges.push(MessageRange::single(ordinal));
                             }
                         }
                     }
                     LogEntry::Progress { data, .. } => {
-                        if let Some(progress) = parse_agent_progress(&data)
-                            && matches!(
-                                progress.message.message_type.as_str(),
-                                "user" | "assistant"
-                            )
-                        {
-                            let AgentContent::Blocks(blocks) = progress.message.message.content;
-                            if content_blocks_count_as_agent_message(&blocks) {
-                                message_count += 1;
-                            }
-                            let role = match progress.message.message_type.as_str() {
-                                "user" => AgentMessageRole::User,
-                                "assistant" => AgentMessageRole::Assistant,
-                                _ => unreachable!("progress message type was checked above"),
-                            };
-                            let agent_search_text = agent_search_text_from_blocks(role, &blocks);
-                            if !agent_search_text.is_empty() {
-                                agent_search_parts.push(agent_search_text);
+                        if let Some(progress) = parse_agent_progress(&data) {
+                            let progress_placement = ordinals.place_subagent(&progress);
+                            if let Placement::Message(_) = progress_placement {
+                                let AgentContent::Blocks(blocks) = progress.message.message.content;
+                                let role = match progress.message.message_type.as_str() {
+                                    "user" => AgentMessageRole::User,
+                                    "assistant" => AgentMessageRole::Assistant,
+                                    _ => unreachable!("progress placement was checked above"),
+                                };
+                                let agent_search_text =
+                                    agent_search_text_from_blocks(role, &blocks);
+                                if !agent_search_text.is_empty() {
+                                    agent_search_parts.push(agent_search_text);
+                                }
                             }
                         }
                     }
@@ -597,7 +555,7 @@ pub fn process_conversation_reader<R: BufRead>(
         project_name: None,
         project_path: None,
         cwd: extracted_cwd,
-        message_count,
+        message_count: ordinals.count(),
         parse_errors,
         summary: extracted_summary,
         custom_title: extracted_custom_title,
@@ -605,56 +563,6 @@ pub fn process_conversation_reader<R: BufRead>(
         total_tokens,
         duration_minutes,
     }))
-}
-
-/// Detects metadata emitted by the /clear command wrapper messages and
-/// other system-injected boilerplate that should not appear in previews.
-pub(crate) fn is_clear_metadata_message(message: &str) -> bool {
-    let trimmed = message.trim();
-
-    trimmed.is_empty()
-        || trimmed.starts_with(
-            "Caveat: The messages below were generated by the user while running local commands.",
-        )
-        || trimmed.contains("<local-command-caveat>")
-        || trimmed.contains("<command-name>/clear</command-name>")
-        || trimmed.contains("<command-message>clear</command-message>")
-        || (trimmed.contains("<command-name>") && !trimmed.contains("<command-name>/"))
-        || trimmed.contains("<local-command-stdout>")
-        || trimmed.starts_with("Base directory for this skill:")
-}
-
-/// Extract a clean preview from a skill invocation message (e.g. "/consult how to do X?").
-/// Returns None if the message is not a skill invocation or is a /clear command.
-pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
-    let trimmed = message.trim();
-
-    let start = trimmed.find("<command-name>")?;
-    let end = trimmed.find("</command-name>")?;
-    let content_start = start + "<command-name>".len();
-    if content_start >= end {
-        return None;
-    }
-
-    let command_name = &trimmed[content_start..end];
-    if !command_name.starts_with('/') || command_name == "/clear" {
-        return None;
-    }
-
-    // Extract command args if present
-    if let Some(args_start) = trimmed.find("<command-args>")
-        && let Some(args_end) = trimmed.find("</command-args>")
-    {
-        let args_content_start = args_start + "<command-args>".len();
-        if args_content_start < args_end {
-            let args = trimmed[args_content_start..args_end].trim();
-            if !args.is_empty() {
-                return Some(format!("{} {}", command_name, args));
-            }
-        }
-    }
-
-    Some(command_name.to_string())
 }
 
 pub(crate) fn is_clear_only_conversation(user_messages: &[String]) -> bool {
@@ -706,6 +614,7 @@ pub(crate) fn normalize_whitespace(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::transcript::AgentTranscript;
     use std::io::Cursor;
 
     /// Helper to create a user message JSON line
@@ -2050,6 +1959,128 @@ mod tests {
         assert_eq!(
             conv.semantic_turn_ranges,
             vec![MessageRange::single(1), MessageRange::single(4)]
+        );
+    }
+
+    #[test]
+    fn leading_tool_result_user_opens_agent_conversation() {
+        let content = [
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1"}]}}"#.to_string(),
+            assistant_msg("answer"),
+        ]
+        .join("\n");
+
+        let conversation = parse_jsonl(&content).unwrap().unwrap();
+        assert_eq!(conversation.message_count, 2);
+        assert_eq!(conversation.preview_first, "answer");
+        assert_eq!(
+            conversation.semantic_turn_ranges,
+            vec![MessageRange::single(2)]
+        );
+
+        let transcript =
+            AgentTranscript::from_reader(PathBuf::from("test.jsonl"), Cursor::new(content))
+                .unwrap();
+        assert_eq!(transcript.messages.len(), 2);
+        assert_eq!(transcript.messages[1].ordinal, 2);
+    }
+
+    #[test]
+    fn warmup_does_not_skip_following_real_assistant() {
+        let content = [
+            user_msg("Warmup", None),
+            user_msg("question", None),
+            assistant_msg("answer"),
+        ]
+        .join("\n");
+
+        let conversation = parse_jsonl(&content).unwrap().unwrap();
+        assert_eq!(conversation.message_count, 2);
+        assert_eq!(
+            conversation.semantic_turn_ranges,
+            vec![MessageRange::single(1), MessageRange::single(2),]
+        );
+    }
+
+    #[test]
+    fn empty_searchable_metadata_occupies_an_ordinal() {
+        let content = [
+            r#"{"type":"pi-metadata","label":"Hook","text":"","searchable":true}"#.to_string(),
+            user_msg("question", None),
+            assistant_msg("answer"),
+        ]
+        .join("\n");
+
+        let conversation = parse_jsonl(&content).unwrap().unwrap();
+        assert_eq!(conversation.message_count, 3);
+        assert_eq!(
+            conversation.semantic_turn_ranges,
+            vec![MessageRange::single(2), MessageRange::single(3),]
+        );
+
+        let transcript =
+            AgentTranscript::from_reader(PathBuf::from("test.jsonl"), Cursor::new(content))
+                .unwrap();
+        assert_eq!(
+            transcript
+                .messages
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
+    fn parser_and_transcript_share_ordinals_for_mixed_records() {
+        let content = [
+            r#"{"type":"user","message":{"role":"user","content":"Warmup"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"warm","content":[{"type":"text","text":"ready"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"<command-name>/clear</command-name>"}}"#,
+            r#"{"type":"user","message":{"role":"user","content":"question"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"a1","content":[{"type":"text","text":"partial"}]}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","id":"a1","content":[{"type":"text","text":"final"}]}}"#,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#,
+            r#"{"type":"progress","data":{"type":"agent_progress","agentId":"sub","message":{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"subagent"}]}}}}"#,
+            r#"{"type":"progress","data":{"type":"agent_progress","agentId":"sub","message":{"type":"assistant","message":{"role":"assistant","content":[{"type":"image","source":{}}]}}}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"answer"}]}}"#,
+        ]
+        .join("\n");
+
+        let conversation = parse_jsonl(&content).unwrap().unwrap();
+        let transcript =
+            AgentTranscript::from_reader(PathBuf::from("parity.jsonl"), Cursor::new(content))
+                .unwrap();
+
+        assert_eq!(conversation.message_count, 5);
+        assert_eq!(transcript.messages.len(), 5);
+        assert_eq!(
+            transcript
+                .messages
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5]
+        );
+        assert_eq!(transcript.messages[1].jsonl_line, 6);
+        assert_eq!(transcript.messages[2].role, AgentMessageRole::User);
+        assert_eq!(
+            transcript.messages[3].parent_tool_use_id.as_deref(),
+            Some("sub")
+        );
+        assert_eq!(
+            conversation.semantic_turn_ranges,
+            vec![
+                MessageRange::single(1),
+                MessageRange::single(2),
+                MessageRange::single(5)
+            ]
+        );
+        assert!(
+            conversation
+                .semantic_turn_ranges
+                .iter()
+                .all(|range| range.end <= conversation.message_count)
         );
     }
 
