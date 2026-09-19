@@ -1,5 +1,6 @@
 use crate::agent::diagnostic::{AgentWarning, format_warning_records};
-use crate::agent::refs::{AgentConversationKey, MessageRange, ResolvedConversation};
+use crate::agent::records::{Cut, Response};
+use crate::agent::refs::{AgentConversationKey, ResolvedConversation};
 use crate::agent::retrieval::{
     AgentHitRenderOptions, AgentHitSource, AgentRetrievalOptions, AgentSearchHit as RetrievalHit,
     AgentTranscriptSearchTarget, format_evidence_preview, read_range_for_focus,
@@ -9,9 +10,11 @@ use crate::agent::sanitize::sanitize_agent_text;
 use crate::agent::transcript::AgentTranscript;
 use crate::error::{AppError, Result};
 use crate::history::Conversation;
-use crate::search::mode::{SearchMode, SearchModeResolution, resolve_search_mode};
+use crate::history::MessageRange;
+use crate::search::mode::SearchMode;
 use crate::search::query::ParsedQuery;
 use crate::semantic::types::{SemanticChunkSource, SemanticHit, SemanticScoreBreakdown};
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -31,13 +34,13 @@ pub enum AgentSearchScope {
     Local,
 }
 
+/// A global search with its settings already resolved: `mode` is the
+/// [`effective_agent_mode`] for `query`, so nothing below re-derives either.
 #[derive(Clone, Debug)]
 pub struct AgentSearchRequest {
-    pub query: String,
+    pub query: ParsedQuery,
+    pub mode: SearchMode,
     pub top: usize,
-    pub cli_mode: Option<SearchMode>,
-    pub config_mode: Option<SearchMode>,
-    pub tui_semantic_search: Option<bool>,
     pub flat: bool,
     pub hits_per_conversation: usize,
     pub retrieval_hits_per_conversation: Option<usize>,
@@ -47,11 +50,9 @@ pub struct AgentSearchRequest {
 
 #[derive(Clone, Debug)]
 pub struct AgentWithinRequest {
-    pub query: String,
+    pub query: ParsedQuery,
+    pub mode: SearchMode,
     pub top: usize,
-    pub cli_mode: Option<SearchMode>,
-    pub config_mode: Option<SearchMode>,
-    pub tui_semantic_search: Option<bool>,
     pub budget: Option<usize>,
 }
 
@@ -181,21 +182,13 @@ pub fn attach_transcript_metadata(
     }
 }
 
-pub fn effective_agent_mode(
-    query: &str,
-    cli_mode: Option<SearchMode>,
-    config_mode: Option<SearchMode>,
-    tui_semantic_search: Option<bool>,
-) -> SearchMode {
-    let parsed = ParsedQuery::parse(query);
-    if parsed.is_quoted_only() {
+/// The mode a query actually runs in: a quoted-only query is always exact,
+/// otherwise the mode resolved from CLI and config applies.
+pub fn effective_agent_mode(query: &ParsedQuery, resolved: SearchMode) -> SearchMode {
+    if query.is_quoted_only() {
         SearchMode::Exact
     } else {
-        resolve_search_mode(SearchModeResolution {
-            cli_mode,
-            config_mode,
-            tui_semantic_search,
-        })
+        resolved
     }
 }
 
@@ -222,41 +215,51 @@ pub fn format_agent_output_with_warnings(
             warning_records.len()
         )
     };
-    let mut rendered = if output.protocol == AgentProtocolKind::Search && !output.flat {
-        format!(
-            "protocol {protocol} mode={} cut=none chars={} policy=per-hit groups={} hits={}{}\n",
-            mode_atom(output.mode),
-            budget_atom(output.budget),
-            output.groups.len(),
-            hits.len(),
-            warning_suffix
-        )
+    let grouped = output.protocol == AgentProtocolKind::Search && !output.flat;
+    let groups_atom = if grouped {
+        format!(" groups={}", output.groups.len())
     } else {
+        String::new()
+    };
+    let header = |cut: Option<&Cut>| {
+        let (cut_atom, omitted) = match cut {
+            None => ("none", String::new()),
+            Some(cut) => ("tail", format!(" omitted-lines={}", cut.omitted_lines)),
+        };
         format!(
-            "protocol {protocol} mode={} cut=none chars={} policy=per-hit hits={}{}\n",
+            "protocol {protocol} mode={} cut={cut_atom} chars={} policy=per-hit{groups_atom} hits={}{warning_suffix}{omitted}\n",
             mode_atom(output.mode),
             budget_atom(output.budget),
             hits.len(),
-            warning_suffix
         )
     };
-    rendered.push_str(&format!(
+    let recovery = if let Some(target) = &output.target {
+        format!(
+            "continue within ref={} action=narrow-query-or-increase-budget\n",
+            crate::agent::protocol::escape_atom(&target.conversation_ref)
+        )
+    } else {
+        "continue search action=narrow-scope-or-increase-budget\n".to_string()
+    };
+    let cut_footer = |_: &Cut| recovery.clone();
+    let mut units = Vec::new();
+    units.push(format!(
         "query text={} hits={}\n",
         crate::agent::protocol::escape_atom(&output.query),
         hits.len()
     ));
     if let Some(target) = &output.target {
-        rendered.push_str(&format!(
+        units.push(format!(
             "conversation project={} uuid={} ref={}\n",
             crate::agent::protocol::escape_atom(&target.project_id),
             crate::agent::protocol::escape_atom(&target.conversation_uuid),
             crate::agent::protocol::escape_atom(&target.conversation_ref)
         ));
     }
-    if output.protocol == AgentProtocolKind::Search && !output.flat {
-        rendered.push_str(&format!("groups count={}\n", output.groups.len()));
+    if grouped {
+        units.push(format!("groups count={}\n", output.groups.len()));
         for (index, group) in output.groups.iter().enumerate() {
-            rendered.push_str(&format!(
+            units.push(format!(
                 "conversation rank={} project={} uuid={} ref={} score={:.6}{} hits={} total={} | {}\n",
                 index + 1,
                 crate::agent::protocol::escape_atom(&group.project_id),
@@ -268,87 +271,37 @@ pub fn format_agent_output_with_warnings(
                 group.total_hits,
                 protocol_snippet(&group.title, AGENT_SEARCH_TITLE_CHARS)
             ));
-            for hit in &group.hits {
-                push_hit_lines(&mut rendered, hit);
-            }
+            units.extend(group.hits.iter().map(hit_unit));
         }
-        for warning in &warning_records {
-            rendered.push_str(warning);
-        }
-        return bound_agent_output(output, rendered, output.budget);
-    }
-
-    for hit in hits {
-        rendered.push_str(&format!(
-            "title project={} uuid={} ref={} | {}\n",
-            crate::agent::protocol::escape_atom(&hit.project_id),
-            crate::agent::protocol::escape_atom(&hit.conversation_uuid),
-            crate::agent::protocol::escape_atom(&hit.conversation_ref),
-            protocol_snippet(&hit.title, AGENT_SEARCH_TITLE_CHARS)
-        ));
-        push_hit_lines(&mut rendered, hit);
-    }
-    for warning in &warning_records {
-        rendered.push_str(warning);
-    }
-    bound_agent_output(output, rendered, output.budget)
-}
-
-fn bound_agent_output(
-    output: &AgentSearchOutput,
-    rendered: String,
-    budget: Option<usize>,
-) -> String {
-    let Some(budget) = budget else {
-        return rendered;
-    };
-    if rendered.chars().count() <= budget {
-        return rendered;
-    }
-
-    let lines = rendered.lines().collect::<Vec<_>>();
-    let mut records = Vec::new();
-    let mut index = 1;
-    while index < lines.len() {
-        let end = if lines[index].starts_with("hit ") && index + 1 < lines.len() {
-            index + 2
-        } else {
-            index + 1
-        };
-        records.push(lines[index..end].join("\n") + "\n");
-        index = end;
-    }
-    let recovery = if let Some(target) = &output.target {
-        format!(
-            "continue within ref={} action=narrow-query-or-increase-budget\n",
-            crate::agent::protocol::escape_atom(&target.conversation_ref)
-        )
     } else {
-        "continue search action=narrow-scope-or-increase-budget\n".to_string()
-    };
-    while !records.is_empty() {
-        let omitted = lines.len().saturating_sub(
-            1 + records
-                .iter()
-                .map(|record| record.lines().count())
-                .sum::<usize>(),
-        );
-        let header =
-            lines[0].replace("cut=none", "cut=tail") + &format!(" omitted-lines={omitted}\n");
-        let candidate = header + &records.concat() + &recovery;
-        if candidate.chars().count() <= budget {
-            return candidate;
+        for hit in &hits {
+            units.push(format!(
+                "title project={} uuid={} ref={} | {}\n",
+                crate::agent::protocol::escape_atom(&hit.project_id),
+                crate::agent::protocol::escape_atom(&hit.conversation_uuid),
+                crate::agent::protocol::escape_atom(&hit.conversation_ref),
+                protocol_snippet(&hit.title, AGENT_SEARCH_TITLE_CHARS)
+            ));
+            units.push(hit_unit(hit));
         }
-        records.pop();
     }
-    let header = lines[0].replace("cut=none", "cut=tail")
-        + &format!(" omitted-lines={}\n", lines.len().saturating_sub(1));
-    let candidate = header + &recovery;
-    if candidate.chars().count() <= budget {
-        candidate
-    } else {
-        candidate.chars().take(budget).collect()
+    units.extend(warning_records.iter().cloned());
+    let all_cut = Cut {
+        kept_units: 0,
+        omitted_units: units.len(),
+        omitted_lines: units.iter().map(|unit| unit.lines().count()).sum(),
+    };
+    let fallback = || header(Some(&all_cut)) + &recovery;
+
+    Response {
+        budget: output.budget,
+        header: &header,
+        units,
+        whole_trailer: String::new(),
+        cut_footer: &cut_footer,
+        fallback: &fallback,
     }
+    .render()
 }
 
 fn budget_atom(budget: Option<usize>) -> String {
@@ -378,7 +331,9 @@ fn score_breakdown_atoms(breakdown: Option<SemanticScoreBreakdown>) -> String {
     })
 }
 
-fn push_hit_lines(rendered: &mut String, hit: &AgentOutputHit) {
+/// A hit and its read recipe: one unit, never split by truncation.
+fn hit_unit(hit: &AgentOutputHit) -> String {
+    let mut rendered = String::new();
     rendered.push_str(&format!(
         "hit project={} uuid={} ref={} anchors={} source={} score={:.6}{} focus=m{}..m{} | {}\n",
         crate::agent::protocol::escape_atom(&hit.project_id),
@@ -401,6 +356,7 @@ fn push_hit_lines(rendered: &mut String, hit: &AgentOutputHit) {
         hit.focus_range.end,
         render_option_atoms(hit.render_options)
     ));
+    rendered
 }
 
 fn protocol_snippet(text: &str, limit: usize) -> String {
@@ -425,21 +381,10 @@ pub fn run_within_search(
     transcript: &AgentTranscript,
     semantic_hits: &[SemanticHit],
 ) -> AgentSearchOutput {
-    let mode = effective_agent_mode(
-        &request.query,
-        request.cli_mode,
-        request.config_mode,
-        request.tui_semantic_search,
-    );
-    let hits = match mode {
-        SearchMode::Lexical | SearchMode::Exact => retrieval_hits(
-            &request.query,
-            request.top,
-            conversation,
-            resolved,
-            transcript,
-            mode,
-        ),
+    let hits = match request.mode {
+        SearchMode::Lexical | SearchMode::Exact => {
+            return run_within_lexical_search(request, conversation, resolved, transcript);
+        }
         SearchMode::Semantic => semantic_output_hits(
             semantic_hits,
             request.top,
@@ -473,12 +418,41 @@ pub fn run_within_search(
             )
         }
     };
+    within_output(request, hits, resolved, transcript)
+}
 
+/// Lexical (or exact) evidence for a within request regardless of its mode.
+/// The hybrid path falls back to this when semantic search is unavailable,
+/// so the output keeps reporting `request.mode`.
+pub fn run_within_lexical_search(
+    request: &AgentWithinRequest,
+    conversation: &Conversation,
+    resolved: &ResolvedConversation,
+    transcript: &AgentTranscript,
+) -> AgentSearchOutput {
+    let retrieval_mode = lexical_retrieval_mode(request.mode);
+    let hits = retrieval_hits(
+        &retrieval_query(&request.query, retrieval_mode),
+        request.top,
+        conversation,
+        resolved,
+        transcript,
+        retrieval_mode,
+    );
+    within_output(request, hits, resolved, transcript)
+}
+
+fn within_output(
+    request: &AgentWithinRequest,
+    hits: Vec<AgentOutputHit>,
+    resolved: &ResolvedConversation,
+    transcript: &AgentTranscript,
+) -> AgentSearchOutput {
     let mut output = AgentSearchOutput {
         protocol: AgentProtocolKind::Within,
         target: None,
-        query: request.query.clone(),
-        mode,
+        query: request.query.raw().to_string(),
+        mode: request.mode,
         hits,
         groups: Vec::new(),
         flat: true,
@@ -518,16 +492,8 @@ pub fn run_global_lexical_search_reporting(
     load_transcript: impl Fn(&AgentConversationKey) -> Result<AgentTranscript>,
     mut report_error: impl FnMut(&AgentConversationKey, &AppError),
 ) -> Result<AgentSearchOutput> {
-    let mode = effective_agent_mode(
-        &request.query,
-        request.cli_mode,
-        request.config_mode,
-        request.tui_semantic_search,
-    );
-    let retrieval_mode = match mode {
-        SearchMode::Exact => SearchMode::Exact,
-        _ => SearchMode::Lexical,
-    };
+    let retrieval_mode = lexical_retrieval_mode(request.mode);
+    let retrieval_query = retrieval_query(&request.query, retrieval_mode);
     let limit = shortlist_limit(request.top).min(ranked_indices.len());
     let resolved_by_path = crate::agent::refs::resolved_conversations_for_keys(keys)
         .into_iter()
@@ -552,7 +518,7 @@ pub fn run_global_lexical_search_reporting(
         };
         transcripts_loaded += 1;
         hits.extend(retrieval_hits(
-            &request.query,
+            &retrieval_query,
             request
                 .retrieval_hits_per_conversation
                 .unwrap_or_else(|| lexical_per_conversation_candidate_depth(request)),
@@ -582,8 +548,8 @@ pub fn run_global_lexical_search_reporting(
     Ok(AgentSearchOutput {
         protocol: AgentProtocolKind::Search,
         target: None,
-        query: request.query.clone(),
-        mode,
+        query: request.query.raw().to_string(),
+        mode: request.mode,
         hits,
         groups,
         flat: request.flat,
@@ -600,12 +566,6 @@ pub fn run_global_semantic_search(
     inputs: &[AgentConversationInput<'_>],
     semantic_hits: &[SemanticHit],
 ) -> AgentSearchOutput {
-    let mode = effective_agent_mode(
-        &request.query,
-        request.cli_mode,
-        request.config_mode,
-        request.tui_semantic_search,
-    );
     let semantic_order = semantic_conversation_order(semantic_hits, inputs);
     let mut hits = semantic_output_hit_candidates(semantic_hits, inputs);
     sort_output_hits(&mut hits);
@@ -615,8 +575,8 @@ pub fn run_global_semantic_search(
     AgentSearchOutput {
         protocol: AgentProtocolKind::Search,
         target: None,
-        query: request.query.clone(),
-        mode,
+        query: request.query.raw().to_string(),
+        mode: request.mode,
         hits,
         groups,
         flat: request.flat,
@@ -651,7 +611,7 @@ pub fn run_global_hybrid_search(
     AgentSearchOutput {
         protocol: AgentProtocolKind::Search,
         target: None,
-        query: request.query.clone(),
+        query: request.query.raw().to_string(),
         mode: SearchMode::Hybrid,
         hits,
         groups,
@@ -721,26 +681,40 @@ fn lexical_per_conversation_candidate_depth(request: &AgentSearchRequest) -> usi
     .max(1)
 }
 
+/// How transcript retrieval runs for a search mode: exact stays exact, every
+/// other mode retrieves lexically.
+fn lexical_retrieval_mode(mode: SearchMode) -> SearchMode {
+    match mode {
+        SearchMode::Exact => SearchMode::Exact,
+        _ => SearchMode::Lexical,
+    }
+}
+
+/// The query retrieval matches: exact mode treats an unquoted query as one
+/// phrase; quoted-only queries and lexical retrieval use the query as parsed.
+fn retrieval_query(query: &ParsedQuery, retrieval_mode: SearchMode) -> Cow<'_, ParsedQuery> {
+    if retrieval_mode == SearchMode::Exact && !query.is_quoted_only() {
+        Cow::Owned(ParsedQuery::exact_phrase(query.raw()))
+    } else {
+        Cow::Borrowed(query)
+    }
+}
+
 fn retrieval_hits(
-    query: &str,
+    query: &ParsedQuery,
     limit: usize,
     conversation: &Conversation,
     resolved: &ResolvedConversation,
     transcript: &AgentTranscript,
     mode: SearchMode,
 ) -> Vec<AgentOutputHit> {
-    let search_query = if mode == SearchMode::Exact && !ParsedQuery::parse(query).is_quoted_only() {
-        quote_query(query)
-    } else {
-        query.to_string()
-    };
     retrieve_agent_hits_for_target(
         AgentTranscriptSearchTarget {
             transcript,
             conversation_ref: Some(&resolved.reference.canonical()),
             timestamp: Some(conversation.timestamp),
         },
-        &search_query,
+        query,
         AgentRetrievalOptions {
             limit,
             ..AgentRetrievalOptions::default()
@@ -768,7 +742,7 @@ fn retrieval_output_hit(
         score: hit.score,
         evidence_score: hit.score,
         semantic_score_breakdown: None,
-        source: if mode == SearchMode::Exact || ParsedQuery::parse(&hit.preview).is_quoted_only() {
+        source: if mode == SearchMode::Exact {
             AgentHitKind::Exact
         } else {
             AgentHitKind::Lexical
@@ -1243,10 +1217,6 @@ fn source_rank(source: AgentHitKind) -> u8 {
     }
 }
 
-fn quote_query(query: &str) -> String {
-    format!("\"{}\"", query.replace('"', ""))
-}
-
 fn title_for_conversation(conversation: &Conversation) -> String {
     conversation
         .custom_title
@@ -1327,6 +1297,7 @@ mod tests {
             semantic_turns: vec![title.to_string()],
             semantic_turn_ranges: vec![MessageRange::single(1)],
             search_text_lower: title.to_string(),
+            dialogue_text_lower: title.to_string(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
@@ -1349,23 +1320,23 @@ mod tests {
     }
 
     fn request(query: &str, mode: Option<SearchMode>) -> AgentWithinRequest {
+        let query = ParsedQuery::parse(query);
+        let mode = effective_agent_mode(&query, mode.unwrap_or_default());
         AgentWithinRequest {
-            query: query.to_string(),
+            query,
+            mode,
             top: 10,
-            cli_mode: mode,
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         }
     }
 
     fn global_request(query: &str, mode: SearchMode, top: usize, flat: bool) -> AgentSearchRequest {
+        let query = ParsedQuery::parse(query);
+        let mode = effective_agent_mode(&query, mode);
         AgentSearchRequest {
-            query: query.to_string(),
+            query,
+            mode,
             top,
-            cli_mode: Some(mode),
-            config_mode: None,
-            tui_semantic_search: None,
             flat,
             hits_per_conversation: 2,
             retrieval_hits_per_conversation: None,
@@ -1679,13 +1650,90 @@ mod tests {
     fn quoted_query_forces_exact_mode() {
         assert_eq!(
             effective_agent_mode(
-                "\"literal needle\"",
-                Some(SearchMode::Semantic),
-                Some(SearchMode::Hybrid),
-                Some(true),
+                &ParsedQuery::parse("\"literal needle\""),
+                SearchMode::Semantic
             ),
             SearchMode::Exact
         );
+        assert_eq!(
+            effective_agent_mode(&ParsedQuery::parse("literal needle"), SearchMode::Semantic),
+            SearchMode::Semantic
+        );
+    }
+
+    #[test]
+    fn plain_query_hits_stay_lexical_when_preview_is_a_quoted_string() {
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "quoted title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![
+            message(1, AgentMessageRole::User, "\"quoted preview only\""),
+            message(2, AgentMessageRole::Assistant, "quoted preview, unquoted"),
+        ]);
+
+        let output = run_within_search(
+            &request("quoted preview", Some(SearchMode::Lexical)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+
+        assert_eq!(output.hits.len(), 2);
+        assert!(
+            output
+                .hits
+                .iter()
+                .all(|hit| hit.source == AgentHitKind::Lexical),
+            "{:?}",
+            output.hits.iter().map(|hit| hit.source).collect::<Vec<_>>()
+        );
+        assert!(output.hits.iter().any(|hit| hit.preview.starts_with('"')));
+        assert!(!format_agent_output(&output).contains("source=exact"));
+    }
+
+    #[test]
+    fn within_lexical_fallback_keeps_hybrid_mode_with_lexical_hits() {
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![
+            message(1, AgentMessageRole::User, "cache warming answer"),
+            message(2, AgentMessageRole::Assistant, "unrelated"),
+        ]);
+
+        let output = run_within_lexical_search(
+            &request("cache warming", Some(SearchMode::Hybrid)),
+            &conv,
+            &resolved,
+            &transcript,
+        );
+
+        assert_eq!(output.mode, SearchMode::Hybrid);
+        assert_eq!(output.hits.len(), 1);
+        assert_eq!(output.hits[0].source, AgentHitKind::Lexical);
+        assert!(format_agent_output(&output).starts_with("protocol agent-within mode=hybrid "));
+    }
+
+    #[test]
+    fn exact_mode_hits_are_exact_for_an_unquoted_query() {
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![
+            message(1, AgentMessageRole::User, "cache warming answer"),
+            message(2, AgentMessageRole::Assistant, "warming the cache"),
+        ]);
+
+        let output = run_within_search(
+            &request("cache warming", Some(SearchMode::Exact)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+
+        assert_eq!(output.query, "cache warming");
+        assert_eq!(output.hits.len(), 1);
+        assert_eq!(output.hits[0].source, AgentHitKind::Exact);
+        assert_eq!(output.hits[0].focus_range, MessageRange::single(1));
     }
 
     #[test]
@@ -2370,11 +2418,9 @@ mod tests {
             original_index: 1,
         };
         let request = AgentSearchRequest {
-            query: "semantic".to_string(),
+            query: ParsedQuery::parse("semantic"),
+            mode: SearchMode::Semantic,
             top: 2,
-            cli_mode: Some(SearchMode::Semantic),
-            config_mode: None,
-            tui_semantic_search: None,
             flat: false,
             hits_per_conversation: 1,
             retrieval_hits_per_conversation: None,
@@ -2438,11 +2484,9 @@ mod tests {
             original_index: 1,
         };
         let request = AgentSearchRequest {
-            query: "semantic".to_string(),
+            query: ParsedQuery::parse("semantic"),
+            mode: SearchMode::Semantic,
             top: 2,
-            cli_mode: Some(SearchMode::Semantic),
-            config_mode: None,
-            tui_semantic_search: None,
             flat: false,
             hits_per_conversation: 2,
             retrieval_hits_per_conversation: None,
@@ -2764,7 +2808,7 @@ mod tests {
         let rendered = format_agent_output(&AgentSearchOutput {
             protocol: AgentProtocolKind::Search,
             target: None,
-            query: request.query.clone(),
+            query: request.query.raw().to_string(),
             mode: SearchMode::Lexical,
             hits,
             groups,

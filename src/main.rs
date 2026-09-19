@@ -1,6 +1,7 @@
 mod agent;
 mod claude;
 mod cli;
+mod command_tags;
 mod config;
 mod debug;
 mod debug_log;
@@ -17,6 +18,7 @@ mod text_match;
 mod time_filter;
 mod tool_format;
 mod tui;
+mod turns;
 mod update;
 
 use clap::Parser;
@@ -306,20 +308,26 @@ fn run() -> Result<()> {
                 .and_then(|s| s.to_str())
                 .unwrap_or("?");
             eprintln!(
-                "#{:2} score={:.2} freshness={:.2} | {} | {} | {} ago",
+                "#{:2} score={:.2} freshness={:.2} verbatim={:.2} | {} | {} | {} ago",
                 rank + 1,
                 debug.total,
                 debug.freshness,
+                debug.verbatim,
                 project,
                 session,
                 age_str
             );
 
             for field in &debug.fields {
-                if field.tf_score > 0.0 || field.adjacency_score > 0.0 {
+                if !field.is_zero() {
                     eprintln!(
-                        "     {}: tf={:.2} adj={:.2} (w={:.1})",
-                        field.name, field.tf_score, field.adjacency_score, field.weight
+                        "     {}: tf={:.2} exact={:.2} adj={:.2} phrase={:.2} (w={:.1})",
+                        field.name,
+                        field.tf_score,
+                        field.exact_score,
+                        field.adjacency_score,
+                        field.phrase_score,
+                        field.weight
                     );
                     for (word, tf, ln_score) in &field.word_details {
                         if *tf > 0 {
@@ -371,11 +379,10 @@ fn run() -> Result<()> {
         let display_options = display::DisplayOptions {
             no_tools: !show_tools,
             show_thinking,
-            debug_level: args.debug,
             use_pager,
             no_color: args.no_color,
         };
-        return display::render_to_terminal(render_path, &display_options);
+        return display::display_conversation(render_path, &display_options);
     }
 
     // Handle direct file input mode
@@ -539,7 +546,6 @@ fn run() -> Result<()> {
     let display_options = display::DisplayOptions {
         no_tools: !show_tools,
         show_thinking,
-        debug_level: args.debug,
         use_pager,
         no_color: args.no_color,
     };
@@ -563,6 +569,7 @@ mod agent_command_tests {
     };
     use crate::agent::test_support::{assistant_jsonl_line as assistant, user_jsonl_line as user};
     use crate::search::mode::SearchMode;
+    use crate::search::query::ParsedQuery;
     use cli::{AgentOutlineArgs, AgentOutputFlags, AgentReadArgs};
 
     #[test]
@@ -810,8 +817,8 @@ mod agent_command_tests {
                 evidence_source: agent::retrieval::AgentHitSource::Dialogue,
                 render_options: agent::retrieval::AgentHitRenderOptions::default(),
                 preview: "cache warming answer".to_string(),
-                focus_range: agent::refs::MessageRange::single(2),
-                read_range: agent::refs::MessageRange { start: 1, end: 3 },
+                focus_range: crate::history::MessageRange::single(2),
+                read_range: crate::history::MessageRange { start: 1, end: 3 },
             }],
             groups: vec![],
             flat: true,
@@ -894,11 +901,9 @@ mod agent_command_tests {
             search_mode: cli::AgentSearchModeArgs::explicit(SearchMode::Lexical),
         };
         let within_request = agent::search::AgentWithinRequest {
-            query: within_args.query.clone(),
+            query: ParsedQuery::parse(&within_args.query),
+            mode: within_args.mode_override().unwrap(),
             top: within_args.top.unwrap(),
-            cli_mode: within_args.mode_override(),
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         };
         let within = agent::search::format_agent_output(&agent::search::run_within_search(
@@ -966,8 +971,9 @@ mod agent_command_tests {
             agent_search_text: String::new(),
             semantic_route_text: String::new(),
             semantic_turns: vec!["session".to_string()],
-            semantic_turn_ranges: vec![agent::refs::MessageRange::single(1)],
+            semantic_turn_ranges: vec![crate::history::MessageRange::single(1)],
             search_text_lower: "session".to_string(),
+            dialogue_text_lower: String::new(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
@@ -998,7 +1004,7 @@ mod agent_command_tests {
 
     fn semantic_hit_for_test(
         source: crate::semantic::types::SemanticChunkSource,
-        message_range: agent::refs::MessageRange,
+        message_range: crate::history::MessageRange,
         evidence_preview: &str,
     ) -> crate::semantic::types::SemanticHit {
         crate::semantic::types::SemanticHit::new(
@@ -1058,12 +1064,11 @@ mod agent_command_tests {
         let (keys, resolved) = resolved_test_conversation(path.clone());
         let conversation = stubbed_conversation(path, 4);
         let transcript = load_transcript(&resolved.key.path);
+        let query = ParsedQuery::parse("\"hidden_exact_tool_needle\"");
         let within_request = agent::search::AgentWithinRequest {
-            query: "\"hidden_exact_tool_needle\"".to_string(),
+            mode: agent::search::effective_agent_mode(&query, SearchMode::Lexical),
+            query,
             top: 1,
-            cli_mode: None,
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         };
         let within = agent::search::format_agent_output(&agent::search::run_within_search(
@@ -1112,7 +1117,7 @@ mod agent_command_tests {
         let semantic_range = *conversation
             .semantic_turn_ranges
             .iter()
-            .find(|range| **range == agent::refs::MessageRange::single(5))
+            .find(|range| **range == crate::history::MessageRange::single(5))
             .expect("assistant text should use canonical m5");
         let semantic_hit = semantic_hit_for_test(
             crate::semantic::types::SemanticChunkSource::VisibleDialogue,
@@ -1120,11 +1125,9 @@ mod agent_command_tests {
             "final assistant text",
         );
         let within_request = agent::search::AgentWithinRequest {
-            query: "final assistant".to_string(),
+            query: ParsedQuery::parse("final assistant"),
+            mode: SearchMode::Semantic,
             top: 1,
-            cli_mode: Some(SearchMode::Semantic),
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         };
         let within = agent::search::format_agent_output(&agent::search::run_within_search(
@@ -1169,7 +1172,7 @@ mod agent_command_tests {
         let semantic_range = *conversation
             .semantic_turn_ranges
             .iter()
-            .find(|range| **range == agent::refs::MessageRange::single(2))
+            .find(|range| **range == crate::history::MessageRange::single(2))
             .expect("assistant text should use canonical m2");
         let semantic_hit = semantic_hit_for_test(
             crate::semantic::types::SemanticChunkSource::VisibleDialogue,
@@ -1177,11 +1180,9 @@ mod agent_command_tests {
             "final assistant text",
         );
         let within_request = agent::search::AgentWithinRequest {
-            query: "final assistant".to_string(),
+            query: ParsedQuery::parse("final assistant"),
+            mode: SearchMode::Semantic,
             top: 1,
-            cli_mode: Some(SearchMode::Semantic),
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         };
         let within = agent::search::format_agent_output(&agent::search::run_within_search(
@@ -1231,12 +1232,11 @@ mod agent_command_tests {
             "\"subagent_unique_needle\"",
             chrono::Local::now(),
         );
+        let query = ParsedQuery::parse("\"subagent_unique_needle\"");
         let request = agent::search::AgentSearchRequest {
-            query: "\"subagent_unique_needle\"".to_string(),
+            mode: agent::search::effective_agent_mode(&query, SearchMode::Lexical),
+            query,
             top: 1,
-            cli_mode: None,
-            config_mode: None,
-            tui_semantic_search: None,
             flat: false,
             hits_per_conversation: 2,
             retrieval_hits_per_conversation: None,
@@ -1512,7 +1512,7 @@ mod agent_command_tests {
         );
         assert_eq!(
             candidate.semantic_turn_ranges.last().copied(),
-            Some(agent::refs::MessageRange::single(2))
+            Some(crate::history::MessageRange::single(2))
         );
         assert!(
             !conversation
@@ -1546,8 +1546,9 @@ mod agent_command_tests {
             agent_search_text: String::new(),
             semantic_route_text: String::new(),
             semantic_turns: vec!["visible semantic".to_string()],
-            semantic_turn_ranges: vec![agent::refs::MessageRange::single(1)],
+            semantic_turn_ranges: vec![crate::history::MessageRange::single(1)],
             search_text_lower: "visible semantic".to_string(),
+            dialogue_text_lower: String::new(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,
@@ -1663,15 +1664,13 @@ mod agent_command_tests {
         let transcript = load_transcript(&resolved.key.path);
         let semantic_hit = semantic_hit_for_test(
             crate::semantic::types::SemanticChunkSource::AgentSubagentDialogue,
-            agent::refs::MessageRange::single(2),
+            crate::history::MessageRange::single(2),
             "progress_only_semantic_needle",
         );
         let within_request = agent::search::AgentWithinRequest {
-            query: "progress semantic".to_string(),
+            query: ParsedQuery::parse("progress semantic"),
+            mode: SearchMode::Semantic,
             top: 1,
-            cli_mode: Some(SearchMode::Semantic),
-            config_mode: None,
-            tui_semantic_search: None,
             budget: None,
         };
         let rendered = agent::search::format_agent_output(&agent::search::run_within_search(

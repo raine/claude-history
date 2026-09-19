@@ -1,4 +1,4 @@
-use crate::agent::refs::MessageRange;
+use crate::history::MessageRange;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{

@@ -13,6 +13,7 @@
 
 pub mod cache;
 mod loader;
+pub mod messages;
 pub mod omp_loader;
 pub mod parser;
 pub mod path;
@@ -30,9 +31,9 @@ pub use loader::{
     DeleteEmptyScope, delete_empty_transcripts, delete_session_by_uuid, find_jsonl_by_uuid,
     load_all_conversations, load_all_conversations_streaming,
 };
-pub(crate) use parser::{
-    extract_skill_preview, is_clear_metadata_message, process_conversation_file,
-};
+pub(crate) use messages::extract_skill_preview;
+pub use messages::{MessageOrdinals, MessageRange, Placement};
+pub(crate) use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;
 
@@ -111,9 +112,12 @@ pub struct Conversation {
     pub agent_search_text: String,
     pub semantic_route_text: String,
     pub semantic_turns: Vec<String>,
-    pub semantic_turn_ranges: Vec<crate::agent::refs::MessageRange>,
+    pub semantic_turn_ranges: Vec<MessageRange>,
     /// Pre-normalized lowercase search text (avoids re-normalizing on every startup)
     pub search_text_lower: String,
+    /// Pre-normalized visible user/assistant prose (no tool blocks, no injected
+    /// `<system-reminder>` spans); the lexical "dialogue" field
+    pub dialogue_text_lower: String,
     pub project_name: Option<String>,
     pub project_path: Option<PathBuf>,
     /// The working directory extracted from the JSONL file (the actual cwd)

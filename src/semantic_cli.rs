@@ -784,7 +784,7 @@ mod tests {
                     session: format!("session-{}", conversation_index + 1),
                     chunk_index: 0,
                     text: conversation.semantic_turns[0].clone(),
-                    message_range: crate::agent::refs::MessageRange::single(1),
+                    message_range: crate::history::MessageRange::single(1),
                     embedding: vec![1.0, 0.0],
                 },
             )

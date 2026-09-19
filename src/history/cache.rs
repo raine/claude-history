@@ -5,7 +5,7 @@
 //! search text normalization on startup for unchanged files.
 
 use super::{Conversation, ParseError};
-use crate::agent::refs::MessageRange;
+use crate::history::MessageRange;
 use chrono::{Local, TimeZone};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
 const PI_CACHE_MAGIC: [u8; 8] = *b"PIHIST01";
 const OMP_CACHE_MAGIC: [u8; 8] = *b"OMHIST01";
-const SCHEMA_VERSION: u32 = 11;
-const PI_SCHEMA_VERSION: u32 = 1;
-const OMP_SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 13;
+const PI_SCHEMA_VERSION: u32 = 3;
+const OMP_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize)]
 struct PiCache {
@@ -63,6 +63,7 @@ pub struct CacheEntry {
     #[serde(default)]
     pub semantic_turn_ranges: Vec<MessageRange>,
     pub search_text_lower: String,
+    pub dialogue_text_lower: String,
     pub cwd: Option<PathBuf>,
     pub message_count: usize,
     pub parse_errors: Vec<CachedParseError>,
@@ -240,6 +241,7 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         semantic_turns: Vec::new(),
         semantic_turn_ranges: Vec::new(),
         search_text_lower: String::new(),
+        dialogue_text_lower: String::new(),
         cwd: None,
         message_count: 0,
         parse_errors: Vec::new(),
@@ -272,6 +274,7 @@ pub fn entry_from_conversation(
         semantic_turns: conv.semantic_turns.clone(),
         semantic_turn_ranges: conv.semantic_turn_ranges.clone(),
         search_text_lower: conv.search_text_lower.clone(),
+        dialogue_text_lower: conv.dialogue_text_lower.clone(),
         cwd: conv.cwd.clone(),
         message_count: conv.message_count,
         parse_errors: conv
@@ -324,6 +327,7 @@ pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: boo
         semantic_turns: entry.semantic_turns.clone(),
         semantic_turn_ranges: entry.semantic_turn_ranges.clone(),
         search_text_lower: entry.search_text_lower.clone(),
+        dialogue_text_lower: entry.dialogue_text_lower.clone(),
         project_name: None,
         project_path: None,
         cwd: entry.cwd.clone(),
@@ -378,6 +382,7 @@ mod tests {
             semantic_turns: vec!["Hello world".to_string(), "Hi there".to_string()],
             semantic_turn_ranges: vec![MessageRange::single(1), MessageRange::single(2)],
             search_text_lower: normalize_for_search("Hello world Hi there"),
+            dialogue_text_lower: normalize_for_search("Hello world Hi there"),
             project_name: Some("test-project".to_string()),
             project_path: Some(PathBuf::from("/test/project")),
             cwd: Some(PathBuf::from("/test/cwd")),
@@ -436,6 +441,7 @@ mod tests {
         assert_eq!(restored.semantic_turns, conv.semantic_turns);
         assert_eq!(restored.semantic_turn_ranges, conv.semantic_turn_ranges);
         assert_eq!(restored.search_text_lower, conv.search_text_lower);
+        assert_eq!(restored.dialogue_text_lower, conv.dialogue_text_lower);
         assert_eq!(restored.cwd, conv.cwd);
         assert_eq!(restored.message_count, conv.message_count);
         assert_eq!(restored.summary, conv.summary);

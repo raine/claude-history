@@ -4,12 +4,12 @@
 //! both synchronously and via streaming for the TUI.
 
 use super::cache;
+use super::messages::blocks_count_as_message;
 use super::parser::process_conversation_file;
 use super::path::{
     decode_project_dir_name, decode_project_dir_name_to_path, format_short_name_from_path,
 };
 use super::{Conversation, LoaderMessage, Project};
-use crate::agent::transcript::content_blocks_count_as_agent_message;
 use crate::claude::{LogEntry, extract_search_text_from_user, parse_agent_progress};
 use crate::cli::DebugLevel;
 use crate::debug;
@@ -485,7 +485,7 @@ fn empty_transcript_from_path(path: &Path, project_name: &str) -> Result<Option<
                 }
             }
             LogEntry::Assistant { message, .. } => {
-                if content_blocks_count_as_agent_message(&message.content) {
+                if blocks_count_as_message(&message.content) {
                     assistant_messages += 1;
                 }
             }
@@ -495,7 +495,7 @@ fn empty_transcript_from_path(path: &Path, project_name: &str) -> Result<Option<
                 {
                     let crate::claude::AgentContent::Blocks(blocks) =
                         progress.message.message.content;
-                    if content_blocks_count_as_agent_message(&blocks) {
+                    if blocks_count_as_message(&blocks) {
                         assistant_messages += 1;
                     }
                 }

@@ -1,7 +1,6 @@
 use crate::agent::diagnostic::{AgentError, AgentErrorKind};
 use crate::error::{AppError, Result};
-use crate::history::{Conversation, Source};
-use serde::{Deserialize, Serialize};
+use crate::history::{Conversation, MessageRange, Source};
 use std::path::PathBuf;
 
 const REF_NAMESPACE: &str = "agent-v1";
@@ -186,32 +185,6 @@ impl AgentConversationKey {
 pub struct ResolvedConversation {
     pub key: AgentConversationKey,
     pub reference: AgentConversationRef,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct MessageRange {
-    pub start: usize,
-    pub end: usize,
-}
-
-impl MessageRange {
-    pub fn single(message: usize) -> Self {
-        Self {
-            start: message,
-            end: message,
-        }
-    }
-
-    pub fn contains(&self, other: &MessageRange) -> bool {
-        self.start <= other.start && self.end >= other.end
-    }
-
-    pub fn union(&self, other: &MessageRange) -> Self {
-        Self {
-            start: self.start.min(other.start),
-            end: self.end.max(other.end),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

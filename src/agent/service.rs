@@ -1,12 +1,14 @@
 use crate::agent;
 use crate::agent::diagnostic::{AgentError, AgentErrorKind, AgentWarning, AgentWarningKind};
-use crate::cli::{self, AgentCommand, AgentOutlineArgs, AgentReadArgs};
+use crate::agent::visibility::ContentVisibility;
+use crate::cli::{self, AgentCommand, AgentOutlineArgs, AgentOutputFlags, AgentReadArgs};
 use crate::config;
-use crate::config::{AgentConfig, AgentScopeConfig};
+use crate::config::{AgentConfig, AgentScopeConfig, ConfigFile};
 use crate::error::{AppError, Result};
 use crate::history;
 use crate::search;
-use crate::search::mode::SearchMode;
+use crate::search::mode::{SearchMode, SearchModeResolution, resolve_search_mode};
+use crate::search::query::ParsedQuery;
 use crate::semantic;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -23,12 +25,8 @@ fn configured_usize(cli_value: Option<usize>, default: usize, configured: Option
     cli_value.or(configured).unwrap_or(default)
 }
 
-fn configured_visibility(cli_value: bool, configured: Option<bool>) -> bool {
-    cli_value || configured.unwrap_or(false)
-}
-
-fn configured_render_policy(config: &AgentConfig) -> agent::visibility::ContentVisibility {
-    agent::visibility::ContentVisibility {
+fn configured_visibility(config: &AgentConfig) -> ContentVisibility {
+    ContentVisibility {
         tools: config.tools.unwrap_or(false),
         tool_results: config.tool_results.unwrap_or(false),
         thinking: config.thinking.unwrap_or(false),
@@ -36,11 +34,7 @@ fn configured_render_policy(config: &AgentConfig) -> agent::visibility::ContentV
     }
 }
 
-fn apply_configured_render_policy(
-    output: &mut agent::search::AgentSearchOutput,
-    config: &AgentConfig,
-) {
-    let policy = configured_render_policy(config);
+fn apply_render_policy(output: &mut agent::search::AgentSearchOutput, policy: ContentVisibility) {
     for hit in &mut output.hits {
         hit.render_options.merge(policy);
     }
@@ -62,17 +56,147 @@ fn configured_budget(
 }
 
 fn configured_scope(
-    args: &cli::AgentSearchArgs,
+    local: bool,
+    all: bool,
     config: &AgentConfig,
 ) -> agent::search::AgentSearchScope {
-    if args.local {
+    if local {
         agent::search::AgentSearchScope::Local
-    } else if args.all {
+    } else if all {
         agent::search::AgentSearchScope::Global
     } else {
         match config.scope.unwrap_or(AgentScopeConfig::Global) {
             AgentScopeConfig::Global => agent::search::AgentSearchScope::Global,
             AgentScopeConfig::Local => agent::search::AgentSearchScope::Local,
+        }
+    }
+}
+
+/// Everything an agent command takes from CLI flags and config, resolved once
+/// per command by [`AgentSettings::resolve`]: CLI wins, then `[agent]`, then
+/// `[search]`, then built-in defaults. A command that does not use a field
+/// sees its default.
+#[derive(Clone, Debug)]
+pub(crate) struct AgentSettings {
+    /// `--mode` > `[agent].mode` > `[search].mode`. A quoted-only query still
+    /// runs exact; see `agent::search::effective_agent_mode`.
+    pub mode: SearchMode,
+    /// Conversations for grouped search; message hits for `--flat` and within.
+    pub top: usize,
+    pub hits_per_conversation: usize,
+    pub budget: Option<usize>,
+    pub scope: agent::search::AgentSearchScope,
+    /// Content reads reveal and hit recipes request: CLI flags OR config, so
+    /// config can reveal but never hide.
+    pub visibility: ContentVisibility,
+    pub exclude_projects: Vec<String>,
+}
+
+impl AgentSettings {
+    pub(crate) fn resolve(command: &AgentCommand, config: ConfigFile) -> Self {
+        let flags = match command {
+            AgentCommand::Search(args) => CommandFlags {
+                mode: args.mode_override(),
+                top: args.top,
+                top_default: TopDefault::Search,
+                budget: args.budget,
+                no_budget: args.no_budget,
+                hits_per_conversation: args.hits_per_conv,
+                local: args.local,
+                all: args.all,
+                visibility: ContentVisibility::default(),
+            },
+            AgentCommand::Within(args) => CommandFlags {
+                mode: args.mode_override(),
+                top: args.top,
+                top_default: TopDefault::Within,
+                budget: args.budget,
+                no_budget: args.no_budget,
+                ..CommandFlags::default()
+            },
+            AgentCommand::Read(args) => CommandFlags::output(&args.output),
+            AgentCommand::Outline(args) => CommandFlags::output(&args.output),
+        };
+        Self::from_flags(flags, config)
+    }
+
+    fn from_flags(flags: CommandFlags, config: ConfigFile) -> Self {
+        let search_config = config.search.unwrap_or_default();
+        let agent = config.agent.unwrap_or_default();
+        let mut visibility = flags.visibility;
+        visibility.merge(configured_visibility(&agent));
+        Self {
+            mode: resolve_search_mode(SearchModeResolution {
+                cli_mode: flags.mode,
+                config_mode: agent.mode.or(search_config.mode),
+                tui_semantic_search: None,
+            }),
+            top: flags.top_default.resolve(flags.top, &agent),
+            hits_per_conversation: configured_usize(
+                flags.hits_per_conversation,
+                DEFAULT_HITS_PER_CONVERSATION,
+                agent.hits_per_conversation,
+            ),
+            budget: configured_budget(flags.no_budget, flags.budget, agent.output_chars),
+            scope: configured_scope(flags.local, flags.all, &agent),
+            visibility,
+            exclude_projects: agent.exclude_projects,
+        }
+    }
+
+    fn protocol_options(&self) -> agent::protocol::ProtocolOptions {
+        agent::protocol::ProtocolOptions {
+            budget: self.budget,
+            visibility: self.visibility,
+        }
+    }
+}
+
+/// The flags each subcommand exposes, in one shape so [`AgentSettings`] has
+/// one resolution path.
+#[derive(Default)]
+struct CommandFlags {
+    mode: Option<SearchMode>,
+    top: Option<usize>,
+    top_default: TopDefault,
+    budget: Option<usize>,
+    no_budget: bool,
+    hits_per_conversation: Option<usize>,
+    local: bool,
+    all: bool,
+    visibility: ContentVisibility,
+}
+
+impl CommandFlags {
+    fn output(flags: &AgentOutputFlags) -> Self {
+        Self {
+            budget: flags.budget,
+            no_budget: flags.no_budget,
+            visibility: ContentVisibility {
+                tools: flags.tools,
+                tool_results: flags.tool_results,
+                thinking: flags.thinking,
+                subagents: flags.subagents,
+            },
+            ..Self::default()
+        }
+    }
+}
+
+/// Which `--top` a command means: search and within have separate defaults
+/// and config keys.
+#[derive(Clone, Copy, Default)]
+enum TopDefault {
+    #[default]
+    Search,
+    Within,
+}
+
+impl TopDefault {
+    fn resolve(self, cli_value: Option<usize>, config: &AgentConfig) -> usize {
+        match self {
+            Self::Search => configured_usize(cli_value, DEFAULT_SEARCH_TOP, config.top),
+            Self::Within => configured_usize(cli_value, DEFAULT_WITHIN_TOP, config.within_top),
         }
     }
 }
@@ -116,11 +240,12 @@ impl AgentService {
     }
 
     fn execute_inner(&mut self, command: AgentCommand) -> Result<String> {
+        let settings = AgentSettings::resolve(&command, config::load_config()?);
         match command {
-            AgentCommand::Search(args) => self.run_search(&args),
-            AgentCommand::Within(args) => self.run_within(&args),
-            AgentCommand::Read(args) => self.run_read(&args, None),
-            AgentCommand::Outline(args) => self.run_outline(&args, None),
+            AgentCommand::Search(args) => self.run_search(&args, &settings),
+            AgentCommand::Within(args) => self.run_within(&args, &settings),
+            AgentCommand::Read(args) => self.run_read(&args, None, &settings),
+            AgentCommand::Outline(args) => self.run_outline(&args, None, &settings),
         }
     }
 
@@ -151,21 +276,17 @@ impl AgentService {
         loaded.map_err(AppError::from)
     }
 
-    fn run_search(&self, args: &cli::AgentSearchArgs) -> Result<String> {
-        let config = config::load_config()?;
-        let search_config = config.search.unwrap_or_default();
-        let agent_config = config.agent.unwrap_or_default();
+    fn run_search(&self, args: &cli::AgentSearchArgs, settings: &AgentSettings) -> Result<String> {
         // Resolved before loading so an inverted range fails without paying for
         // a full corpus parse.
         let time = args.time.resolve()?;
         let mut conversations = history::load_all_conversations(false, None)?;
         conversations.retain(|conversation| {
-            !project_is_excluded(&conversation.path, &agent_config.exclude_projects)
+            !project_is_excluded(&conversation.path, &settings.exclude_projects)
                 && time.matches(conversation.timestamp)
         });
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-        let scope = configured_scope(args, &agent_config);
-        let current_project_dir_name = if scope == agent::search::AgentSearchScope::Local {
+        let current_project_dir_name = if settings.scope == agent::search::AgentSearchScope::Local {
             std::env::current_dir()
                 .ok()
                 .map(|dir| history::convert_path_to_project_dir_name(&dir))
@@ -174,34 +295,23 @@ impl AgentService {
         };
         let scoped = agent::search::scoped_conversation_inputs(
             &conversations,
-            scope,
+            settings.scope,
             current_project_dir_name.as_deref(),
         )?;
+        let query = ParsedQuery::parse(&args.query);
         let request = agent::search::AgentSearchRequest {
-            query: args.query.clone(),
-            top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),
-            cli_mode: args.mode_override(),
-            config_mode: agent_config.mode.or(search_config.mode),
-            tui_semantic_search: None,
+            mode: agent::search::effective_agent_mode(&query, settings.mode),
+            query,
+            top: settings.top,
             flat: args.flat,
-            hits_per_conversation: configured_usize(
-                args.hits_per_conv,
-                DEFAULT_HITS_PER_CONVERSATION,
-                agent_config.hits_per_conversation,
-            ),
+            hits_per_conversation: settings.hits_per_conversation,
             retrieval_hits_per_conversation: None,
             all_hits: args.all_hits,
-            budget: configured_budget(args.no_budget, args.budget, agent_config.output_chars),
+            budget: settings.budget,
         };
-        let mode = agent::search::effective_agent_mode(
-            &request.query,
-            request.cli_mode,
-            request.config_mode,
-            request.tui_semantic_search,
-        );
         let (mut keys, mut base_warnings) =
             discover_agent_keys(current_project_dir_name.as_deref())?;
-        keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
+        keys.retain(|key| !project_is_excluded(&key.path, &settings.exclude_projects));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
             // without this every conversation outside the window would be
@@ -216,9 +326,9 @@ impl AgentService {
             &conversations,
             &keys,
         ));
-        match mode {
+        match request.mode {
             SearchMode::Lexical | SearchMode::Exact => {
-                let ranked = lexically_rank_scoped(&conversations, &args.query, &scoped);
+                let ranked = lexically_rank_scoped(&conversations, &request.query, &scoped);
                 let warnings = RefCell::new(base_warnings.clone());
                 let mut output = agent::search::run_global_lexical_search_reporting(
                     &request,
@@ -237,7 +347,7 @@ impl AgentService {
                         ));
                     },
                 )?;
-                apply_configured_render_policy(&mut output, &agent_config);
+                apply_render_policy(&mut output, settings.visibility);
                 return Ok(agent::search::format_agent_output_with_warnings(
                     &output,
                     &warnings.into_inner(),
@@ -246,23 +356,25 @@ impl AgentService {
             SearchMode::Semantic => {
                 let (mut output, mut warnings) =
                     run_agent_semantic_search(self, &request, &conversations, &keys, &scoped)?;
-                apply_configured_render_policy(&mut output, &agent_config);
+                apply_render_policy(&mut output, settings.visibility);
                 warnings.splice(0..0, base_warnings);
                 return Ok(agent::search::format_agent_output_with_warnings(
                     &output, &warnings,
                 ));
             }
             SearchMode::Hybrid => {
+                // Lexical candidates for fusion: deeper, flat, and bounded
+                // per conversation, ranked as a plain lexical search.
                 let lexical_request = agent::search::AgentSearchRequest {
+                    mode: SearchMode::Lexical,
                     top: agent::search::modality_candidate_depth(&request),
-                    cli_mode: Some(SearchMode::Lexical),
                     flat: true,
                     retrieval_hits_per_conversation: Some(
                         request.hits_per_conversation.saturating_mul(4).max(1),
                     ),
                     ..request.clone()
                 };
-                let ranked = lexically_rank_scoped(&conversations, &args.query, &scoped);
+                let ranked = lexically_rank_scoped(&conversations, &request.query, &scoped);
                 let warnings = RefCell::new(base_warnings.clone());
                 let lexical = agent::search::run_global_lexical_search_reporting(
                     &lexical_request,
@@ -282,24 +394,26 @@ impl AgentService {
                     },
                 )?;
                 let inputs = agent_inputs_for_indices(&conversations, &keys, &scoped)?;
-                match run_agent_semantic_hits(&args.query, &inputs) {
+                match run_agent_semantic_hits(&request.query, &inputs) {
                     Ok((semantic, semantic_warnings)) => {
                         warnings.borrow_mut().extend(semantic_warnings);
                         let mut output = agent::search::run_global_hybrid_search(
                             &request, lexical, &semantic, &inputs,
                         );
                         attach_input_transcript_metadata(self, &mut output, &inputs);
-                        apply_configured_render_policy(&mut output, &agent_config);
+                        apply_render_policy(&mut output, settings.visibility);
                         return Ok(agent::search::format_agent_output_with_warnings(
                             &output,
                             &warnings.into_inner(),
                         ));
                     }
                     Err(error) => {
+                        // Semantic search is unavailable: answer with lexical
+                        // evidence while still reporting the hybrid request.
                         warnings
                             .borrow_mut()
                             .push(AgentWarning::from_app_error(&error, None));
-                        let lexical = agent::search::run_global_lexical_search_reporting(
+                        let mut output = agent::search::run_global_lexical_search_reporting(
                             &request,
                             &conversations,
                             &keys,
@@ -316,9 +430,7 @@ impl AgentService {
                                 ));
                             },
                         )?;
-                        let mut output = lexical;
-                        output.mode = SearchMode::Hybrid;
-                        apply_configured_render_policy(&mut output, &agent_config);
+                        apply_render_policy(&mut output, settings.visibility);
                         return Ok(agent::search::format_agent_output_with_warnings(
                             &output,
                             &warnings.into_inner(),
@@ -329,40 +441,29 @@ impl AgentService {
         }
     }
 
-    fn run_within(&self, args: &cli::AgentWithinArgs) -> Result<String> {
-        let config = config::load_config()?;
-        let search_config = config.search.unwrap_or_default();
-        let agent_config = config.agent.unwrap_or_default();
+    fn run_within(&self, args: &cli::AgentWithinArgs, settings: &AgentSettings) -> Result<String> {
         let (keys, _) = discover_agent_keys(None)?;
         let resolved = resolve_agent_conversation_arg(&args.conversation, Some(&keys))?;
         let transcript = self
             .load_transcript(&resolved.key.path)
             .map_err(|error| target_error(error, &resolved))?;
         let conversation = conversation_from_agent_transcript(&transcript, resolved.key.source);
-        let transcript_warnings = transcript_warning(&transcript, &resolved.reference.canonical())
+        let mut warnings = transcript_warning(&transcript, &resolved.reference.canonical())
             .into_iter()
             .collect::<Vec<_>>();
+        let query = ParsedQuery::parse(&args.query);
         let request = agent::search::AgentWithinRequest {
-            query: args.query.clone(),
-            top: configured_usize(args.top, DEFAULT_WITHIN_TOP, agent_config.within_top),
-            cli_mode: args.mode_override(),
-            config_mode: agent_config.mode.or(search_config.mode),
-            tui_semantic_search: None,
-            budget: configured_budget(args.no_budget, args.budget, agent_config.output_chars),
+            mode: agent::search::effective_agent_mode(&query, settings.mode),
+            query,
+            top: settings.top,
+            budget: settings.budget,
         };
-        let mode = agent::search::effective_agent_mode(
-            &request.query,
-            request.cli_mode,
-            request.config_mode,
-            request.tui_semantic_search,
-        );
-        let mut output = match mode {
-            SearchMode::Lexical | SearchMode::Exact => agent::search::run_within_search(
+        let mut output = match request.mode {
+            SearchMode::Lexical | SearchMode::Exact => agent::search::run_within_lexical_search(
                 &request,
                 &conversation,
                 &resolved,
                 &transcript,
-                &[],
             ),
             SearchMode::Semantic => run_agent_within_semantic(
                 &request,
@@ -377,41 +478,27 @@ impl AgentService {
                     &conversation,
                     &resolved,
                     &transcript,
-                    SemanticToolContent::MatchingQuery(&request.query),
+                    SemanticToolContent::MatchingQuery(request.query.raw()),
                 ) {
                     Ok(output) => output,
                     Err(error) => {
-                        let mut output = agent::search::run_within_search(
-                            &agent::search::AgentWithinRequest {
-                                cli_mode: Some(SearchMode::Lexical),
-                                ..request.clone()
-                            },
+                        // Semantic search is unavailable: answer with lexical
+                        // evidence while still reporting the hybrid request.
+                        warnings.push(AgentWarning::from_app_error(&error, None));
+                        agent::search::run_within_lexical_search(
+                            &request,
                             &conversation,
                             &resolved,
                             &transcript,
-                            &[],
-                        );
-                        output.mode = SearchMode::Hybrid;
-                        agent::search::attach_transcript_metadata(
-                            &mut output,
-                            &resolved,
-                            &transcript,
-                        );
-                        apply_configured_render_policy(&mut output, &agent_config);
-                        let mut warnings = transcript_warnings.clone();
-                        warnings.push(AgentWarning::from_app_error(&error, None));
-                        return Ok(agent::search::format_agent_output_with_warnings(
-                            &output, &warnings,
-                        ));
+                        )
                     }
                 }
             }
         };
         agent::search::attach_transcript_metadata(&mut output, &resolved, &transcript);
-        apply_configured_render_policy(&mut output, &agent_config);
+        apply_render_policy(&mut output, settings.visibility);
         Ok(agent::search::format_agent_output_with_warnings(
-            &output,
-            &transcript_warnings,
+            &output, &warnings,
         ))
     }
 }
@@ -693,6 +780,16 @@ fn conversation_from_agent_transcript(
         .collect::<Vec<_>>()
         .join(" ... ");
     let full_text = message_text.join(" ");
+    let dialogue_text = transcript
+        .messages
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        .filter_map(|part| match part {
+            agent::transcript::AgentMessagePart::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
     let timestamp = std::fs::metadata(&transcript.path)
         .and_then(|metadata| metadata.modified())
         .map(chrono::DateTime::<chrono::Local>::from)
@@ -713,6 +810,7 @@ fn conversation_from_agent_transcript(
         preview_first: preview,
         preview_last,
         search_text_lower: crate::search::normalize_for_search(&full_text),
+        dialogue_text_lower: crate::search::normalize_for_search(&dialogue_text),
         full_text,
         agent_search_text: String::new(),
         semantic_route_text,
@@ -835,7 +933,7 @@ fn attach_input_transcript_metadata(
 }
 
 fn run_agent_semantic_hits(
-    query: &str,
+    query: &ParsedQuery,
     inputs: &[agent::search::AgentConversationInput<'_>],
 ) -> Result<(Vec<semantic::types::SemanticHit>, Vec<AgentWarning>)> {
     let mut candidates = Vec::with_capacity(inputs.len().saturating_mul(2));
@@ -893,7 +991,7 @@ pub(crate) fn agent_route_semantic_conversation(
                 .semantic_turn_ranges
                 .first()
                 .copied()
-                .unwrap_or_else(|| agent::refs::MessageRange::single(1)),
+                .unwrap_or_else(|| crate::history::MessageRange::single(1)),
         ],
     ))
 }
@@ -902,7 +1000,7 @@ fn stripped_semantic_conversation(
     conversation: &history::Conversation,
     path: PathBuf,
     semantic_turns: Vec<String>,
-    semantic_turn_ranges: Vec<agent::refs::MessageRange>,
+    semantic_turn_ranges: Vec<crate::history::MessageRange>,
 ) -> history::Conversation {
     history::Conversation {
         source: conversation.source,
@@ -919,6 +1017,7 @@ fn stripped_semantic_conversation(
         semantic_turns,
         semantic_turn_ranges,
         search_text_lower: String::new(),
+        dialogue_text_lower: String::new(),
         project_name: None,
         project_path: None,
         cwd: None,
@@ -933,11 +1032,10 @@ fn stripped_semantic_conversation(
 }
 
 fn run_agent_semantic_hits_for_candidates(
-    query: &str,
+    parsed: &ParsedQuery,
     candidates: &[semantic::index::SemanticIndexCandidate],
     max_new_embeddings: usize,
 ) -> Result<Vec<semantic::types::SemanticHit>> {
-    let parsed = search::query::ParsedQuery::parse(query);
     let request = semantic::index::SemanticIndexRequest {
         query: parsed.semantic_text(),
         literal_filters: parsed.literals(),
@@ -1177,7 +1275,8 @@ fn agent_semantic_conversation<'a>(
             for text in texts {
                 if let Some(turn) = semantic::filter::filter_turn(role, &text) {
                     semantic_turns.push(turn);
-                    semantic_turn_ranges.push(agent::refs::MessageRange::single(message.ordinal));
+                    semantic_turn_ranges
+                        .push(crate::history::MessageRange::single(message.ordinal));
                 }
             }
         }
@@ -1340,6 +1439,7 @@ impl AgentService {
         &self,
         args: &AgentReadArgs,
         keys: Option<&[agent::refs::AgentConversationKey]>,
+        settings: &AgentSettings,
     ) -> Result<String> {
         let discovered;
         let keys = match keys {
@@ -1349,17 +1449,8 @@ impl AgentService {
                 &discovered
             }
         };
-        let agent_config = config::load_config()?.agent.unwrap_or_default();
         let (mut resolved_refs, focus) = resolve_agent_read_args(args, Some(keys))?;
-        let options = agent_protocol_options(
-            args.output.no_budget,
-            args.output.budget,
-            args.output.tools,
-            args.output.tool_results,
-            args.output.thinking,
-            args.output.subagents,
-            &agent_config,
-        );
+        let options = settings.protocol_options();
         let transcripts = resolved_refs
             .iter()
             .map(|(_, resolved)| {
@@ -1369,7 +1460,7 @@ impl AgentService {
             .collect::<Result<Vec<_>>>()?;
         if let Some(anchor) = args.anchor.as_deref() {
             let ordinal = transcripts[0].resolve_anchor(&resolved_refs[0].1, anchor)?;
-            resolved_refs[0].0.range = Some(agent::refs::MessageRange::single(ordinal));
+            resolved_refs[0].0.range = Some(crate::history::MessageRange::single(ordinal));
         }
         let requests = resolved_refs
             .iter()
@@ -1432,6 +1523,7 @@ impl AgentService {
         &self,
         args: &AgentOutlineArgs,
         keys: Option<&[agent::refs::AgentConversationKey]>,
+        settings: &AgentSettings,
     ) -> Result<String> {
         let discovered;
         let keys = match keys {
@@ -1441,7 +1533,6 @@ impl AgentService {
                 &discovered
             }
         };
-        let agent_config = config::load_config()?.agent.unwrap_or_default();
         let resolved = resolve_agent_conversation_arg(&args.conversation, Some(keys))?;
         let transcript = self
             .load_transcript(&resolved.key.path)
@@ -1450,15 +1541,7 @@ impl AgentService {
         Ok(agent::protocol::format_outline_with_warnings(
             &resolved,
             &transcript,
-            agent_protocol_options(
-                args.output.no_budget,
-                args.output.budget,
-                args.output.tools,
-                args.output.tool_results,
-                args.output.thinking,
-                args.output.subagents,
-                &agent_config,
-            ),
+            settings.protocol_options(),
             warning.as_slice(),
         ))
     }
@@ -1523,31 +1606,14 @@ pub(crate) fn resolve_agent_read_args(
     Ok((resolved_refs, focus))
 }
 
-fn agent_protocol_options(
-    no_budget: bool,
-    budget: Option<usize>,
-    tools: bool,
-    tool_results: bool,
-    thinking: bool,
-    subagents: bool,
-    config: &AgentConfig,
-) -> agent::protocol::ProtocolOptions {
-    agent::protocol::ProtocolOptions {
-        budget: configured_budget(no_budget, budget, config.output_chars),
-        tools: configured_visibility(tools, config.tools),
-        tool_results: configured_visibility(tool_results, config.tool_results),
-        thinking: configured_visibility(thinking, config.thinking),
-        subagents: configured_visibility(subagents, config.subagents),
-    }
-}
-
 fn lexically_rank_scoped(
     conversations: &[history::Conversation],
-    query: &str,
+    query: &ParsedQuery,
     scoped: &[usize],
 ) -> Vec<usize> {
     let searchable = search::precompute_agent_search_text(conversations);
-    let ranked_all = search::agent_search(conversations, &searchable, query, chrono::Local::now());
+    let ranked_all =
+        search::agent_search_parsed(conversations, &searchable, query, chrono::Local::now());
     let scoped_set = scoped
         .iter()
         .copied()
@@ -1573,12 +1639,22 @@ pub(crate) fn resolve_agent_conversation_arg(
     agent::refs::resolve_conversation_ref(keys, reference)
 }
 
+/// Settings for a read or outline driven from tests, resolved from the same
+/// user config the binary would load.
+#[cfg(test)]
+pub(crate) fn output_settings(flags: &AgentOutputFlags) -> Result<AgentSettings> {
+    Ok(AgentSettings::from_flags(
+        CommandFlags::output(flags),
+        config::load_config()?,
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn run_agent_read(
     args: &AgentReadArgs,
     keys: Option<&[agent::refs::AgentConversationKey]>,
 ) -> Result<String> {
-    AgentService::default().run_read(args, keys)
+    AgentService::default().run_read(args, keys, &output_settings(&args.output)?)
 }
 
 #[cfg(test)]
@@ -1586,7 +1662,7 @@ pub(crate) fn run_agent_outline(
     args: &AgentOutlineArgs,
     keys: Option<&[agent::refs::AgentConversationKey]>,
 ) -> Result<String> {
-    AgentService::default().run_outline(args, keys)
+    AgentService::default().run_outline(args, keys, &output_settings(&args.output)?)
 }
 
 #[cfg(test)]
@@ -1604,6 +1680,10 @@ mod tests {
             thinking: false,
             subagents: false,
         }
+    }
+
+    fn settings() -> AgentSettings {
+        output_settings(&output_flags()).unwrap()
     }
 
     fn read_args(reference: String) -> AgentReadArgs {
@@ -1670,7 +1750,7 @@ mod tests {
         args.anchor = Some(anchor.clone());
 
         let output = AgentService::default()
-            .run_read(&args, Some(std::slice::from_ref(&key)))
+            .run_read(&args, Some(std::slice::from_ref(&key)), &settings())
             .unwrap();
 
         assert!(output.contains("message m2 role=user"));
@@ -1681,7 +1761,7 @@ mod tests {
 
     #[test]
     fn agent_mode_ignores_tui_semantic_search() {
-        let config: config::ConfigFile = toml::from_str(
+        let config: ConfigFile = toml::from_str(
             r#"
 [search]
 mode = "lexical"
@@ -1690,17 +1770,15 @@ semantic_search = true
 "#,
         )
         .unwrap();
-        let search_config = config.search.unwrap_or_default();
 
-        assert_eq!(
-            agent::search::effective_agent_mode("needle", None, search_config.mode, None),
-            SearchMode::Lexical
-        );
+        let settings = AgentSettings::from_flags(CommandFlags::default(), config);
+
+        assert_eq!(settings.mode, SearchMode::Lexical);
     }
 
     #[test]
     fn agent_config_overrides_general_search_mode() {
-        let config: config::ConfigFile = toml::from_str(
+        let config: ConfigFile = toml::from_str(
             r#"
 [search]
 mode = "lexical"
@@ -1710,10 +1788,61 @@ mode = "hybrid"
         )
         .unwrap();
 
+        let settings = AgentSettings::from_flags(CommandFlags::default(), config);
+
+        assert_eq!(settings.mode, SearchMode::Hybrid);
+    }
+
+    #[test]
+    fn cli_flags_override_config_and_config_only_reveals_visibility() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+[agent]
+mode = "hybrid"
+top = 3
+within_top = 4
+hits_per_conversation = 5
+output_chars = 700
+scope = "local"
+tools = true
+"#,
+        )
+        .unwrap();
+        let flags = CommandFlags {
+            mode: Some(SearchMode::Exact),
+            top: Some(9),
+            top_default: TopDefault::Within,
+            budget: Some(100),
+            hits_per_conversation: None,
+            all: true,
+            visibility: ContentVisibility {
+                thinking: true,
+                ..ContentVisibility::default()
+            },
+            ..CommandFlags::default()
+        };
+
+        let settings = AgentSettings::from_flags(flags, config);
+
+        assert_eq!(settings.mode, SearchMode::Exact);
+        assert_eq!(settings.top, 9);
+        assert_eq!(settings.hits_per_conversation, 5);
+        assert_eq!(settings.budget, Some(100));
+        assert_eq!(settings.scope, agent::search::AgentSearchScope::Global);
         assert_eq!(
-            config.agent.unwrap().mode.or(config.search.unwrap().mode),
-            Some(SearchMode::Hybrid)
+            settings.visibility,
+            ContentVisibility {
+                tools: true,
+                thinking: true,
+                ..ContentVisibility::default()
+            }
         );
+
+        let defaults = AgentSettings::from_flags(CommandFlags::default(), ConfigFile::default());
+        assert_eq!(defaults.mode, SearchMode::Lexical);
+        assert_eq!(defaults.top, DEFAULT_SEARCH_TOP);
+        assert_eq!(defaults.budget, Some(DEFAULT_OUTPUT_CHARS));
+        assert_eq!(defaults.visibility, ContentVisibility::default());
     }
 
     #[test]
@@ -1745,12 +1874,12 @@ mode = "hybrid"
 
         assert!(
             service
-                .run_read(&args, Some(std::slice::from_ref(&key)))
+                .run_read(&args, Some(std::slice::from_ref(&key)), &settings())
                 .is_ok()
         );
         std::fs::write(&path, "{malformed").unwrap();
         let output = service
-            .run_read(&args, Some(std::slice::from_ref(&key)))
+            .run_read(&args, Some(std::slice::from_ref(&key)), &settings())
             .unwrap();
 
         assert!(output.contains("cached message"));
@@ -1779,7 +1908,7 @@ mode = "hybrid"
         };
 
         let output = AgentService::default()
-            .run_outline(&args, Some(std::slice::from_ref(&key)))
+            .run_outline(&args, Some(std::slice::from_ref(&key)), &settings())
             .unwrap();
 
         assert!(output.contains("warnings=1"));
@@ -1802,7 +1931,7 @@ mode = "hybrid"
         };
 
         let error = AgentService::default()
-            .run_outline(&args, Some(std::slice::from_ref(&key)))
+            .run_outline(&args, Some(std::slice::from_ref(&key)), &settings())
             .unwrap_err();
         let AppError::Agent(error) = error else {
             panic!("expected typed agent error");

@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::agent::refs::MessageRange;
 use crate::history::Conversation;
+use crate::history::MessageRange;
 use crate::search::normalize_for_search;
 use chrono::Local;
 
@@ -114,6 +114,7 @@ impl SemanticConversationFixture {
                 .collect(),
             semantic_turns: self.semantic_turns,
             search_text_lower: self.search_text_lower,
+            dialogue_text_lower: String::new(),
             project_name: Some(self.project_name),
             project_path: Some(self.project_path),
             cwd: self.cwd,

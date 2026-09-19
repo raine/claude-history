@@ -649,19 +649,14 @@ impl App {
 
         let idx = self.conversations.len();
         self.conversations.push(conv);
-
-        self.searchable = search::precompute_search_text(&self.conversations);
-        self.conversations_snapshot = Arc::new(self.conversations.clone());
-        self.rebuild_semantic_conversations_snapshot();
-
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations_snapshot.clone(),
-            searchable: Arc::new(self.searchable.clone()),
-        });
+        self.refresh_search_data();
 
         Some(idx)
     }
 
+    /// The one way to publish a mutated `conversations` to both workers:
+    /// rebuild the snapshots and search text, send them, and drop any
+    /// in-flight generation so stale responses cannot apply.
     pub(super) fn refresh_search_data(&mut self) {
         self.conversations_snapshot = Arc::new(self.conversations.clone());
         self.rebuild_semantic_conversations_snapshot();

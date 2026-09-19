@@ -78,7 +78,7 @@ pub(crate) fn test_semantic_metadata(
                 source: crate::semantic::types::SemanticChunkSource::VisibleDialogue,
                 session: "test-session".to_string(),
                 chunk_index: 0,
-                message_range: crate::agent::refs::MessageRange::single(1),
+                message_range: crate::history::MessageRange::single(1),
             },
         },
     }

@@ -135,21 +135,3 @@ pub fn log_selected_path(path: &std::path::Path) -> std::io::Result<()> {
         writeln!(file, "[{}] Selected: {}", timestamp, path.display())
     })
 }
-
-/// Log a display-time parse error to the debug log file.
-pub fn log_display_error(
-    file_path: &std::path::Path,
-    line_number: usize,
-    error: &str,
-    line_content: &str,
-) -> std::io::Result<()> {
-    with_debug_log(|file| {
-        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-        writeln!(file, "=== Display Parse Error: {} ===", timestamp)?;
-        writeln!(file, "File: {}", file_path.display())?;
-        writeln!(file, "Line {}: {}", line_number, error)?;
-        writeln!(file, "Content: {}", truncate_line(line_content, 200))?;
-        writeln!(file, "---")?;
-        writeln!(file)
-    })
-}

@@ -810,7 +810,7 @@ mod tests {
             conversation.semantic_turn_ranges,
             [1, 2, 5]
                 .into_iter()
-                .map(crate::agent::refs::MessageRange::single)
+                .map(crate::history::MessageRange::single)
                 .collect::<Vec<_>>()
         );
         assert_eq!(

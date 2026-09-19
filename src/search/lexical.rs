@@ -1,10 +1,13 @@
 use crate::history::Conversation;
 use crate::search::literal::{
-    Literal, LiteralCorpusEntry, build_agent_literal_corpus, build_literal_corpus, exact_fallback,
+    LiteralCorpusEntry, build_agent_literal_corpus, build_literal_corpus, exact_fallback,
     matches_all_literals,
 };
 use crate::search::query::ParsedQuery;
 pub use crate::text_match::normalize_for_search;
+use crate::text_match::{
+    contains_ignore_ascii_case, count_exact_word_matches, count_prefix_matches,
+};
 use chrono::{DateTime, Duration, Local};
 use rayon::prelude::*;
 
@@ -19,6 +22,8 @@ pub struct SearchableConversation {
     pub summary_lower: String,
     /// Normalized project_name only (small, typically <50 chars)
     pub project_lower: String,
+    /// Normalized visible user/assistant prose (no tool blocks)
+    pub dialogue_lower: String,
     /// Original conversation index
     pub index: usize,
 }
@@ -88,6 +93,7 @@ fn precompute_search_text_with(
                 title_lower,
                 summary_lower,
                 project_lower,
+                dialogue_lower: conv.dialogue_text_lower.clone(),
                 index: idx,
             }
         })
@@ -124,6 +130,19 @@ pub fn agent_search(
     now: DateTime<Local>,
 ) -> Vec<usize> {
     search_with_surface(conversations, searchable, query, now, true)
+}
+
+/// [`agent_search`] for a query the caller has already parsed.
+pub fn agent_search_parsed(
+    conversations: &[Conversation],
+    searchable: &[SearchableConversation],
+    parsed: &ParsedQuery,
+    now: DateTime<Local>,
+) -> Vec<usize> {
+    search_debug_with_query(conversations, searchable, parsed, now, true, |_| true)
+        .into_iter()
+        .map(|(index, _)| index)
+        .collect()
 }
 
 fn search_with_surface(
@@ -203,14 +222,7 @@ fn exact_debug_results(
         .into_iter()
         .map(|index| {
             let fresh = freshness_bonus(conversations[index].timestamp, now);
-            (
-                index,
-                ScoreDebug {
-                    total: fresh,
-                    freshness: fresh,
-                    fields: vec![],
-                },
-            )
+            (index, ScoreDebug::flat(fresh, fresh))
         })
         .collect()
 }
@@ -226,34 +238,106 @@ fn browse_debug_results(
         .filter(|(index, _)| scope(*index))
         .map(|(index, conversation)| {
             let fresh = freshness_bonus(conversation.timestamp, now);
-            (
-                index,
-                ScoreDebug {
-                    total: fresh,
-                    freshness: fresh,
-                    fields: vec![],
-                },
-            )
+            (index, ScoreDebug::flat(fresh, fresh))
         })
         .collect()
 }
 
-fn identifier_literals(query: &str) -> Vec<Literal> {
-    query
-        .split_whitespace()
-        .filter(|term| term.contains('_'))
-        .map(|term| Literal::new(term.to_string()))
-        .collect()
+fn normalized_query_words(query: &str) -> String {
+    normalize_for_search(query)
 }
 
-fn normalized_query_words(query: &str) -> String {
-    normalize_for_search(
-        &query
+/// Raw query text used for the verbatim bonus: whitespace-collapsed unquoted
+/// text, kept only when normalization would lose something (case, `/`, `-`,
+/// `.` ...). Plain lowercase words are already covered by whole-word scoring.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerbatimNeedle {
+    text: String,
+    case_sensitive: bool,
+}
+
+impl VerbatimNeedle {
+    pub fn from_query(unquoted: &str) -> Option<Self> {
+        let text = unquoted.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return None;
+        }
+        let case_sensitive = has_deliberate_uppercase(&text);
+        let normalized = normalize_for_search(&text)
             .split_whitespace()
-            .filter(|term| !term.contains('_'))
             .collect::<Vec<_>>()
-            .join(" "),
-    )
+            .join(" ");
+        // Without deliberate case, a query that normalization leaves intact
+        // (`Fix parser`) is fully covered by word/adjacency scoring.
+        if !case_sensitive && normalized == text.to_lowercase() {
+            return None;
+        }
+        Some(Self {
+            case_sensitive,
+            text,
+        })
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn case_sensitive(&self) -> bool {
+        self.case_sensitive
+    }
+
+    fn matches(&self, raw: &str) -> bool {
+        if self.case_sensitive {
+            raw.contains(&self.text)
+        } else {
+            contains_ignore_ascii_case(raw, &self.text)
+        }
+    }
+}
+
+/// Sentence-initial capitals (`Fix parser`) are how people type; only
+/// uppercase past a word's first character (`ScoreDebug`, `getUser`) or an
+/// all-caps word (`API_KEY`) signals that case matters.
+fn has_deliberate_uppercase(text: &str) -> bool {
+    text.split_whitespace().any(|word| {
+        let letters: Vec<char> = word.chars().filter(|c| c.is_alphabetic()).collect();
+        if letters.is_empty() {
+            return false;
+        }
+        let all_caps = letters.len() >= 2 && letters.iter().all(|c| c.is_uppercase());
+        all_caps || letters.iter().skip(1).any(|c| c.is_uppercase())
+    })
+}
+
+/// Everything derived from the unquoted query that the scorer needs.
+struct QueryPlan<'a> {
+    words: Vec<&'a str>,
+    adjacent_pairs: Vec<String>,
+    /// Whole normalized query, only for >= 3 words (a 2-word phrase is
+    /// already the single adjacent pair).
+    phrase: Option<String>,
+    verbatim: Option<VerbatimNeedle>,
+}
+
+impl<'a> QueryPlan<'a> {
+    fn new(query_lower: &'a str, unquoted: &str) -> Self {
+        let words: Vec<&str> = query_lower.split_whitespace().collect();
+        let adjacent_pairs: Vec<String> = if words.len() > 1 {
+            words
+                .windows(2)
+                .map(|w| format!("{} {}", w[0], w[1]))
+                .collect()
+        } else {
+            vec![]
+        };
+        let phrase = (words.len() >= 3).then(|| words.join(" "));
+        Self {
+            words,
+            adjacent_pairs,
+            phrase,
+            verbatim: VerbatimNeedle::from_query(unquoted),
+        }
+    }
 }
 
 fn search_debug_with_query(
@@ -279,8 +363,18 @@ fn search_debug_with_query(
     }
 
     let query_lower = normalized_query_words(intent);
-    let query_words: Vec<&str> = query_lower.split_whitespace().collect();
-    let identifier_literals = identifier_literals(intent);
+    let mut plan = QueryPlan::new(&query_lower, parsed.unquoted());
+    let identifier_literals = parsed.identifier_literals();
+    // A lone identifier (`api_key`) is already a hard filter: every survivor
+    // contains it, so the verbatim bonus would be a constant.
+    if plan.verbatim.as_ref().is_some_and(|needle| {
+        identifier_literals
+            .iter()
+            .any(|l| l.text() == needle.text())
+    }) {
+        plan.verbatim = None;
+    }
+    let query_words = &plan.words;
     let literal_filters = parsed
         .literals()
         .iter()
@@ -300,14 +394,7 @@ fn search_debug_with_query(
             .into_iter()
             .map(|index| {
                 let fresh = freshness_bonus(conversations[index].timestamp, now);
-                (
-                    index,
-                    ScoreDebug {
-                        total: fresh,
-                        freshness: fresh,
-                        fields: vec![],
-                    },
-                )
+                (index, ScoreDebug::flat(fresh, fresh))
             })
             .collect();
     }
@@ -320,15 +407,6 @@ fn search_debug_with_query(
         Some(build_literal_corpus(conversations))
     };
 
-    let adjacent_pairs: Vec<String> = if query_words.len() > 1 {
-        query_words
-            .windows(2)
-            .map(|w| format!("{} {}", w[0], w[1]))
-            .collect()
-    } else {
-        vec![]
-    };
-
     let mut scored: Vec<(usize, ScoreDebug, DateTime<Local>)> = searchable
         .par_iter()
         .filter_map(|s| {
@@ -339,12 +417,11 @@ fn search_debug_with_query(
             {
                 return None;
             }
-            let debug = score_text_debug(
+            let debug = score_impl(
                 s,
+                &conversations[s.index],
                 &body_search_text_lower(&conversations[s.index], include_agent_text),
-                &query_words,
-                &adjacent_pairs,
-                conversations[s.index].timestamp,
+                &plan,
                 now,
             )?;
             Some((s.index, debug, conversations[s.index].timestamp))
@@ -364,41 +441,76 @@ fn search_debug_with_query(
         .collect()
 }
 
-/// Field weights for scoring
+/// Field weights for scoring. Dialogue (visible prose) sits below the short
+/// metadata fields but well above body, which is dominated by tool output.
 const WEIGHT_TITLE: f64 = 5.0;
-const WEIGHT_SUMMARY: f64 = 3.0;
 const WEIGHT_PROJECT: f64 = 4.0;
+const WEIGHT_SUMMARY: f64 = 4.0;
+const WEIGHT_DIALOGUE: f64 = 3.0;
 const WEIGHT_BODY: f64 = 1.0;
+/// Per-field bonuses, scaled by field weight.
+const EXACT_WORD_BONUS: f64 = 0.5;
+const ADJACENCY_BONUS: f64 = 2.0;
+const PHRASE_BONUS: f64 = 4.0;
+/// Flat bonus when the raw query appears verbatim in the transcript. Sized
+/// above the maximum freshness bonus (2.0) so recency only orders within
+/// verbatim hits.
+const VERBATIM_BONUS: f64 = 6.0;
 
 /// Debug breakdown of a search score
 pub struct ScoreDebug {
     pub total: f64,
     pub freshness: f64,
+    pub verbatim: f64,
     pub fields: Vec<FieldDebug>,
+}
+
+impl ScoreDebug {
+    fn flat(total: f64, freshness: f64) -> Self {
+        Self {
+            total,
+            freshness,
+            verbatim: 0.0,
+            fields: vec![],
+        }
+    }
 }
 
 pub struct FieldDebug {
     pub name: &'static str,
     pub weight: f64,
     pub tf_score: f64,
+    pub exact_score: f64,
     pub adjacency_score: f64,
+    pub phrase_score: f64,
     /// Per query-word: (word, tf_count, ln_score)
     pub word_details: Vec<(String, usize, f64)>,
 }
 
-/// Core scoring implementation used by both score_text and score_text_debug.
+impl FieldDebug {
+    pub fn is_zero(&self) -> bool {
+        self.tf_score == 0.0
+            && self.exact_score == 0.0
+            && self.adjacency_score == 0.0
+            && self.phrase_score == 0.0
+    }
+}
+
+/// Core scoring implementation.
 ///
 /// Stage 1: Fast rejection using combined text (AND logic, prefix matching).
-/// Stage 2: Per-field scoring with log-saturated TF, adjacency bonuses, field weights.
+/// Stage 2: Per-field scoring with log-saturated TF, whole-word, adjacency and
+/// phrase bonuses, field weights; plus a flat verbatim bonus and freshness.
 /// Returns None if Stage 1 rejects the conversation.
 fn score_impl(
     s: &SearchableConversation,
+    conversation: &Conversation,
     body_lower: &str,
-    query_words: &[&str],
-    adjacent_pairs: &[String],
-    timestamp: DateTime<Local>,
+    plan: &QueryPlan,
     now: DateTime<Local>,
 ) -> Option<ScoreDebug> {
+    let query_words = &plan.words;
+    let timestamp = conversation.timestamp;
     if query_words.is_empty() {
         return None;
     }
@@ -421,11 +533,7 @@ fn score_impl(
             if has_cjk {
                 let fresh = freshness_bonus(timestamp, now);
                 let flat = (query_words.len() as f64) * 0.5;
-                return Some(ScoreDebug {
-                    total: flat + fresh,
-                    freshness: fresh,
-                    fields: vec![],
-                });
+                return Some(ScoreDebug::flat(flat + fresh, fresh));
             }
             return None;
         }
@@ -434,8 +542,9 @@ fn score_impl(
     // Stage 2: Field-aware scoring
     let fields: &[(&str, f64, &'static str)] = &[
         (&s.title_lower, WEIGHT_TITLE, "title"),
-        (&s.summary_lower, WEIGHT_SUMMARY, "summary"),
         (&s.project_lower, WEIGHT_PROJECT, "project"),
+        (&s.summary_lower, WEIGHT_SUMMARY, "summary"),
+        (&s.dialogue_lower, WEIGHT_DIALOGUE, "dialogue"),
         (body_lower, WEIGHT_BODY, "body"),
     ];
 
@@ -447,84 +556,73 @@ fn score_impl(
             continue;
         }
 
-        // Per-word log-saturated TF
+        // Per-word log-saturated TF, plus a flat bonus per word that also
+        // matches as a whole word (`cache` over `cached`).
         let mut field_tf_score = 0.0;
+        let mut exact_words = 0;
         let mut word_details = Vec::new();
         for &qw in query_words {
             let tf = count_prefix_matches(field, qw, 10); // cap at 10
             let ln_score = if tf > 0 { ((1 + tf) as f64).ln() } else { 0.0 };
             field_tf_score += ln_score;
+            if tf > 0 && count_exact_word_matches(field, qw, 1) > 0 {
+                exact_words += 1;
+            }
             word_details.push((qw.to_string(), tf, ln_score));
         }
         let weighted_tf = weight * field_tf_score;
-        base_score += weighted_tf;
+        let weighted_exact = weight * EXACT_WORD_BONUS * exact_words as f64;
 
         // Adjacency bonus using precomputed pairs
-        let adj_count = if !adjacent_pairs.is_empty() {
-            count_adjacent_pairs(field, adjacent_pairs, 3)
+        let adj_count = if !plan.adjacent_pairs.is_empty() {
+            count_adjacent_pairs(field, &plan.adjacent_pairs, 3)
         } else {
             0
         };
-        let weighted_adj = weight * 2.0 * adj_count as f64;
-        base_score += weighted_adj;
+        let weighted_adj = weight * ADJACENCY_BONUS * adj_count as f64;
+
+        // Whole-query phrase bonus (>= 3 words contiguous)
+        let weighted_phrase = match &plan.phrase {
+            Some(phrase) if count_prefix_matches(field, phrase, 1) > 0 => weight * PHRASE_BONUS,
+            _ => 0.0,
+        };
+
+        base_score += weighted_tf + weighted_exact + weighted_adj + weighted_phrase;
 
         field_debugs.push(FieldDebug {
             name,
             weight,
             tf_score: weighted_tf,
+            exact_score: weighted_exact,
             adjacency_score: weighted_adj,
+            phrase_score: weighted_phrase,
             word_details,
         });
     }
 
+    // Verbatim bonus: the raw query (case, slashes, dashes, dots intact)
+    // occurs in the transcript or project name.
+    let verbatim = match &plan.verbatim {
+        Some(needle)
+            if needle.matches(&conversation.full_text)
+                || conversation
+                    .project_name
+                    .as_deref()
+                    .is_some_and(|project| needle.matches(project)) =>
+        {
+            VERBATIM_BONUS
+        }
+        _ => 0.0,
+    };
+
     let fresh = freshness_bonus(timestamp, now);
 
     Some(ScoreDebug {
-        total: base_score + fresh,
+        total: base_score + verbatim + fresh,
         freshness: fresh,
+        verbatim,
         fields: field_debugs,
     })
-}
-
-/// Score with full debug breakdown. Returns None if Stage 1 rejects.
-pub fn score_text_debug(
-    s: &SearchableConversation,
-    body_lower: &str,
-    query_words: &[&str],
-    adjacent_pairs: &[String],
-    timestamp: DateTime<Local>,
-    now: DateTime<Local>,
-) -> Option<ScoreDebug> {
-    score_impl(s, body_lower, query_words, adjacent_pairs, timestamp, now)
-}
-
-/// Returns true if `pos` in `text` is at the start of a word (i.e. preceded by
-/// a non-alphanumeric character or is the start of the string). This treats
-/// markdown punctuation (`*`, `(`, `:`, `.`, etc.) as word boundaries, so a
-/// phrase like `**media pipeline**` is matched the same as `media pipeline`.
-fn is_word_start(text: &str, pos: usize) -> bool {
-    pos == 0
-        || text[..pos]
-            .chars()
-            .next_back()
-            .is_some_and(|c| !c.is_alphanumeric())
-}
-
-/// Count prefix matches of `word` in `text`, up to `max_count`.
-fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
-    let mut start = 0;
-    let mut count = 0;
-    while let Some(pos) = text[start..].find(word) {
-        let actual_pos = start + pos;
-        if is_word_start(text, actual_pos) {
-            count += 1;
-            if count >= max_count {
-                break;
-            }
-        }
-        start = actual_pos + word.len().max(1);
-    }
-    count
 }
 
 /// Count how many precomputed adjacent pairs appear in text.
@@ -532,16 +630,9 @@ fn count_prefix_matches(text: &str, word: &str, max_count: usize) -> usize {
 fn count_adjacent_pairs(text: &str, adjacent_pairs: &[String], max_count: usize) -> usize {
     let mut count = 0;
     for combined in adjacent_pairs {
-        let mut start = 0;
-        while let Some(pos) = text[start..].find(combined.as_str()) {
-            let actual_pos = start + pos;
-            if is_word_start(text, actual_pos) {
-                count += 1;
-                if count >= max_count {
-                    return count;
-                }
-            }
-            start = actual_pos + combined.len().max(1);
+        count += count_prefix_matches(text, combined, max_count - count);
+        if count >= max_count {
+            return count;
         }
     }
     count
@@ -1079,6 +1170,162 @@ mod tests {
             results.len(),
             1,
             "media and pipeline after punctuation must match"
+        );
+    }
+
+    /// Conversation whose visible dialogue is `dialogue` while the body also
+    /// carries `tool_output` (as tool results would).
+    fn make_conv_with_tool_output(
+        dialogue: &str,
+        tool_output: &str,
+        timestamp: DateTime<Local>,
+    ) -> Conversation {
+        let mut conv = make_conv(&format!("{} {}", dialogue, tool_output), timestamp);
+        conv.dialogue_text_lower = normalize_for_search(dialogue);
+        conv
+    }
+
+    #[test]
+    fn dialogue_mention_beats_tool_output_mention() {
+        let now = Local::now();
+        let about_it = make_conv_with_tool_output(
+            "how does the cache work",
+            "unrelated tool output",
+            now - Duration::days(10),
+        );
+        let tool_noise = make_conv_with_tool_output(
+            "list the files",
+            "cache cache cache cache cache cache cache cache cache cache",
+            now,
+        );
+        let convs = vec![tool_noise, about_it];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "cache", now);
+        assert_eq!(
+            results,
+            vec![1, 0],
+            "dialogue match should outrank tool noise"
+        );
+    }
+
+    #[test]
+    fn whole_word_beats_prefix_only() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("the cached value", now),
+            make_conv("the cache value", now - Duration::hours(1)),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "cache", now);
+        assert_eq!(results, vec![1, 0]);
+    }
+
+    #[test]
+    fn punctuation_led_query_matches_inside_token() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("edit src/search/lexical.rs now", now),
+            make_conv("no rust files here", now),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, ".rs", now);
+        assert_eq!(results, vec![0]);
+    }
+
+    #[test]
+    fn verbatim_flag_beats_prose_with_same_words() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("please debug the search ranking", now),
+            make_conv("run --debug-search cache", now - Duration::days(3)),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "--debug-search", now);
+        assert_eq!(results, vec![1, 0]);
+    }
+
+    #[test]
+    fn verbatim_path_beats_prose_with_same_words() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("the src search dir", now),
+            make_conv("look at src/search please", now - Duration::days(3)),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "src/search", now);
+        assert_eq!(results, vec![1, 0]);
+    }
+
+    #[test]
+    fn deliberate_uppercase_prefers_case_exact_occurrence() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("the scoredebug struct", now),
+            make_conv("the ScoreDebug struct", now - Duration::days(3)),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "ScoreDebug", now);
+        assert_eq!(results, vec![1, 0]);
+        // Sentence-initial capital is not a case signal: no verbatim bonus, so
+        // recency orders the tie.
+        let results = search(&convs, &searchable, "Scoredebug", now);
+        assert_eq!(results, vec![0, 1]);
+    }
+
+    #[test]
+    fn verbatim_needle_gate() {
+        assert_eq!(VerbatimNeedle::from_query("fix parser"), None);
+        assert_eq!(VerbatimNeedle::from_query("Fix parser"), None);
+        let needle = VerbatimNeedle::from_query("alpha  src/search").unwrap();
+        assert_eq!(needle.text(), "alpha src/search");
+        assert!(!needle.case_sensitive());
+        assert!(
+            VerbatimNeedle::from_query("API_KEY")
+                .unwrap()
+                .case_sensitive()
+        );
+        assert!(
+            VerbatimNeedle::from_query("getUser")
+                .unwrap()
+                .case_sensitive()
+        );
+    }
+
+    #[test]
+    fn three_word_phrase_beats_pairwise_adjacency() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("agents config then later config setup", now),
+            make_conv("the agents config setup", now - Duration::days(3)),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let results = search(&convs, &searchable, "agents config setup", now);
+        assert_eq!(results, vec![1, 0]);
+    }
+
+    #[test]
+    fn underscore_identifier_is_filtered_and_scored() {
+        let now = Local::now();
+        let convs = vec![
+            make_conv("api_key mentioned once in a tool dump", now),
+            make_conv_full(
+                "we rotated the api_key and the api key header",
+                None,
+                Some("api_key rotation"),
+                None,
+                now - Duration::days(3),
+            ),
+            make_conv("api key without underscore", now),
+        ];
+        let searchable = precompute_search_text(&convs);
+        let debug = debug_search(&convs, &searchable, "api_key", now, |_| true);
+        assert_eq!(
+            debug.results.iter().map(|(i, _)| *i).collect::<Vec<_>>(),
+            vec![1, 0]
+        );
+        assert!(
+            debug.results.iter().all(|(_, score)| score.verbatim == 0.0),
+            "lone identifier filter must not add a constant verbatim bonus"
         );
     }
 

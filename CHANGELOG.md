@@ -1,3 +1,15 @@
+## Unreleased
+
+- Search ranks conversations that talk about a term above conversations whose
+  tool output merely mentions it, prefers whole-word matches over prefix
+  matches, and boosts transcripts containing the query verbatim (`src/search`,
+  `--debug-search`, `ScoreDebug`) above prose with the same words
+- Queries that start with punctuation (`.rs`, `@scope`) now match inside
+  tokens such as `lexical.rs`
+- Identifier queries with underscores (`api_key`) are ranked by relevance
+  instead of only by recency
+- The history cache is rebuilt once on first run after upgrading
+
 ## v0.1.75 (2026-09-16)
 
 - Intel macOS releases and Homebrew installs now include semantic search, and

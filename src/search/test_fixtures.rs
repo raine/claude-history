@@ -1,8 +1,24 @@
-use crate::agent::refs::MessageRange;
 use crate::history::Conversation;
+use crate::history::MessageRange;
 use crate::search::normalize_for_search;
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, TimeZone};
 use std::path::PathBuf;
+
+/// A conversation whose visible `preview` differs from its `full_text`.
+pub fn conversation_with_text(preview: &str, full_text: &str) -> Conversation {
+    let mut conversation = one_message_conversation(
+        preview,
+        Local.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
+        None,
+        None,
+        None,
+    );
+    conversation.full_text = full_text.to_string();
+    conversation.search_text_lower = normalize_for_search(full_text);
+    conversation.dialogue_text_lower = normalize_for_search(full_text);
+    conversation.semantic_turns = vec![full_text.to_string()];
+    conversation
+}
 
 pub fn one_message_conversation(
     text: &str,
@@ -34,6 +50,7 @@ pub fn one_message_conversation(
         semantic_turns: vec![text.to_string()],
         semantic_turn_ranges: vec![MessageRange::single(1)],
         search_text_lower: normalize_for_search(&full_text),
+        dialogue_text_lower: normalize_for_search(text),
         project_name: project.map(str::to_string),
         project_path: None,
         cwd: None,

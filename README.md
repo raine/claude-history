@@ -275,6 +275,9 @@ Unquoted search matches words flexibly:
 Identifier-style terms with underscores keep the underscore, so `api_key` matches
 `api_key` but not `api key`.
 
+Terms that start with punctuation match inside tokens: `.rs` finds `lexical.rs`
+and `@scope` finds `@scope/pkg`.
+
 Use quotes when you need exact text. For example, `"DEPLOYMENT_TOKEN"` matches
 `DEPLOYMENT_TOKEN` but not `deployment token`. Lowercase quoted text ignores
 case, while quoted text with uppercase letters is case-sensitive.
@@ -287,7 +290,13 @@ full session UUID to jump directly to that session. Quote the UUID to search for
 it as transcript text instead.
 
 Results are ranked by relevance using field-aware scoring: matches in the
-title, project name, and summary are weighted higher than body text. Within
+title, project name, and summary are weighted highest, then matches in what you
+and the assistant actually said, then matches anywhere else, including tool
+output. Whole-word matches (`cache`) outrank prefix matches (`cached`), adjacent
+terms outrank scattered ones, and a transcript that contains the query exactly
+as typed (`src/search`, `--debug-search`) ranks above prose with the same words.
+Uppercase inside or across a word (`ScoreDebug`, `API_KEY`) makes that exact
+match case-sensitive; a leading capital (`Fix parser`) does not. Within
 equally relevant results, recent conversations rank first.
 
 ### Time filtering

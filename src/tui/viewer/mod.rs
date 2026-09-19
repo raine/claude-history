@@ -10,10 +10,8 @@ use std::path::Path;
 
 use crate::tui::theme::{self, Theme};
 
-mod commands;
 mod entry;
 
-pub(crate) use commands::process_command_message;
 mod ledger;
 mod markdown;
 mod output;
@@ -34,7 +32,9 @@ use tools::make_tool_summary_output_id;
 /// Width of the focus gutter indicator (▌ + space)
 pub const GUTTER_WIDTH: usize = 2;
 
-const NAME_WIDTH: usize = 9;
+pub const NAME_WIDTH: usize = 9;
+/// Display width of the " │ " separator between name and content
+pub const SEPARATOR_WIDTH: usize = 3;
 /// Width of timestamp prefix when timing is enabled (space + HH:MM + space)
 const TIMESTAMP_WIDTH: usize = 7;
 

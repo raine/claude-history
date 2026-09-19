@@ -32,15 +32,6 @@ pub fn warn(min_level: Option<DebugLevel>, message: &str) {
     }
 }
 
-/// Print an error-level message if the minimum level allows it
-pub fn error(min_level: Option<DebugLevel>, message: &str) {
-    if let Some(level) = min_level
-        && should_log(level, DebugLevel::Error)
-    {
-        eprintln!("[ERROR] {}", message);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

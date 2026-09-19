@@ -1,5 +1,6 @@
 pub mod diagnostic;
 pub mod protocol;
+pub mod records;
 pub mod refs;
 pub mod retrieval;
 pub mod sanitize;

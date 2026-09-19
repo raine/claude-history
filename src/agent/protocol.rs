@@ -1,6 +1,7 @@
 use crate::agent::diagnostic::AgentError;
 use crate::agent::diagnostic::{AgentWarning, format_warning_records};
-use crate::agent::refs::{MessageRange, ResolvedConversation};
+use crate::agent::records::{Cut, Response};
+use crate::agent::refs::ResolvedConversation;
 use crate::agent::sanitize::sanitize_agent_text;
 use crate::agent::transcript::{
     AgentMessage, AgentMessagePart, AgentMessageRole, AgentTranscript, MAX_AGENT_SEGMENT_CHARS,
@@ -8,6 +9,7 @@ use crate::agent::transcript::{
 };
 use crate::agent::visibility::ContentVisibility;
 use crate::error::Result;
+use crate::history::MessageRange;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::str::FromStr;
@@ -54,21 +56,7 @@ pub enum ReadSlice {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProtocolOptions {
     pub budget: Option<usize>,
-    pub tools: bool,
-    pub tool_results: bool,
-    pub thinking: bool,
-    pub subagents: bool,
-}
-
-impl ProtocolOptions {
-    pub fn visibility(self) -> ContentVisibility {
-        ContentVisibility {
-            tools: self.tools,
-            tool_results: self.tool_results,
-            thinking: self.thinking,
-            subagents: self.subagents,
-        }
-    }
+    pub visibility: ContentVisibility,
 }
 
 #[derive(Clone, Debug)]
@@ -140,7 +128,7 @@ pub fn format_read_with_warnings(
             "protocol agent-read cut={} chars={} policy={} omit={}{}\n",
             escape_atom(cut),
             budget_atom(options.budget),
-            options.visibility().atom(),
+            options.visibility.atom(),
             omitted_message_ranges(messages, selected),
             warning_suffix
         ));
@@ -214,7 +202,6 @@ pub fn format_outline_with_warnings(
         .iter()
         .filter_map(|message| render_message(resolved, transcript, message, options))
         .collect();
-    let mut output = String::new();
     let (warning_count, warning_records) = format_warning_records(warnings);
     let warning_suffix = if warning_records.is_empty() {
         String::new()
@@ -224,107 +211,103 @@ pub fn format_outline_with_warnings(
             warning_records.len()
         )
     };
-    output.push_str(&format!(
-        "protocol agent-outline cut=none chars={} policy={}{}\n",
-        budget_atom(options.budget),
-        options.visibility().atom(),
-        warning_suffix
-    ));
-    output.push_str(&conversation_record(resolved));
-
-    if visible.len() <= OUTLINE_SHORT_MESSAGE_LIMIT {
-        for rendered in &visible {
-            output.push_str(&format!(
-                "m{} role={} chars={} anchor={} | {}\n",
-                rendered.message.ordinal,
-                role_atom(rendered.message.role),
-                rendered.body.chars().count(),
-                transcript.message_anchor(resolved, rendered.message),
-                snippet(&rendered.body)
-            ));
+    let conversation = conversation_record(resolved);
+    let short = visible.len() <= OUTLINE_SHORT_MESSAGE_LIMIT;
+    // Units are messages when the outline is short, segments otherwise; the
+    // number of messages a cut omits follows from the units kept.
+    let omitted_from = |cut: &Cut| {
+        let visible_index = if short {
+            cut.kept_units
+        } else {
+            cut.kept_units.saturating_mul(OUTLINE_SEGMENT_SIZE)
+        };
+        (visible_index, visible.len().saturating_sub(visible_index))
+    };
+    let header = |cut: Option<&Cut>| match cut {
+        None => format!(
+            "protocol agent-outline cut=none chars={} policy={}{warning_suffix}\n{conversation}",
+            budget_atom(options.budget),
+            options.visibility.atom(),
+        ),
+        Some(cut) => format!(
+            "protocol agent-outline cut=tail chars={} policy={} omitted-records={} warnings={warning_count} warnings-emitted=0\n{conversation}",
+            budget_atom(options.budget),
+            options.visibility.atom(),
+            omitted_from(cut).1,
+        ),
+    };
+    let cut_footer = |cut: &Cut| {
+        let (visible_index, omitted) = omitted_from(cut);
+        if omitted == 0 {
+            return String::new();
         }
-    } else {
-        for chunk in visible.chunks(OUTLINE_SEGMENT_SIZE) {
-            let first = chunk.first().expect("chunk is non-empty");
-            let last = chunk.last().expect("chunk is non-empty");
-            let count: usize = chunk
-                .iter()
-                .map(|message| message.body.chars().count())
-                .sum();
-            output.push_str(&format!(
-                "seg m{}..m{} chars={} anchors={}..{} | {} / {}\n",
-                first.message.ordinal,
-                last.message.ordinal,
-                count,
-                transcript.message_anchor(resolved, first.message),
-                transcript.message_anchor(resolved, last.message),
-                snippet(&first.body),
-                snippet(&last.body)
-            ));
-        }
-    }
-
-    for record in &warning_records {
-        output.push_str(record);
-    }
-
-    if let Some(budget) = options.budget
-        && output.chars().count() > budget
-    {
-        let conversation = conversation_record(resolved);
-        let data = output
-            .lines()
-            .filter(|line| line.starts_with('m') || line.starts_with("seg "))
-            .collect::<Vec<_>>();
-        for keep in (0..=data.len()).rev() {
-            let visible_index = if visible.len() <= OUTLINE_SHORT_MESSAGE_LIMIT {
-                keep
-            } else {
-                keep.saturating_mul(OUTLINE_SEGMENT_SIZE)
-            };
-            let omitted = visible.len().saturating_sub(visible_index);
-            let mut truncated = format!(
-                "protocol agent-outline cut=tail chars={} policy={} omitted-records={} warnings={} warnings-emitted=0\n",
-                budget,
-                options.visibility().atom(),
-                omitted,
-                warning_count
-            );
-            truncated.push_str(&conversation);
-            for line in data.iter().take(keep) {
-                truncated.push_str(line);
-                truncated.push('\n');
-            }
-            if omitted > 0 {
-                let start = visible[visible_index].message.ordinal;
-                let end = visible
-                    .last()
-                    .expect("omitted outline has a message")
-                    .message
-                    .ordinal;
-                truncated.push_str(&format!(
-                    "continue read ref={}:m{}..m{}\n",
-                    resolved.reference.canonical(),
-                    start,
-                    end
-                ));
-            }
-            if truncated.chars().count() <= budget {
-                return truncated;
-            }
-        }
-        return format!(
+        let start = visible[visible_index].message.ordinal;
+        let end = visible
+            .last()
+            .expect("omitted outline has a message")
+            .message
+            .ordinal;
+        format!(
+            "continue read ref={}:m{start}..m{end}\n",
+            resolved.reference.canonical()
+        )
+    };
+    let fallback = || {
+        format!(
             "protocol agent-outline cut=tail chars={} policy={} omitted-records={}\n",
-            budget,
-            options.visibility().atom(),
+            budget_atom(options.budget),
+            options.visibility.atom(),
             visible.len()
         )
-        .chars()
-        .take(budget)
-        .collect();
-    }
+    };
 
-    output
+    let units = if short {
+        visible
+            .iter()
+            .map(|rendered| {
+                format!(
+                    "m{} role={} chars={} anchor={} | {}\n",
+                    rendered.message.ordinal,
+                    role_atom(rendered.message.role),
+                    rendered.body.chars().count(),
+                    transcript.message_anchor(resolved, rendered.message),
+                    snippet(&rendered.body)
+                )
+            })
+            .collect()
+    } else {
+        visible
+            .chunks(OUTLINE_SEGMENT_SIZE)
+            .map(|chunk| {
+                let first = chunk.first().expect("chunk is non-empty");
+                let last = chunk.last().expect("chunk is non-empty");
+                let count: usize = chunk
+                    .iter()
+                    .map(|message| message.body.chars().count())
+                    .sum();
+                format!(
+                    "seg m{}..m{} chars={} anchors={}..{} | {} / {}\n",
+                    first.message.ordinal,
+                    last.message.ordinal,
+                    count,
+                    transcript.message_anchor(resolved, first.message),
+                    transcript.message_anchor(resolved, last.message),
+                    snippet(&first.body),
+                    snippet(&last.body)
+                )
+            })
+            .collect()
+    };
+
+    Response {
+        budget: options.budget,
+        header: &header,
+        units,
+        whole_trailer: warning_records.concat(),
+        cut_footer: &cut_footer,
+        fallback: &fallback,
+    }
+    .render()
 }
 
 fn conversation_record(resolved: &ResolvedConversation) -> String {
@@ -387,7 +370,7 @@ fn render_message<'a>(
     message: &'a AgentMessage,
     options: ProtocolOptions,
 ) -> Option<RenderedMessage<'a>> {
-    let visibility = options.visibility();
+    let visibility = options.visibility;
     if !visibility.message_is_visible(message) {
         return None;
     }
@@ -981,10 +964,7 @@ mod tests {
     fn options() -> ProtocolOptions {
         ProtocolOptions {
             budget: Some(6000),
-            tools: false,
-            tool_results: false,
-            thinking: false,
-            subagents: false,
+            visibility: ContentVisibility::default(),
         }
     }
 
@@ -1491,9 +1471,12 @@ mod tests {
             None,
             None,
             ProtocolOptions {
-                tools: true,
-                tool_results: true,
-                thinking: true,
+                visibility: ContentVisibility {
+                    tools: true,
+                    tool_results: true,
+                    thinking: true,
+                    subagents: false,
+                },
                 ..options()
             },
         )
@@ -1584,7 +1567,10 @@ mod tests {
             None,
             None,
             ProtocolOptions {
-                subagents: true,
+                visibility: ContentVisibility {
+                    subagents: true,
+                    ..ContentVisibility::default()
+                },
                 ..options()
             },
         )

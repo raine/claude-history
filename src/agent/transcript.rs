@@ -7,9 +7,8 @@ use crate::claude::{
     ContentBlock, LogEntry, UserContent, UserMessage, parse_agent_progress,
 };
 use crate::error::Result;
-use crate::history::{extract_skill_preview, is_clear_metadata_message};
+use crate::history::{MessageOrdinals, Placement, extract_skill_preview};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -119,8 +118,7 @@ impl AgentTranscript {
         let mut valid_records = 0usize;
         let mut summary = None;
         let mut custom_title = None;
-        let mut assistant_id_ordinals = HashMap::new();
-        let mut seen_real_user_message = false;
+        let mut ordinals = MessageOrdinals::new();
         for (line_index, line) in reader.lines().enumerate() {
             let line = line?;
             if line.trim().is_empty() {
@@ -137,6 +135,7 @@ impl AgentTranscript {
                     continue;
                 }
             };
+            let placement = ordinals.place(&entry);
             match entry {
                 LogEntry::User {
                     message,
@@ -144,34 +143,16 @@ impl AgentTranscript {
                     parent_tool_use_id,
                     ..
                 } => {
-                    let Some(agent_message) = user_message_to_agent(
+                    let Placement::Message(ordinal) = placement else {
+                        continue;
+                    };
+                    messages.push(user_message_to_agent(
                         message,
                         timestamp,
                         jsonl_line,
                         parent_tool_use_id,
-                        messages.len() + 1,
-                    ) else {
-                        continue;
-                    };
-
-                    let effective_text = first_user_text(&agent_message);
-                    if effective_text
-                        .as_deref()
-                        .is_some_and(is_clear_metadata_message)
-                    {
-                        continue;
-                    }
-
-                    if !seen_real_user_message
-                        && effective_text
-                            .as_deref()
-                            .is_some_and(|text| text.trim() == "Warmup")
-                    {
-                        continue;
-                    }
-
-                    seen_real_user_message = true;
-                    messages.push(agent_message);
+                        ordinal,
+                    ));
                 }
                 LogEntry::Assistant {
                     message,
@@ -179,34 +160,23 @@ impl AgentTranscript {
                     parent_tool_use_id,
                     ..
                 } => {
-                    if !seen_real_user_message {
-                        continue;
-                    }
-                    let message_id = message.id.clone();
-                    let ordinal = message_id
-                        .as_ref()
-                        .and_then(|id| assistant_id_ordinals.get(id).copied())
-                        .unwrap_or(messages.len() + 1);
-                    let Some(agent_message) = assistant_message_to_agent(
+                    let ordinal = match placement {
+                        Placement::Message(ordinal) | Placement::Replaces(ordinal) => ordinal,
+                        Placement::Control => continue,
+                    };
+                    let agent_message = assistant_message_to_agent(
                         message,
                         timestamp,
                         jsonl_line,
                         parent_tool_use_id,
                         ordinal,
-                    ) else {
-                        continue;
-                    };
-                    if let Some(id) = message_id {
-                        if let Some(existing_ordinal) = assistant_id_ordinals.insert(id, ordinal) {
-                            if let Some(existing) = messages
-                                .iter_mut()
-                                .find(|message| message.ordinal == existing_ordinal)
-                            {
-                                *existing = agent_message;
-                            }
-                        } else {
-                            messages.push(agent_message);
-                        }
+                    );
+                    if placement == Placement::Replaces(ordinal)
+                        && let Some(existing) = messages
+                            .iter_mut()
+                            .find(|message| message.ordinal == ordinal)
+                    {
+                        *existing = agent_message;
                     } else {
                         messages.push(agent_message);
                     }
@@ -215,18 +185,16 @@ impl AgentTranscript {
                     label,
                     text,
                     timestamp,
-                    searchable,
                     ..
                 } => {
-                    if !searchable {
+                    let Placement::Message(ordinal) = placement else {
                         continue;
-                    }
+                    };
                     let rendered = if text.is_empty() {
                         format!("[{label}]")
                     } else {
                         format!("[{label}] {text}")
                     };
-                    let ordinal = messages.len() + 1;
                     messages.push(AgentMessage {
                         ordinal,
                         role: AgentMessageRole::User,
@@ -250,10 +218,9 @@ impl AgentTranscript {
                 }
                 LogEntry::Progress { data, .. } => {
                     if let Some(progress) = parse_agent_progress(&data)
-                        && let Some(agent_message) =
-                            progress_message_to_agent(progress, jsonl_line, messages.len() + 1)
+                        && let Placement::Message(ordinal) = ordinals.place_subagent(&progress)
                     {
-                        messages.push(agent_message);
+                        messages.push(progress_message_to_agent(progress, jsonl_line, ordinal));
                     }
                 }
                 LogEntry::Summary { summary: value } => {
@@ -277,10 +244,6 @@ impl AgentTranscript {
                 | LogEntry::PermissionMode { .. }
                 | LogEntry::Unknown => {}
             }
-        }
-
-        for (index, message) in messages.iter_mut().enumerate() {
-            message.ordinal = index + 1;
         }
 
         if valid_records == 0 && !malformed_lines.is_empty() {
@@ -429,7 +392,7 @@ fn user_message_to_agent(
     jsonl_line: usize,
     parent_tool_use_id: Option<String>,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let parts = match message.content {
         UserContent::String(text) => {
             let text = extract_skill_preview(&text).unwrap_or(text);
@@ -459,7 +422,7 @@ fn user_message_to_agent(
             parent_tool_use_id.clone(),
         ),
     };
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role: AgentMessageRole::User,
         timestamp,
@@ -467,7 +430,7 @@ fn user_message_to_agent(
         assistant_message_id: None,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn assistant_message_to_agent(
@@ -476,7 +439,7 @@ fn assistant_message_to_agent(
     jsonl_line: usize,
     parent_tool_use_id: Option<String>,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let assistant_message_id = message.id;
     let parts = blocks_to_parts(
         AgentMessageRole::Assistant,
@@ -486,7 +449,7 @@ fn assistant_message_to_agent(
         assistant_message_id.clone(),
         parent_tool_use_id.clone(),
     );
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role: AgentMessageRole::Assistant,
         timestamp,
@@ -494,18 +457,17 @@ fn assistant_message_to_agent(
         assistant_message_id,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn progress_message_to_agent(
     progress: AgentProgressData,
     jsonl_line: usize,
     ordinal: usize,
-) -> Option<AgentMessage> {
+) -> AgentMessage {
     let role = match progress.message.message_type.as_str() {
         "user" => AgentMessageRole::User,
-        "assistant" => AgentMessageRole::Assistant,
-        _ => return None,
+        _ => AgentMessageRole::Assistant,
     };
     let ProgressMessage { message, .. } = progress.message;
     let AgentContent::Blocks(blocks) = message.content;
@@ -518,7 +480,7 @@ fn progress_message_to_agent(
         None,
         parent_tool_use_id.clone(),
     );
-    non_empty_message(AgentMessage {
+    AgentMessage {
         ordinal,
         role,
         timestamp: None,
@@ -526,7 +488,7 @@ fn progress_message_to_agent(
         assistant_message_id: None,
         parent_tool_use_id,
         parts,
-    })
+    }
 }
 
 fn blocks_to_parts(
@@ -624,15 +586,6 @@ pub(crate) fn agent_part_search_text(part: &AgentMessagePart) -> Option<String> 
         &sanitize_agent_text(&text),
         MAX_AGENT_SEGMENT_CHARS,
     ))
-}
-
-pub(crate) fn content_blocks_count_as_agent_message(blocks: &[ContentBlock]) -> bool {
-    blocks.iter().any(|block| match block {
-        ContentBlock::Text { text } => !text.trim().is_empty(),
-        ContentBlock::ToolUse { .. } | ContentBlock::ToolResult { .. } => true,
-        ContentBlock::Thinking { thinking, .. } => !thinking.trim().is_empty(),
-        ContentBlock::Image { .. } | ContentBlock::Other => false,
-    })
 }
 
 pub(crate) const MAX_AGENT_SEGMENT_CHARS: usize = 16 * 1024;
@@ -888,17 +841,6 @@ fn source(
         parent_tool_use_id,
         tool_name,
     }
-}
-
-fn non_empty_message(message: AgentMessage) -> Option<AgentMessage> {
-    (!message.parts.is_empty()).then_some(message)
-}
-
-fn first_user_text(message: &AgentMessage) -> Option<String> {
-    message.parts.iter().find_map(|part| match part {
-        AgentMessagePart::Text { text, .. } => Some(text.clone()),
-        _ => None,
-    })
 }
 
 #[cfg(test)]

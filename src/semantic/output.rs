@@ -72,7 +72,7 @@ mod tests {
                 source: crate::semantic::types::SemanticChunkSource::VisibleDialogue,
                 session: session.to_string(),
                 chunk_index: 0,
-                message_range: crate::agent::refs::MessageRange::single(1),
+                message_range: crate::history::MessageRange::single(1),
             },
         };
         SemanticHit::new(score_breakdown, explanation)
@@ -94,6 +94,7 @@ mod tests {
             semantic_turns: vec![],
             semantic_turn_ranges: vec![],
             search_text_lower: String::new(),
+            dialogue_text_lower: String::new(),
             project_name: Some("project-a".to_string()),
             project_path: None,
             cwd: None,

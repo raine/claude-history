@@ -697,7 +697,7 @@ mod tests {
         );
         assert_eq!(
             response.hits[0].message_range,
-            crate::agent::refs::MessageRange::single(2)
+            crate::history::MessageRange::single(2)
         );
     }
 
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(embedder.passage_calls, 0);
         assert_eq!(
             response.hits[0].message_range,
-            crate::agent::refs::MessageRange::single(1)
+            crate::history::MessageRange::single(1)
         );
     }
 

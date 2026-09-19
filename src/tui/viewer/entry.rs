@@ -4,7 +4,6 @@ use crate::claude::{ContentBlock, LogEntry, UserContent};
 
 use super::RenderedLine;
 
-use super::commands::process_command_message;
 use super::ledger::{render_ledger_block_styled, render_ledger_block_styled_dimmed};
 use super::markdown::{apply_thinking_style, render_markdown_to_lines};
 use super::style::subagent_label;
@@ -16,6 +15,7 @@ use super::tools::{
     render_tool_call, render_tool_result, tool_result_display_text,
 };
 use super::*;
+use crate::command_tags::user_text;
 
 /// Classify a log entry and dispatch to the matching focused render
 /// function. This is the only entry point used by the rest of the
@@ -323,13 +323,13 @@ fn step_user_text(
     content: &UserContent,
 ) -> bool {
     let text = match content {
-        UserContent::String(s) => process_command_message(s),
+        UserContent::String(s) => user_text(s),
         UserContent::Blocks(blocks) => {
             let texts: Vec<String> = blocks
                 .iter()
                 .filter_map(|block| {
                     if let ContentBlock::Text { text } = block {
-                        process_command_message(text)
+                        user_text(text)
                     } else {
                         None
                     }

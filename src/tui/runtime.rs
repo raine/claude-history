@@ -5,6 +5,7 @@ use crate::debug_log;
 use crate::error::{AppError, Result};
 use crate::history::{Conversation, LoaderMessage};
 use crate::tui::viewer::ToolDisplayMode;
+use crate::tui::viewer::{GUTTER_WIDTH, NAME_WIDTH, SEPARATOR_WIDTH};
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
     MouseEventKind,
@@ -56,8 +57,6 @@ impl Drop for TerminalGuard {
     }
 }
 
-const NAME_WIDTH: usize = 9;
-
 struct FrameState {
     frame_area: Rect,
     viewport_height: usize,
@@ -83,8 +82,8 @@ fn read_event(wait: Duration) -> Result<Option<Event>> {
 fn prepare_frame(app: &mut App, terminal: &mut Terminal<CrosstermBackend<Stderr>>) -> FrameState {
     let frame_area = terminal.get_frame().area();
     let viewport_height = frame_area.height.saturating_sub(3) as usize;
-    let content_width = (frame_area.width as usize)
-        .saturating_sub(NAME_WIDTH + 3 + crate::tui::viewer::GUTTER_WIDTH);
+    let content_width =
+        (frame_area.width as usize).saturating_sub(NAME_WIDTH + SEPARATOR_WIDTH + GUTTER_WIDTH);
 
     app.check_view_resize(content_width, viewport_height);
     let viewport_height = match app.app_mode() {

@@ -522,7 +522,7 @@ fn exact_literal_metadata(
                     .unwrap_or("?")
                     .to_string(),
                 chunk_index: 0,
-                message_range: crate::agent::refs::MessageRange::single(1),
+                message_range: crate::history::MessageRange::single(1),
             },
         },
     }

@@ -3,11 +3,9 @@
 //! This module handles parsing Claude conversation JSONL files and extracting
 //! conversation metadata like preview text, message counts, and working directory.
 
+use super::messages::{MessageOrdinals, MessageRange, Placement, extract_skill_preview};
 use super::{Conversation, ParseError};
-use crate::agent::refs::MessageRange;
-use crate::agent::transcript::{
-    AgentMessageRole, agent_search_text_from_blocks, content_blocks_count_as_agent_message,
-};
+use crate::agent::transcript::{AgentMessageRole, agent_search_text_from_blocks};
 use crate::claude::{
     AgentContent, LogEntry, TokenUsage, extract_search_text_from_assistant,
     extract_search_text_from_user, extract_text_from_assistant, extract_text_from_user,
@@ -17,7 +15,7 @@ use crate::cli::DebugLevel;
 use crate::debug;
 use crate::error::Result;
 use crate::search::normalize_for_search;
-use crate::semantic::filter::{SemanticTurnRole, filter_turn};
+use crate::semantic::filter::{SemanticTurnRole, filter_turn, strip_structural_tag_spans};
 use chrono::{DateTime, Local};
 use std::collections::{HashMap, VecDeque};
 use std::fs::File;
@@ -155,18 +153,18 @@ pub fn process_conversation_reader<R: BufRead>(
     let mut semantic_turns = Vec::new();
     let mut semantic_turn_ranges = Vec::new();
     let mut preview_parts = Vec::new();
+    // Visible user/assistant prose only (no tool blocks); feeds the lexical
+    // dialogue field so words in the conversation outrank words in tool output.
+    let mut dialogue_parts = Vec::new();
     let mut user_messages = Vec::new();
-    let mut seen_real_user_message = false;
-    let mut skip_next_assistant = false;
     let mut extracted_cwd: Option<PathBuf> = None;
-    let mut message_count: usize = 0;
+    let mut ordinals = MessageOrdinals::new();
     let mut parse_errors: Vec<ParseError> = Vec::new();
     let mut extracted_summary: Option<String> = None;
     let mut extracted_custom_title: Option<String> = None;
     let mut extracted_model: Option<String> = None;
     // Track token usage per message ID to avoid double-counting streaming entries
     let mut token_usage_by_msg: HashMap<String, TokenUsage> = HashMap::new();
-    let mut assistant_id_ordinals: HashMap<String, usize> = HashMap::new();
     let mut assistant_id_semantic_indices: HashMap<String, usize> = HashMap::new();
     let mut assistant_id_preview_indices: HashMap<String, usize> = HashMap::new();
     let mut anonymous_token_count: u64 = 0;
@@ -196,7 +194,7 @@ pub fn process_conversation_reader<R: BufRead>(
 
         match serde_json::from_str::<LogEntry>(&line) {
             Ok(entry) => {
-                // Extract text content
+                let placement = ordinals.place(&entry);
                 match entry {
                     LogEntry::User {
                         message,
@@ -231,64 +229,35 @@ pub fn process_conversation_reader<R: BufRead>(
                         let preview_text = extract_text_from_user(&message);
                         let search_text = extract_search_text_from_user(&message);
 
-                        if preview_text.is_empty() && search_text.is_empty() {
-                            continue;
-                        }
-
                         if !preview_text.is_empty() {
                             user_messages.push(preview_text.clone());
+                            dialogue_parts.push(strip_structural_tag_spans(&preview_text));
                         }
-
-                        // Check for skill invocations first - extract clean preview
-                        // (e.g. "/consult how to do X?" from command XML tags)
-                        let semantic_input = preview_text.clone();
-                        let effective_preview =
-                            if let Some(skill_preview) = extract_skill_preview(&preview_text) {
-                                skill_preview
-                            } else if !preview_text.is_empty()
-                                && is_clear_metadata_message(&preview_text)
-                            {
-                                if !search_text.is_empty() {
-                                    all_parts.push(search_text);
-                                }
-                                continue;
-                            } else {
-                                preview_text
-                            };
-
-                        let has_search_text = !search_text.is_empty();
-                        if has_search_text {
+                        // Control records (/clear wrappers, warmups) still feed
+                        // full_text so their content remains searchable.
+                        if !search_text.is_empty() {
                             all_parts.push(search_text);
                         }
 
-                        // Check if this is a warmup message (first user message is "Warmup")
-                        let is_warmup =
-                            !seen_real_user_message && effective_preview.trim() == "Warmup";
-                        if is_warmup {
-                            skip_next_assistant = true;
-                        } else if !effective_preview.is_empty() || has_search_text {
-                            message_count += 1;
-                            let message_range = MessageRange::single(message_count);
-                            if !effective_preview.is_empty() {
-                                if let Some(turn) =
-                                    filter_turn(SemanticTurnRole::User, &semantic_input)
-                                {
-                                    semantic_turns.push(turn);
-                                    semantic_turn_ranges.push(message_range);
-                                }
-                                preview_parts.push(effective_preview);
-                                seen_real_user_message = true;
+                        let Placement::Message(ordinal) = placement else {
+                            continue;
+                        };
+                        // Skill invocations preview as "/consult how to do X?"
+                        // rather than their command XML.
+                        let effective_preview = extract_skill_preview(&preview_text)
+                            .unwrap_or_else(|| preview_text.clone());
+                        if !effective_preview.is_empty() {
+                            if let Some(turn) = filter_turn(SemanticTurnRole::User, &preview_text) {
+                                semantic_turns.push(turn);
+                                semantic_turn_ranges.push(MessageRange::single(ordinal));
                             }
+                            preview_parts.push(effective_preview);
                         }
                     }
                     LogEntry::Assistant {
                         message, timestamp, ..
                     } => {
                         let assistant_message_id = message.id.clone();
-                        let canonical_ordinal = assistant_message_id
-                            .as_ref()
-                            .and_then(|id| assistant_id_ordinals.get(id).copied())
-                            .unwrap_or(message_count + 1);
                         // Track timestamps for conversation duration
                         if let Some(ref ts_str) = timestamp
                             && let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str)
@@ -327,17 +296,14 @@ pub fn process_conversation_reader<R: BufRead>(
                         if !search_text.is_empty() {
                             all_parts.push(search_text);
                         }
+                        if !preview_text.is_empty() {
+                            dialogue_parts.push(preview_text.clone());
+                        }
 
-                        // Skip this assistant message if it follows a warmup user message
-                        if skip_next_assistant {
-                            skip_next_assistant = false;
-                        } else if seen_real_user_message
-                            && content_blocks_count_as_agent_message(&message.content)
+                        if let Placement::Message(ordinal) | Placement::Replaces(ordinal) =
+                            placement
                         {
-                            if canonical_ordinal == message_count + 1 {
-                                message_count += 1;
-                            }
-                            let message_range = MessageRange::single(canonical_ordinal);
+                            let message_range = MessageRange::single(ordinal);
                             let semantic_turn =
                                 filter_turn(SemanticTurnRole::Assistant, &preview_text);
                             if let Some(id) = assistant_message_id.as_ref() {
@@ -368,7 +334,6 @@ pub fn process_conversation_reader<R: BufRead>(
                                         preview_parts.push(preview_text);
                                     }
                                 }
-                                assistant_id_ordinals.insert(id.clone(), canonical_ordinal);
                             } else if !preview_text.is_empty() {
                                 if let Some(turn) = semantic_turn {
                                     semantic_turns.push(turn);
@@ -398,11 +363,7 @@ pub fn process_conversation_reader<R: BufRead>(
                         };
                     }
                     LogEntry::PiMetadata {
-                        label,
-                        text,
-                        searchable,
-                        usage,
-                        ..
+                        label, text, usage, ..
                     } => {
                         if let Some(usage) = usage {
                             anonymous_token_count += usage.input_tokens
@@ -413,12 +374,13 @@ pub fn process_conversation_reader<R: BufRead>(
                         if label == "Model" && !text.is_empty() {
                             extracted_model = Some(text.clone());
                         }
-                        if searchable && !text.is_empty() {
+                        if let Placement::Message(ordinal) = placement
+                            && !text.is_empty()
+                        {
                             all_parts.push(text.clone());
-                            message_count += 1;
                             if let Some(turn) = filter_turn(SemanticTurnRole::User, &text) {
                                 semantic_turns.push(turn);
-                                semantic_turn_ranges.push(MessageRange::single(message_count));
+                                semantic_turn_ranges.push(MessageRange::single(ordinal));
                             }
                         }
                     }
@@ -429,10 +391,8 @@ pub fn process_conversation_reader<R: BufRead>(
                                 "user" | "assistant"
                             )
                         {
+                            ordinals.place_subagent(&progress);
                             let AgentContent::Blocks(blocks) = progress.message.message.content;
-                            if content_blocks_count_as_agent_message(&blocks) {
-                                message_count += 1;
-                            }
                             let role = match progress.message.message_type.as_str() {
                                 "user" => AgentMessageRole::User,
                                 "assistant" => AgentMessageRole::Assistant,
@@ -540,6 +500,8 @@ pub fn process_conversation_reader<R: BufRead>(
 
     // Pre-normalize search text to avoid re-normalizing on every startup
     let search_text_lower = normalize_for_search(&full_text);
+    let dialogue_text_lower =
+        normalize_for_search(&normalize_whitespace(&dialogue_parts.join(" ")));
 
     let semantic_pairs = semantic_turns
         .into_iter()
@@ -594,10 +556,11 @@ pub fn process_conversation_reader<R: BufRead>(
         semantic_turns,
         semantic_turn_ranges,
         search_text_lower,
+        dialogue_text_lower,
         project_name: None,
         project_path: None,
         cwd: extracted_cwd,
-        message_count,
+        message_count: ordinals.count(),
         parse_errors,
         summary: extracted_summary,
         custom_title: extracted_custom_title,
@@ -605,56 +568,6 @@ pub fn process_conversation_reader<R: BufRead>(
         total_tokens,
         duration_minutes,
     }))
-}
-
-/// Detects metadata emitted by the /clear command wrapper messages and
-/// other system-injected boilerplate that should not appear in previews.
-pub(crate) fn is_clear_metadata_message(message: &str) -> bool {
-    let trimmed = message.trim();
-
-    trimmed.is_empty()
-        || trimmed.starts_with(
-            "Caveat: The messages below were generated by the user while running local commands.",
-        )
-        || trimmed.contains("<local-command-caveat>")
-        || trimmed.contains("<command-name>/clear</command-name>")
-        || trimmed.contains("<command-message>clear</command-message>")
-        || (trimmed.contains("<command-name>") && !trimmed.contains("<command-name>/"))
-        || trimmed.contains("<local-command-stdout>")
-        || trimmed.starts_with("Base directory for this skill:")
-}
-
-/// Extract a clean preview from a skill invocation message (e.g. "/consult how to do X?").
-/// Returns None if the message is not a skill invocation or is a /clear command.
-pub(crate) fn extract_skill_preview(message: &str) -> Option<String> {
-    let trimmed = message.trim();
-
-    let start = trimmed.find("<command-name>")?;
-    let end = trimmed.find("</command-name>")?;
-    let content_start = start + "<command-name>".len();
-    if content_start >= end {
-        return None;
-    }
-
-    let command_name = &trimmed[content_start..end];
-    if !command_name.starts_with('/') || command_name == "/clear" {
-        return None;
-    }
-
-    // Extract command args if present
-    if let Some(args_start) = trimmed.find("<command-args>")
-        && let Some(args_end) = trimmed.find("</command-args>")
-    {
-        let args_content_start = args_start + "<command-args>".len();
-        if args_content_start < args_end {
-            let args = trimmed[args_content_start..args_end].trim();
-            if !args.is_empty() {
-                return Some(format!("{} {}", command_name, args));
-            }
-        }
-    }
-
-    Some(command_name.to_string())
 }
 
 pub(crate) fn is_clear_only_conversation(user_messages: &[String]) -> bool {
@@ -998,77 +911,6 @@ mod tests {
     }
 
     // === Helper function tests ===
-
-    #[test]
-    fn is_clear_metadata_message_detects_patterns() {
-        assert!(is_clear_metadata_message(""));
-        assert!(is_clear_metadata_message("   "));
-        assert!(is_clear_metadata_message(
-            "Caveat: The messages below were generated by the user while running local commands."
-        ));
-        assert!(is_clear_metadata_message(
-            "<local-command-caveat>something</local-command-caveat>"
-        ));
-        assert!(is_clear_metadata_message(
-            "<command-name>/clear</command-name>"
-        ));
-        assert!(is_clear_metadata_message(
-            "<command-message>clear</command-message>"
-        ));
-        assert!(is_clear_metadata_message(
-            "<local-command-stdout>output</local-command-stdout>"
-        ));
-        // <command-args> alone should NOT match - it appears in all skill invocations
-        assert!(!is_clear_metadata_message(
-            "<command-args>foo</command-args>"
-        ));
-
-        assert!(is_clear_metadata_message(
-            "Base directory for this skill: /Users/raine/.claude/skills/consult\n\nConsult an external LLM."
-        ));
-
-        // Should NOT match normal messages
-        assert!(!is_clear_metadata_message("Hello world"));
-        assert!(!is_clear_metadata_message("What is the meaning of life?"));
-
-        // Skill invocation with command-name should NOT be filtered as clear metadata
-        assert!(!is_clear_metadata_message(
-            "<command-message>consult</command-message>\n<command-name>/consult</command-name>\n<command-args>how to do X?</command-args>"
-        ));
-    }
-
-    #[test]
-    fn extract_skill_preview_extracts_command_with_args() {
-        assert_eq!(
-            extract_skill_preview(
-                "<command-message>consult</command-message>\n<command-name>/consult</command-name>\n<command-args>how to do X?</command-args>"
-            ),
-            Some("/consult how to do X?".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_skill_preview_extracts_command_without_args() {
-        assert_eq!(
-            extract_skill_preview("<command-name>/help</command-name>"),
-            Some("/help".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_skill_preview_skips_clear() {
-        assert_eq!(
-            extract_skill_preview(
-                "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn extract_skill_preview_returns_none_for_normal_text() {
-        assert_eq!(extract_skill_preview("Hello world"), None);
-    }
 
     #[test]
     fn skill_invocation_conversation_not_filtered() {
@@ -1534,6 +1376,25 @@ mod tests {
             "Text blocks should still be in preview: {}",
             conv.preview
         );
+    }
+
+    #[test]
+    fn dialogue_text_excludes_tool_results_and_injected_spans() {
+        let content = [
+            user_msg_with_tool_result(
+                "how does the cache work <system-reminder>injected boilerplate</system-reminder>",
+                "verbose tool output mentioning cache",
+            ),
+            assistant_msg("The cache is keyed by ```code fence kept``` blake3"),
+        ]
+        .join("\n");
+
+        let conv = parse_jsonl(&content).unwrap().unwrap();
+        assert_eq!(
+            conv.dialogue_text_lower,
+            "how does the cache work the cache is keyed by ```code fence kept``` blake3"
+        );
+        assert!(conv.search_text_lower.contains("verbose tool output"));
     }
 
     #[test]

@@ -61,7 +61,7 @@ fn strip_markdown_code_fences(text: &str) -> String {
     output
 }
 
-fn strip_structural_tag_spans(text: &str) -> String {
+pub(crate) fn strip_structural_tag_spans(text: &str) -> String {
     let mut stripped = text.to_string();
     for (open, close) in [
         ("<system-reminder>", "</system-reminder>"),

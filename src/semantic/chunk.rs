@@ -1,5 +1,5 @@
-use crate::agent::refs::MessageRange;
 use crate::history::Conversation;
+use crate::history::MessageRange;
 use crate::semantic::types::{ChunkConfig, SemanticChunk, SemanticChunkSource};
 #[cfg(test)]
 use std::path::PathBuf;
@@ -256,6 +256,7 @@ mod tests {
             semantic_turn_ranges: (1..=semantic_turns.len()).map(MessageRange::single).collect(),
             semantic_turns,
             search_text_lower: "title sentinel summary sentinel cwd sentinel project sentinel tool output sentinel full text only sentinel".to_string(),
+            dialogue_text_lower: String::new(),
             project_name: Some("project sentinel".to_string()),
             project_path: Some(PathBuf::from("/projects/project-a")),
             cwd: Some(PathBuf::from("/cwd/sentinel")),

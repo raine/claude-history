@@ -1,9 +1,9 @@
-use crate::agent::refs::MessageRange;
 use crate::agent::sanitize::sanitize_agent_text;
 use crate::agent::transcript::{
     AgentMessage, AgentMessagePart, AgentTranscript, agent_part_search_text, truncate_chars,
 };
 use crate::agent::visibility::ContentVisibility;
+use crate::history::MessageRange;
 use crate::search::literal::Literal;
 use crate::search::query::ParsedQuery;
 use crate::text_match::{contains_cjk, contains_prefix_match, normalize_for_search};
@@ -92,14 +92,14 @@ pub fn retrieve_agent_hits(
             conversation_ref: None,
             timestamp: None,
         },
-        query,
+        &ParsedQuery::parse(query),
         options,
     )
 }
 
 pub fn retrieve_agent_hits_for_target(
     target: AgentTranscriptSearchTarget<'_>,
-    query: &str,
+    query: &ParsedQuery,
     options: AgentRetrievalOptions,
 ) -> Vec<AgentSearchHit> {
     retrieve_agent_hit_candidates(target, query, options)
@@ -114,6 +114,7 @@ pub fn retrieve_agent_hits_for_targets(
     query: &str,
     options: AgentRetrievalOptions,
 ) -> Vec<AgentSearchHit> {
+    let parsed = ParsedQuery::parse(query);
     let mut candidates = targets
         .iter()
         .flat_map(|target| {
@@ -123,13 +124,12 @@ pub fn retrieve_agent_hits_for_targets(
                     conversation_ref: target.conversation_ref,
                     timestamp: target.timestamp,
                 },
-                query,
+                &parsed,
                 options,
             )
         })
         .collect::<Vec<_>>();
-    let prefer_dialogue = ParsedQuery::parse(query).is_quoted_only();
-    sort_candidates(&mut candidates, prefer_dialogue);
+    sort_candidates(&mut candidates, parsed.is_quoted_only());
     candidates.truncate(options.limit);
     candidates
         .into_iter()
@@ -139,14 +139,13 @@ pub fn retrieve_agent_hits_for_targets(
 
 fn retrieve_agent_hit_candidates(
     target: AgentTranscriptSearchTarget<'_>,
-    query: &str,
+    parsed: &ParsedQuery,
     options: AgentRetrievalOptions,
 ) -> Vec<Candidate> {
     if options.limit == 0 || target.transcript.messages.is_empty() {
         return Vec::new();
     }
 
-    let parsed = ParsedQuery::parse(query);
     if parsed.is_effectively_empty() {
         return Vec::new();
     }
@@ -157,9 +156,9 @@ fn retrieve_agent_hit_candidates(
     }
 
     let mut candidates = if parsed.is_quoted_only() {
-        exact_candidates(&segments, target, &parsed, options)
+        exact_candidates(&segments, target, parsed, options)
     } else {
-        lexical_candidates(&segments, target, &parsed, options)
+        lexical_candidates(&segments, target, parsed, options)
     };
     sort_candidates(&mut candidates, parsed.is_quoted_only());
     candidates.truncate(options.limit);
@@ -172,30 +171,8 @@ fn lexical_candidates(
     parsed: &ParsedQuery,
     options: AgentRetrievalOptions,
 ) -> Vec<Candidate> {
-    let unquoted_terms = unquoted_terms(parsed.unquoted());
-    let normalized_query = normalize_for_search(
-        &unquoted_terms
-            .iter()
-            .copied()
-            .filter(|term| !term.contains('_'))
-            .collect::<Vec<_>>()
-            .join(" "),
-    );
-    let query_words = normalized_query
-        .split_whitespace()
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    let identifier_literals = unquoted_terms
-        .iter()
-        .copied()
-        .filter(|term| term.contains('_'))
-        .map(|term| Literal::new(term.to_string()));
-    let literal_filters = parsed
-        .literals()
-        .iter()
-        .cloned()
-        .chain(identifier_literals)
-        .collect::<Vec<_>>();
+    let query_words = parsed.words();
+    let literal_filters = parsed.all_literals();
 
     if query_words.is_empty() && literal_filters.is_empty() {
         return Vec::new();
@@ -436,10 +413,6 @@ fn join_segment_text(segments: &[&Segment]) -> String {
         .map(|segment| segment.text.as_str())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn unquoted_terms(unquoted: &str) -> Vec<&str> {
-    unquoted.split_whitespace().collect()
 }
 
 fn message_matches_words(normalized: &str, words: &[String]) -> bool {

@@ -383,21 +383,9 @@ impl App {
             conv.index = idx;
         }
 
-        self.conversations_snapshot = Arc::new(self.conversations.clone());
-        self.rebuild_semantic_conversations_snapshot();
-
-        // Now precompute search text (only once, at the end)
-        self.searchable = search::precompute_search_text(&self.conversations);
-
-        // Send data snapshot to the background search worker
-        let _ = self.search_tx.send(SearchCommand::UpdateData {
-            conversations: self.conversations_snapshot.clone(),
-            searchable: Arc::new(self.searchable.clone()),
-        });
-
+        // Search text is precomputed once, here, not per streamed batch.
+        self.refresh_search_data();
         self.loading_state = LoadingState::Ready;
-
-        self.invalidate_search_generation();
 
         // Apply filter (handles query, exclusions, and workspace filter)
         self.update_filter();

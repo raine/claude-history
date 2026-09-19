@@ -374,7 +374,7 @@ mod tests {
             session: "session".to_string(),
             chunk_index,
             text: text.to_string(),
-            message_range: crate::agent::refs::MessageRange::single(1),
+            message_range: crate::history::MessageRange::single(1),
         }
     }
 
