@@ -1761,9 +1761,13 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(rgb(th().separator)),
             ));
 
-            // Combine into item (3 or 4 lines depending on context)
+            // Every row takes `lines_per_item` lines so that click-to-row
+            // math in `App::handle_list_click` matches what is drawn; rows
+            // without a context line get a blank one.
             let lines = if let Some(ctx) = context_line {
                 vec![header, preview, ctx, separator]
+            } else if lines_per_item == 4 {
+                vec![header, preview, Line::default(), separator]
             } else {
                 vec![header, preview, separator]
             };
@@ -3403,6 +3407,77 @@ mod tests {
 
         let contents = terminal_contents(&terminal);
         assert!(contents.contains("hidden_literal"), "{contents:?}");
+    }
+
+    #[test]
+    fn literal_query_rows_without_context_keep_the_four_line_pitch() {
+        // Row 1 shows its literal in the preview (no context line); row 2
+        // hides it in full_text (context line). Both must occupy four lines
+        // so that click-to-row math stays aligned with what is drawn.
+        let mut visible = test_conversation();
+        visible.preview = "preview with hidden_literal shown".to_string();
+        visible.full_text = visible.preview.clone();
+        let mut hidden = test_conversation();
+        hidden.preview = "visible lexical preview".to_string();
+        hidden.full_text = format!("visible lexical preview {} hidden_literal", "x ".repeat(80));
+        let mut app = App::new(
+            vec![visible, hidden],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+        app.set_query_for_test("\"hidden_literal\"");
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_list(frame, &app, frame.area()))
+            .unwrap();
+
+        let separator_rows: Vec<u16> = (0..12)
+            .filter(|&y| row_text(&terminal, y).trim_start().starts_with('─'))
+            .collect();
+        assert_eq!(
+            separator_rows,
+            vec![3, 7],
+            "{:?}",
+            terminal_contents(&terminal)
+        );
+    }
+
+    #[test]
+    fn literal_query_click_uses_the_rendered_four_line_pitch() {
+        let mut visible = test_conversation();
+        visible.project_name = Some("visible-project".to_string());
+        visible.preview = "preview with hidden_literal shown".to_string();
+        visible.full_text = visible.preview.clone();
+        let mut hidden = test_conversation();
+        hidden.project_name = Some("hidden-project".to_string());
+        hidden.preview = "visible lexical preview".to_string();
+        hidden.full_text = format!("visible lexical preview {} hidden_literal", "x ".repeat(80));
+        let mut app = App::new(
+            vec![visible, hidden],
+            ToolDisplayMode::Truncated,
+            false,
+            KeyBindings::default(),
+            vec![],
+        );
+        app.set_query_for_test("\"hidden_literal\"");
+        let frame = Rect::new(0, 0, 80, 20);
+        let backend = TestBackend::new(frame.width, frame.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|frame| render_list_mode(frame, &app))
+            .unwrap();
+
+        let second_header_row = (0..frame.height)
+            .find(|&y| row_text(&terminal, y).contains("hidden-project"))
+            .unwrap();
+        assert_eq!(second_header_row, 7);
+        assert!(app.handle_list_click(second_header_row, frame));
+        assert_eq!(app.selected(), Some(1));
     }
 
     #[test]
