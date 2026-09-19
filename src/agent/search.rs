@@ -768,7 +768,7 @@ fn retrieval_output_hit(
         score: hit.score,
         evidence_score: hit.score,
         semantic_score_breakdown: None,
-        source: if mode == SearchMode::Exact || ParsedQuery::parse(&hit.preview).is_quoted_only() {
+        source: if mode == SearchMode::Exact {
             AgentHitKind::Exact
         } else {
             AgentHitKind::Lexical
@@ -1757,6 +1757,78 @@ mod tests {
         assert!(rendered.contains(" | cache warming answer"));
         assert!(rendered.contains("read ref=ch_"));
         assert!(rendered.contains("focus=m2..m2"));
+    }
+
+    #[test]
+    fn lexical_quoted_preview_stays_lexical_in_within_and_global_search() {
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "quoted title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![message(
+            1,
+            AgentMessageRole::Assistant,
+            "\"quoted preview only\"",
+        )]);
+        let within = run_within_search(
+            &request("quoted preview", Some(SearchMode::Lexical)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+        let global_request = global_request("quoted preview", SearchMode::Lexical, 1, true);
+        let global = run_global_lexical_search(
+            &global_request,
+            std::slice::from_ref(&conv),
+            std::slice::from_ref(&resolved.key),
+            &[0],
+            |_| Ok(transcript.clone()),
+        )
+        .unwrap();
+
+        for output in [&within, &global] {
+            assert_eq!(output.mode, SearchMode::Lexical);
+            assert_eq!(output.hits.len(), 1);
+            assert_eq!(output.hits[0].source, AgentHitKind::Lexical);
+            assert!(output.hits[0].preview.starts_with('"'));
+            let rendered = format_agent_output(output);
+            assert!(rendered.contains("source=lexical"), "{rendered}");
+            assert!(!rendered.contains("source=exact"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn exact_mode_and_quoted_only_queries_mark_hits_exact() {
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "exact title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![
+            message(1, AgentMessageRole::Assistant, "\"quoted preview only\""),
+            message(2, AgentMessageRole::Assistant, "cache warming answer"),
+        ]);
+        let exact = run_within_search(
+            &request("cache warming", Some(SearchMode::Exact)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+        assert_eq!(exact.mode, SearchMode::Exact);
+        assert_eq!(exact.hits.len(), 1);
+        assert_eq!(exact.hits[0].focus_range, MessageRange::single(2));
+        assert_eq!(exact.hits[0].source, AgentHitKind::Exact);
+        assert!(format_agent_output(&exact).contains("source=exact"));
+
+        let quoted_only = run_within_search(
+            &request("\"quoted preview only\"", Some(SearchMode::Semantic)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+        assert_eq!(quoted_only.mode, SearchMode::Exact);
+        assert_eq!(quoted_only.hits.len(), 1);
+        assert_eq!(quoted_only.hits[0].focus_range, MessageRange::single(1));
+        assert_eq!(quoted_only.hits[0].source, AgentHitKind::Exact);
+        assert!(format_agent_output(&quoted_only).contains("source=exact"));
     }
 
     #[test]
