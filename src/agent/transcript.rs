@@ -218,14 +218,13 @@ impl AgentTranscript {
                     searchable,
                     ..
                 } => {
-                    if !searchable {
+                    // The parser only counts searchable metadata that has
+                    // text; skip the same records so `mN` stays aligned with
+                    // the cached message ranges.
+                    if !searchable || text.is_empty() {
                         continue;
                     }
-                    let rendered = if text.is_empty() {
-                        format!("[{label}]")
-                    } else {
-                        format!("[{label}] {text}")
-                    };
+                    let rendered = format!("[{label}] {text}");
                     let ordinal = messages.len() + 1;
                     messages.push(AgentMessage {
                         ordinal,
@@ -910,6 +909,33 @@ mod tests {
     fn parse(content: &str) -> AgentTranscript {
         AgentTranscript::from_reader(PathBuf::from("test.jsonl"), Cursor::new(content))
             .expect("transcript should parse")
+    }
+
+    #[test]
+    fn ordinals_agree_with_the_parser_over_empty_searchable_metadata() {
+        // A searchable Pi record with no text (e.g. a `custom` record whose
+        // content has no text blocks) must not take an ordinal here that the
+        // parser's cached message ranges do not have.
+        let content = [
+            user("first"),
+            assistant("reply"),
+            r#"{"type":"pi-metadata","label":"Custom","text":"","searchable":true}"#.to_string(),
+            user("second"),
+        ]
+        .join("\n");
+
+        let transcript = parse(&content);
+        let conversation = crate::history::parser::process_conversation_reader(
+            PathBuf::from("test.jsonl"),
+            Cursor::new(content.as_str()),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(transcript.messages.len(), conversation.message_count);
+        assert_eq!(transcript.messages.last().unwrap().ordinal, 3);
     }
 
     fn resolved() -> ResolvedConversation {
