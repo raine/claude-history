@@ -419,9 +419,23 @@ fn stream_log_entries(
     options: &DisplayOptions,
     format: DisplayFormat,
 ) -> Result<()> {
+    stream_log_entries_with_pager(file_path, options, format, pager::spawn_pager)
+}
+
+fn stream_log_entries_with_pager(
+    file_path: &Path,
+    options: &DisplayOptions,
+    format: DisplayFormat,
+    spawn_pager: impl FnOnce() -> io::Result<std::process::Child>,
+) -> Result<()> {
+    // Verify the input before starting a pager. A later read can still fail,
+    // so the pager lifecycle below also handles rendering errors.
+    let input = File::open(file_path)?;
+    drop(input);
+
     // Spawn pager if requested
     let mut pager_child = if options.use_pager {
-        pager::spawn_pager().ok()
+        spawn_pager().ok()
     } else {
         None
     };
@@ -438,6 +452,9 @@ fn stream_log_entries(
     // Close stdin and wait for pager to finish
     drop(stdout_handle);
     if let Some(mut child) = pager_child {
+        if result.is_err() {
+            let _ = child.kill();
+        }
         let _ = child.wait();
     }
 
@@ -1009,6 +1026,84 @@ mod tests {
         );
         assert!(output.contains("v1 question"));
         assert!(output.contains("v1 answer"));
+    }
+
+    #[cfg(unix)]
+    fn spawn_controlled_pager(
+        script: &std::path::Path,
+        marker: &std::path::Path,
+    ) -> std::io::Result<std::process::Child> {
+        let mut child = std::process::Command::new("sh")
+            .arg(script)
+            .arg(marker)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        for _ in 0..100 {
+            if marker.exists() {
+                return Ok(child);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "controlled pager did not start",
+        ))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_input_is_reported_without_starting_pager() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("missing.jsonl");
+        let mut display_options = options();
+        display_options.use_pager = true;
+        let error =
+            stream_log_entries_with_pager(&input, &display_options, DisplayFormat::Plain, || {
+                panic!("pager must not start for missing input")
+            })
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::Io(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_error_terminates_launched_pager_before_returning() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let marker = directory.path().join("pager-started");
+        let script = directory.path().join("pager.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nprintf started > \"$1\"\nexec sleep 2\n",
+        )
+        .unwrap();
+
+        let mut display_options = options();
+        display_options.use_pager = true;
+        let started = std::time::Instant::now();
+        let error =
+            stream_log_entries_with_pager(&input, &display_options, DisplayFormat::Plain, || {
+                let child = spawn_controlled_pager(&script, &marker).unwrap();
+                assert!(marker.exists());
+                Ok(child)
+            })
+            .unwrap_err();
+
+        assert!(marker.exists());
+        assert!(matches!(
+            error,
+            crate::error::AppError::Io(error)
+                if error.kind() == std::io::ErrorKind::IsADirectory
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 
     #[test]
