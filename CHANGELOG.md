@@ -1,3 +1,17 @@
+## v0.1.76 (2026-09-20)
+
+- Press `Ctrl+L` in the session picker to refresh sessions created, renamed, or
+  deleted by other processes without restarting claude-history
+  ([#88](https://github.com/raine/claude-history/issues/88))
+- Message timing now includes the date, making multi-day conversations easier to
+  follow ([#85](https://github.com/raine/claude-history/issues/85))
+- Pi and OMP conversations now render correctly after selection instead of
+  appearing blank
+- Fix: Quoted-search result rows stay aligned with mouse clicks
+- Agent search reports lexical and exact matches correctly and keeps message
+  references consistent with transcript reads
+- Display errors no longer leave an empty or unresponsive pager open
+
 ## v0.1.75 (2026-09-16)
 
 - Intel macOS releases and Homebrew installs now include semantic search, and
