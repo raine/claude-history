@@ -421,9 +421,6 @@ fn run() -> Result<()> {
     // --local starts with workspace filter on; default is global (filter off)
     let workspace_filter = use_local;
 
-    // Always use streaming global loader for all conversations
-    let rx = history::load_all_conversations_streaming(show_last, args.debug, time_filter);
-
     // An empty result is far more often the time filter than an empty history,
     // so say which when a filter is in play.
     let describe_empty = |error| match error {
@@ -434,7 +431,9 @@ fn run() -> Result<()> {
     };
 
     let (conversations, selected_path) = match tui::run_with_loader(
-        rx,
+        show_last,
+        args.debug,
+        time_filter,
         tool_display,
         show_thinking,
         keys,
@@ -464,6 +463,7 @@ fn run() -> Result<()> {
         }
         (tui::Action::Quit, _) => return Err(AppError::SelectionCancelled),
         (tui::Action::Delete(_), _) => unreachable!("Delete is handled internally"),
+        (tui::Action::Refresh, _) => unreachable!("Refresh is handled internally"),
     };
 
     if args.show_path {

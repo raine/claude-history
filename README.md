@@ -193,6 +193,7 @@ JSONL files and their matching session artifact directories.
 | `Ctrl+F`                | Fork and resume conversation     |
 | `F2`                    | Rename selected session          |
 | `Ctrl+X`                | Delete conversation              |
+| `Ctrl+L`                | Refresh sessions                 |
 | `Tab`                   | Toggle all / workspace scope     |
 | `Ctrl+T`                | Toggle lexical / semantic search |
 | `?`                     | Show keyboard shortcuts          |
@@ -647,10 +648,11 @@ pager = true
 # Example: default_args = ["--dangerously-skip-permissions"]
 
 [keys]
-# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x)
+# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
 # rename = "alt+r"
 # fork = "alt+f"
+# refresh = "ctrl+l"
 
 [search]
 # Search mode used by the conversation list
@@ -697,6 +699,7 @@ are key combinations like `"ctrl+r"`, `"alt+f"`, or `"f2"`.
 - `fork` (string): Fork and resume conversation (default: `"ctrl+f"`)
 - `rename` (string): Rename selected session (default: `"f2"`)
 - `delete` (string): Delete conversation (default: `"ctrl+x"`)
+- `refresh` (string): Refresh sessions from disk (default: `"ctrl+l"`)
 
 #### Search options
 

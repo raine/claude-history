@@ -435,3 +435,59 @@ fn submit_empty_rename_clears_searchable_title() {
     assert_eq!(app.conversations[0].custom_title, None);
     assert!(search::search(&app.conversations, &app.searchable, "old", Local::now()).is_empty());
 }
+
+#[test]
+fn refresh_key_requests_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    let mut app = app_with_conversation(path, None);
+
+    let action = app.handle_key(KeyCode::Char('l'), KeyModifiers::CONTROL, 10);
+
+    assert!(matches!(action, Some(Action::Refresh)));
+}
+
+#[test]
+fn replacing_conversations_preserves_selection_by_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = dir.path().join("first.jsonl");
+    let second = dir.path().join("second.jsonl");
+    let mut app = App::new(
+        vec![
+            test_conversation(first.clone(), None),
+            test_conversation(second.clone(), None),
+        ],
+        ToolDisplayMode::Hidden,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+    app.selected = Some(1);
+
+    let mut refreshed_second = test_conversation(second.clone(), Some("renamed".to_string()));
+    refreshed_second.timestamp = Local.with_ymd_and_hms(2024, 1, 2, 0, 0, 0).unwrap();
+    app.replace_conversations(vec![test_conversation(first, None), refreshed_second]);
+
+    assert_eq!(app.get_selected_path().as_deref(), Some(second.as_path()));
+    let selected = app.get_selected_conversation_index().unwrap();
+    assert_eq!(
+        app.conversations[selected].custom_title.as_deref(),
+        Some("renamed")
+    );
+}
+
+#[test]
+fn replacing_conversations_removes_deleted_sessions_and_deduplicates_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.jsonl");
+    let new = dir.path().join("new.jsonl");
+    let mut app = app_with_conversation(old, None);
+
+    app.replace_conversations(vec![
+        test_conversation(new.clone(), None),
+        test_conversation(new.clone(), None),
+    ]);
+
+    assert_eq!(app.conversations.len(), 1);
+    assert_eq!(app.get_selected_path().as_deref(), Some(new.as_path()));
+}

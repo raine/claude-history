@@ -1,9 +1,11 @@
 use super::app::{Action, App, AppMode, DialogMode, TuiSearchOptions};
 use super::ui;
+use crate::cli::DebugLevel;
 use crate::config::KeyBindings;
 use crate::debug_log;
 use crate::error::{AppError, Result};
 use crate::history::{Conversation, LoaderMessage};
+use crate::time_filter::TimeFilter;
 use crate::tui::viewer::ToolDisplayMode;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
@@ -13,7 +15,6 @@ use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::prelude::*;
 use std::io::{self, Stderr};
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 struct TerminalGuard {
@@ -181,7 +182,9 @@ where
 
 #[allow(clippy::too_many_arguments)]
 pub fn run_with_loader(
-    rx: Receiver<LoaderMessage>,
+    show_last: bool,
+    debug_level: Option<DebugLevel>,
+    time_filter: TimeFilter,
     tool_display: ToolDisplayMode,
     show_thinking: bool,
     keys: KeyBindings,
@@ -191,6 +194,13 @@ pub fn run_with_loader(
     search_options: TuiSearchOptions,
 ) -> Result<(Action, Vec<Conversation>)> {
     let mut guard = TerminalGuard::new()?;
+    let mut loader_rx = Some(crate::history::load_all_conversations_streaming(
+        show_last,
+        debug_level,
+        time_filter,
+    ));
+    let mut refresh_buffer: Option<Vec<Conversation>> = None;
+    let mut refresh_failed = false;
     let mut app = App::new_loading_with_options(
         tool_display,
         show_thinking,
@@ -202,34 +212,79 @@ pub fn run_with_loader(
     );
 
     loop {
-        loop {
-            match rx.try_recv() {
-                Ok(LoaderMessage::Fatal(err)) => {
-                    drop(guard);
-                    return Err(err);
-                }
-                Ok(LoaderMessage::ProjectError) => {}
-                Ok(LoaderMessage::Batch(convs)) => {
-                    app.append_conversations(convs);
-                }
-                Ok(LoaderMessage::Done) => {
-                    app.finish_loading();
-                    if app.conversations().is_empty() {
-                        drop(guard);
-                        return Err(AppError::NoHistoryFound("selected scope".to_string()));
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    if app.is_loading() {
-                        app.finish_loading();
-                        if app.conversations().is_empty() {
+        if let Some(rx) = loader_rx.take() {
+            let mut keep_receiver = true;
+            loop {
+                match rx.try_recv() {
+                    Ok(LoaderMessage::Fatal(err)) => {
+                        keep_receiver = false;
+                        if refresh_buffer.take().is_some() {
+                            app.set_status_message(format!("Refresh failed: {err}"));
+                        } else {
                             drop(guard);
-                            return Err(AppError::NoHistoryFound("selected scope".to_string()));
+                            return Err(err);
                         }
                     }
+                    Ok(LoaderMessage::ProjectError) => {
+                        if refresh_buffer.is_some() {
+                            refresh_failed = true;
+                        }
+                    }
+                    Ok(LoaderMessage::Batch(convs)) => {
+                        if let Some(buffer) = &mut refresh_buffer {
+                            buffer.extend(convs);
+                        } else {
+                            app.append_conversations(convs);
+                        }
+                    }
+                    Ok(LoaderMessage::Done) => {
+                        keep_receiver = false;
+                        if let Some(conversations) = refresh_buffer.take() {
+                            if refresh_failed {
+                                app.set_status_message(
+                                    "Refresh incomplete; keeping existing sessions".to_string(),
+                                );
+                            } else {
+                                let old_count = app.conversations().len();
+                                app.replace_conversations(conversations);
+                                let new_count = app.conversations().len();
+                                app.set_status_message(format!(
+                                    "Refreshed sessions: {old_count} -> {new_count}"
+                                ));
+                            }
+                            refresh_failed = false;
+                        } else {
+                            app.finish_loading();
+                            if app.conversations().is_empty() {
+                                drop(guard);
+                                return Err(AppError::NoHistoryFound("selected scope".to_string()));
+                            }
+                        }
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        keep_receiver = false;
+                        if refresh_buffer.take().is_some() {
+                            app.set_status_message(
+                                "Refresh failed; keeping existing sessions".to_string(),
+                            );
+                            refresh_failed = false;
+                        } else if app.is_loading() {
+                            app.finish_loading();
+                            if app.conversations().is_empty() {
+                                drop(guard);
+                                return Err(AppError::NoHistoryFound("selected scope".to_string()));
+                            }
+                        }
+                        break;
+                    }
+                }
+                if !keep_receiver {
                     break;
                 }
+            }
+            if keep_receiver {
+                loader_rx = Some(rx);
             }
         }
 
@@ -239,7 +294,7 @@ pub fn run_with_loader(
             draw_frame(&app, &mut guard.terminal)?;
         }
 
-        let poll_timeout = if app.is_loading() {
+        let poll_timeout = if loader_rx.is_some() {
             Duration::from_millis(50)
         } else if app.has_search_work_in_flight() {
             Duration::from_millis(8)
@@ -294,6 +349,18 @@ pub fn run_with_loader(
         match event_result {
             EventLoopResult::Continue => {}
             EventLoopResult::Break => continue,
+            EventLoopResult::Return(Some(Action::Refresh)) => {
+                if loader_rx.is_none() {
+                    refresh_buffer = Some(Vec::new());
+                    refresh_failed = false;
+                    loader_rx = Some(crate::history::load_all_conversations_streaming(
+                        show_last,
+                        debug_level,
+                        time_filter,
+                    ));
+                    app.set_status_message("Refreshing sessions...".to_string());
+                }
+            }
             EventLoopResult::Return(Some(action)) => return Ok((action, app.into_conversations())),
             EventLoopResult::Return(None) => {}
         }

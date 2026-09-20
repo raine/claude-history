@@ -1341,6 +1341,7 @@ fn render_help_overlay(
             (keys.fork.help_label(), "Fork resume"),
             (keys.rename.help_label(), "Rename"),
             (keys.delete.help_label(), "Delete"),
+            (keys.refresh.help_label(), "Refresh sessions"),
             ("Esc".into(), "Quit"),
         ];
         if semantic_available {

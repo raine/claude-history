@@ -453,6 +453,9 @@ impl App {
         if self.keys.fork.matches(code, modifiers) {
             return self.get_selected_path().map(Action::ForkResume);
         }
+        if self.keys.refresh.matches(code, modifiers) {
+            return Some(Action::Refresh);
+        }
 
         match code {
             _ if self.keys.rename.matches(code, modifiers) => {
@@ -604,8 +607,11 @@ impl App {
             _ => return false,
         };
 
-        if changed && dispatch_search {
-            self.dispatch_search();
+        if changed {
+            self.clear_selection_anchor();
+            if dispatch_search {
+                self.dispatch_search();
+            }
         }
 
         true

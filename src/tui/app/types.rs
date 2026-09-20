@@ -13,6 +13,7 @@ pub enum Action {
     Delete(PathBuf),
     Resume(PathBuf),
     ForkResume(PathBuf),
+    Refresh,
     Quit,
 }
 

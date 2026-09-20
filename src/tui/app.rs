@@ -57,6 +57,8 @@ pub struct App {
     filtered: Vec<usize>,
     /// Currently selected index into filtered (None if no results)
     selected: Option<usize>,
+    /// Session path to restore after replacing and re-filtering the corpus
+    selection_anchor: Option<PathBuf>,
     /// Current search query
     query: String,
     /// Cursor position in query (character index, not byte)
@@ -136,6 +138,7 @@ impl App {
             searchable: parts.searchable,
             filtered: parts.filtered,
             selected: parts.selected,
+            selection_anchor: None,
             query: String::new(),
             cursor_pos: 0,
             loading_state: parts.loading_state,
@@ -408,6 +411,39 @@ impl App {
         }
     }
 
+    /// Replace the loaded corpus while preserving the current picker state.
+    pub fn replace_conversations(&mut self, mut conversations: Vec<Conversation>) {
+        let mut paths = HashSet::new();
+        conversations.retain(|conversation| {
+            let path = conversation
+                .path
+                .canonicalize()
+                .unwrap_or_else(|_| conversation.path.clone());
+            paths.insert(path)
+        });
+        conversations.sort_by(|left, right| right.timestamp.cmp(&left.timestamp));
+        for (index, conversation) in conversations.iter_mut().enumerate() {
+            conversation.index = index;
+        }
+
+        self.selection_anchor = self.get_selected_path();
+        self.conversations = conversations;
+        self.filtered.clear();
+        self.selected = None;
+        self.refresh_search_data();
+
+        if self.query.trim().is_empty() {
+            self.update_filter();
+            self.prewarm_semantic_cache();
+        } else {
+            self.dispatch_search();
+        }
+    }
+
+    pub fn set_status_message(&mut self, message: String) {
+        self.status_message = Some((message, std::time::Instant::now()));
+    }
+
     /// Consume the app and return its conversations
     pub fn into_conversations(self) -> Vec<Conversation> {
         self.conversations
@@ -483,12 +519,13 @@ impl App {
         self.list_search_mode
     }
 
-    pub fn semantic_search_available(&self) -> bool {
-        self.semantic_search.available
-    }
-
     pub fn has_project_context(&self) -> bool {
         self.current_project_dir_name.is_some()
+    }
+
+    #[cfg(test)]
+    pub fn semantic_search_available(&self) -> bool {
+        self.semantic_search.available
     }
 
     pub fn semantic_toggle_available(&self) -> bool {
@@ -508,6 +545,10 @@ impl App {
             && !self
                 .keys
                 .fork
+                .matches(KeyCode::Char('t'), KeyModifiers::CONTROL)
+            && !self
+                .keys
+                .refresh
                 .matches(KeyCode::Char('t'), KeyModifiers::CONTROL)
     }
 
@@ -551,6 +592,7 @@ impl App {
         let relative_idx = relative_row / lines_per_item;
         let new_idx = offset + relative_idx;
         if new_idx < self.filtered.len() {
+            self.clear_selection_anchor();
             self.selected = Some(new_idx);
             true
         } else {

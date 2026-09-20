@@ -216,6 +216,16 @@ subagents = true
 
         assert!(keys.rename.matches(KeyCode::Char('r'), KeyModifiers::ALT));
     }
+
+    #[test]
+    fn applies_refresh_key_config() {
+        let keys = KeyBindings::from_config(Some(KeysConfig {
+            refresh: Some(parse_key_binding("alt+u").unwrap()),
+            ..Default::default()
+        }));
+
+        assert!(keys.refresh.matches(KeyCode::Char('u'), KeyModifiers::ALT));
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -245,6 +255,7 @@ pub struct KeysConfig {
     pub fork: Option<KeyBinding>,
     pub rename: Option<KeyBinding>,
     pub delete: Option<KeyBinding>,
+    pub refresh: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -344,6 +355,7 @@ pub struct KeyBindings {
     pub fork: KeyBinding,
     pub rename: KeyBinding,
     pub delete: KeyBinding,
+    pub refresh: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -365,6 +377,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('x'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            refresh: KeyBinding {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::CONTROL,
+            },
         }
     }
 }
@@ -379,6 +395,7 @@ impl KeyBindings {
                 fork: cfg.fork.unwrap_or(defaults.fork),
                 rename: cfg.rename.unwrap_or(defaults.rename),
                 delete: cfg.delete.unwrap_or(defaults.delete),
+                refresh: cfg.refresh.unwrap_or(defaults.refresh),
             },
         }
     }

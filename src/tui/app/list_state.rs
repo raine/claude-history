@@ -19,14 +19,22 @@ impl App {
 
     pub(super) fn apply_filtered(&mut self, filtered: Vec<usize>) {
         self.filtered = filtered;
-        self.selected = if self.filtered.is_empty() {
-            None
-        } else {
-            Some(0)
-        };
+        self.selected = self.selection_anchor.take().and_then(|path| {
+            self.filtered
+                .iter()
+                .position(|&index| self.conversations[index].path == path)
+        });
+        if self.selected.is_none() && !self.filtered.is_empty() {
+            self.selected = Some(0);
+        }
+    }
+
+    pub(super) fn clear_selection_anchor(&mut self) {
+        self.selection_anchor = None;
     }
 
     pub(super) fn select_prev(&mut self) {
+        self.clear_selection_anchor();
         if let Some(selected) = self.selected
             && selected > 0
         {
@@ -35,6 +43,7 @@ impl App {
     }
 
     pub(super) fn select_next(&mut self) {
+        self.clear_selection_anchor();
         if let Some(selected) = self.selected
             && selected + 1 < self.filtered.len()
         {
@@ -43,24 +52,28 @@ impl App {
     }
 
     pub(super) fn select_first(&mut self) {
+        self.clear_selection_anchor();
         if !self.filtered.is_empty() {
             self.selected = Some(0);
         }
     }
 
     pub(super) fn select_last(&mut self) {
+        self.clear_selection_anchor();
         if !self.filtered.is_empty() {
             self.selected = Some(self.filtered.len() - 1);
         }
     }
 
     pub(super) fn select_page_up(&mut self) {
+        self.clear_selection_anchor();
         if let Some(selected) = self.selected {
             self.selected = Some(selected.saturating_sub(10));
         }
     }
 
     pub(super) fn select_page_down(&mut self) {
+        self.clear_selection_anchor();
         if let Some(selected) = self.selected {
             let new_selected = (selected + 10).min(self.filtered.len().saturating_sub(1));
             self.selected = Some(new_selected);
@@ -68,6 +81,7 @@ impl App {
     }
 
     pub(super) fn select_half_page_down(&mut self, viewport_height: usize) {
+        self.clear_selection_anchor();
         if let Some(selected) = self.selected {
             let half_page = viewport_height / 2;
             let new_selected = (selected + half_page).min(self.filtered.len().saturating_sub(1));
@@ -76,6 +90,7 @@ impl App {
     }
 
     pub(super) fn scroll_list(&mut self, delta: isize) {
+        self.clear_selection_anchor();
         let Some(selected) = self.selected else {
             return;
         };
