@@ -462,6 +462,14 @@ fn process_log_entries<F: OutputFormatter>(
     options: &DisplayOptions,
     formatter: &mut F,
 ) -> Result<()> {
+    // Pi/OMP records are not `LogEntry`s; use the projected active branch.
+    if let Some(projection) = crate::history::pi::parse_file(file_path)? {
+        for (_, entry) in &projection.entries {
+            process_entry(formatter, entry, options.no_tools, options.show_thinking);
+        }
+        return Ok(());
+    }
+
     for (line_number, line_result) in reader.lines().enumerate() {
         let line = line_result?;
         if line.trim().is_empty() {
@@ -883,6 +891,31 @@ pub fn render_to_terminal(file_path: &Path, options: &DisplayOptions) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_display_follows_the_active_branch_of_an_omp_transcript() {
+        // OMP/Pi records are not `LogEntry`s; without the projection nothing
+        // is printed at all.
+        let path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/omp/v3.jsonl"
+        ));
+        let mut out = Vec::new();
+        let mut formatter = PlainFormatter { writer: &mut out };
+
+        process_log_entries(
+            BufReader::new(File::open(path).unwrap()),
+            path,
+            &DisplayOptions::default(),
+            &mut formatter,
+        )
+        .unwrap();
+
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("You: OMP active question"), "{out:?}");
+        assert!(out.contains("Claude: OMP active answer"), "{out:?}");
+        assert!(!out.contains("OMP_ABANDONED_SENTINEL"), "{out:?}");
+    }
 
     #[test]
     fn process_command_message_skips_local_command_caveat() {
