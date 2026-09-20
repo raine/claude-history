@@ -729,10 +729,16 @@ fn retrieval_hits(
     transcript: &AgentTranscript,
     mode: SearchMode,
 ) -> Vec<AgentOutputHit> {
-    let search_query = if mode == SearchMode::Exact && !ParsedQuery::parse(query).is_quoted_only() {
+    let quoted_only = ParsedQuery::parse(query).is_quoted_only();
+    let search_query = if mode == SearchMode::Exact && !quoted_only {
         quote_query(query)
     } else {
         query.to_string()
+    };
+    let source = if mode == SearchMode::Exact || quoted_only {
+        AgentHitKind::Exact
+    } else {
+        AgentHitKind::Lexical
     };
     retrieve_agent_hits_for_target(
         AgentTranscriptSearchTarget {
@@ -747,7 +753,7 @@ fn retrieval_hits(
         },
     )
     .into_iter()
-    .map(|hit| retrieval_output_hit(hit, conversation, resolved, transcript, mode))
+    .map(|hit| retrieval_output_hit(hit, conversation, resolved, transcript, source))
     .collect()
 }
 
@@ -756,7 +762,7 @@ fn retrieval_output_hit(
     conversation: &Conversation,
     resolved: &ResolvedConversation,
     transcript: &AgentTranscript,
-    mode: SearchMode,
+    source: AgentHitKind,
 ) -> AgentOutputHit {
     AgentOutputHit {
         conversation_ref: resolved.reference.canonical(),
@@ -768,11 +774,7 @@ fn retrieval_output_hit(
         score: hit.score,
         evidence_score: hit.score,
         semantic_score_breakdown: None,
-        source: if mode == SearchMode::Exact || ParsedQuery::parse(&hit.preview).is_quoted_only() {
-            AgentHitKind::Exact
-        } else {
-            AgentHitKind::Lexical
-        },
+        source,
         evidence_source: hit.source,
         render_options: hit.render_options,
         preview: hit.preview,
@@ -1726,6 +1728,30 @@ mod tests {
         assert!(rendered.contains("conversation project=pr_"));
         assert!(rendered.contains(&format!("uuid={TEST_UUID} ref=ch_")));
         assert!(rendered.contains(&format!("ref={}", resolved.reference.canonical())));
+    }
+
+    #[test]
+    fn within_lexical_hit_source_follows_the_query_not_the_preview() {
+        // The matched message is itself a quoted string; that must not turn
+        // an unquoted lexical query into an `exact` hit.
+        let conv = conversation(&format!("{TEST_UUID}.jsonl"), "title");
+        let resolved = resolved(&format!("{TEST_UUID}.jsonl"));
+        let transcript = transcript(vec![message(
+            1,
+            AgentMessageRole::User,
+            "\"cache warming needle\"",
+        )]);
+
+        let output = run_within_search(
+            &request("needle", Some(SearchMode::Lexical)),
+            &conv,
+            &resolved,
+            &transcript,
+            &[],
+        );
+
+        assert_eq!(output.hits.len(), 1, "{output:?}");
+        assert_eq!(output.hits[0].source, AgentHitKind::Lexical);
     }
 
     #[test]
