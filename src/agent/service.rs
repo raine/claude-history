@@ -165,18 +165,13 @@ impl AgentService {
         });
         conversations.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
         let scope = configured_scope(args, &agent_config);
-        let current_project_dir_name = if scope == agent::search::AgentSearchScope::Local {
-            std::env::current_dir()
-                .ok()
-                .map(|dir| history::convert_path_to_project_dir_name(&dir))
+        let workspace = if scope == agent::search::AgentSearchScope::Local {
+            history::Workspace::current()
         } else {
             None
         };
-        let scoped = agent::search::scoped_conversation_inputs(
-            &conversations,
-            scope,
-            current_project_dir_name.as_deref(),
-        )?;
+        let scoped =
+            agent::search::scoped_conversation_inputs(&conversations, scope, workspace.as_ref())?;
         let request = agent::search::AgentSearchRequest {
             query: args.query.clone(),
             top: configured_usize(args.top, DEFAULT_SEARCH_TOP, agent_config.top),
@@ -200,7 +195,31 @@ impl AgentService {
             request.tui_semantic_search,
         );
         let (mut keys, mut base_warnings) =
-            discover_agent_keys(current_project_dir_name.as_deref())?;
+            discover_agent_keys(workspace.as_ref().map(|ws| ws.project_dir_name.as_str()))?;
+        // Local scope also admits Claude sessions stored under another project
+        // directory whose recorded cwd is inside the workspace; make sure their
+        // references resolve too.
+        for &index in &scoped {
+            let conversation = &conversations[index];
+            if conversation.source != history::Source::Claude
+                || keys.iter().any(|key| key.path == conversation.path)
+            {
+                continue;
+            }
+            let project_dir_name = conversation
+                .path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str());
+            let filename = conversation.path.file_name().and_then(|name| name.to_str());
+            if let (Some(project_dir_name), Some(filename)) = (project_dir_name, filename) {
+                keys.push(agent::refs::AgentConversationKey::new(
+                    project_dir_name,
+                    filename,
+                    conversation.path.clone(),
+                ));
+            }
+        }
         keys.retain(|key| !project_is_excluded(&key.path, &agent_config.exclude_projects));
         if time.is_active() {
             // Key discovery walks the projects directory independently, so
@@ -728,6 +747,7 @@ fn conversation_from_agent_transcript(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        cwds: Vec::new(),
     }
 }
 
@@ -929,6 +949,7 @@ fn stripped_semantic_conversation(
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        cwds: Vec::new(),
     }
 }
 

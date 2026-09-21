@@ -1,5 +1,5 @@
 use super::App;
-use crate::history::Conversation;
+use crate::history::{Conversation, Workspace};
 use std::collections::HashSet;
 use std::path::PathBuf;
 
@@ -13,7 +13,7 @@ impl App {
             &self.conversations,
             &self.excluded_projects,
             self.workspace_filter,
-            self.current_project_dir_name.as_deref(),
+            self.workspace.as_ref(),
         )
     }
 
@@ -173,11 +173,12 @@ pub(super) fn filter_conversation_indices<I>(
     conversations: &[Conversation],
     excluded_projects: &HashSet<String>,
     workspace_filter: bool,
-    current_project_dir_name: Option<&str>,
+    workspace: Option<&Workspace>,
 ) -> Vec<usize>
 where
     I: IntoIterator<Item = usize>,
 {
+    let workspace = workspace.filter(|_| workspace_filter);
     indices
         .into_iter()
         .filter(|&idx| {
@@ -186,32 +187,7 @@ where
                 .as_deref()
                 .is_none_or(|name| !project_is_excluded(name, excluded_projects))
         })
-        .filter(|&idx| {
-            let Some(project_dir_name) = current_project_dir_name.filter(|_| workspace_filter)
-            else {
-                return true;
-            };
-            if conversations[idx].source != crate::history::Source::Claude {
-                let Ok(current) = std::env::current_dir() else {
-                    return false;
-                };
-                let current = current.canonicalize().unwrap_or(current);
-                return conversations[idx]
-                    .project_path
-                    .as_ref()
-                    .or(conversations[idx].cwd.as_ref())
-                    .is_some_and(|path| {
-                        path.canonicalize().unwrap_or_else(|_| path.clone()) == current
-                    });
-            }
-            conversations[idx]
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| {
-                    crate::history::path::is_same_project(&name.to_string_lossy(), project_dir_name)
-                })
-        })
+        .filter(|&idx| workspace.is_none_or(|workspace| workspace.contains(&conversations[idx])))
         .collect()
 }
 

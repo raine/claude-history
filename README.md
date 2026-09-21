@@ -567,6 +567,15 @@ folder name. The project filter (toggled with `Tab`) is worktree-aware: it
 includes conversations from the main repo and all its worktrees, regardless of
 which one you're currently in.
 
+The workspace is the directory `claude-history` was started from. With the
+project scope active, the search prompt shows that folder's name, and `Tab`
+briefly shows the full path and its Claude project directory
+(`claude-history --show-dir` prints the same). The scope also includes Claude
+sessions stored under another project directory whose recorded working
+directory is the workspace or a folder below it, such as a session started in a
+parent folder that then moved into this repo. In the viewer, `p` lists every
+working directory a session recorded.
+
 The `--resume` flag works across projects. It will automatically run Claude in
 the correct project directory for the selected conversation.
 
