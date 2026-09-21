@@ -1080,14 +1080,19 @@ fn render_search_bar(frame: &mut Frame, app: &App, area: Rect) {
 
     let prompt_style = Style::default().fg(rgb(th().accent));
     let (prompt_spans, prefix_width) = if app.workspace_filter() {
+        let label = match app.workspace() {
+            Some(workspace) => format!("Project {}", workspace.short_name()),
+            None => "Project".to_string(),
+        };
+        let prefix_width = label.chars().count() + 4;
         (
             vec![
                 Span::raw(" "),
-                Span::styled("Project", Style::default().fg(rgb(th().text_muted))),
+                Span::styled(label, Style::default().fg(rgb(th().text_muted))),
                 Span::raw(" "),
                 Span::styled("\u{276F} ", prompt_style),
             ],
-            11,
+            prefix_width,
         )
     } else {
         (
@@ -2739,6 +2744,7 @@ mod tests {
             model: None,
             total_tokens: 0,
             duration_minutes: None,
+            cwds: Vec::new(),
         }
     }
 

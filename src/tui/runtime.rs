@@ -189,7 +189,7 @@ pub fn run_with_loader(
     show_thinking: bool,
     keys: KeyBindings,
     workspace_filter: bool,
-    current_project_dir_name: Option<String>,
+    workspace: Option<crate::history::Workspace>,
     exclude_projects: Vec<String>,
     search_options: TuiSearchOptions,
 ) -> Result<(Action, Vec<Conversation>)> {
@@ -206,7 +206,7 @@ pub fn run_with_loader(
         show_thinking,
         keys,
         workspace_filter,
-        current_project_dir_name,
+        workspace,
         exclude_projects,
         search_options,
     );

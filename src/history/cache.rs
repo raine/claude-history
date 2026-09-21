@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CACHE_MAGIC: [u8; 8] = *b"CLHIST01";
 const PI_CACHE_MAGIC: [u8; 8] = *b"PIHIST01";
 const OMP_CACHE_MAGIC: [u8; 8] = *b"OMHIST01";
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 const PI_SCHEMA_VERSION: u32 = 2;
 const OMP_SCHEMA_VERSION: u32 = 2;
 
@@ -64,6 +64,8 @@ pub struct CacheEntry {
     pub semantic_turn_ranges: Vec<MessageRange>,
     pub search_text_lower: String,
     pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub cwds: Vec<PathBuf>,
     pub message_count: usize,
     pub parse_errors: Vec<CachedParseError>,
     pub summary: Option<String>,
@@ -241,6 +243,7 @@ pub fn empty_entry(file_size: u64, mtime: SystemTime) -> CacheEntry {
         semantic_turn_ranges: Vec::new(),
         search_text_lower: String::new(),
         cwd: None,
+        cwds: Vec::new(),
         message_count: 0,
         parse_errors: Vec::new(),
         summary: None,
@@ -273,6 +276,7 @@ pub fn entry_from_conversation(
         semantic_turn_ranges: conv.semantic_turn_ranges.clone(),
         search_text_lower: conv.search_text_lower.clone(),
         cwd: conv.cwd.clone(),
+        cwds: conv.cwds.clone(),
         message_count: conv.message_count,
         parse_errors: conv
             .parse_errors
@@ -327,6 +331,7 @@ pub fn conversation_from_entry(entry: &CacheEntry, path: PathBuf, show_last: boo
         project_name: None,
         project_path: None,
         cwd: entry.cwd.clone(),
+        cwds: entry.cwds.clone(),
         message_count: entry.message_count,
         parse_errors: entry
             .parse_errors
@@ -381,6 +386,7 @@ mod tests {
             project_name: Some("test-project".to_string()),
             project_path: Some(PathBuf::from("/test/project")),
             cwd: Some(PathBuf::from("/test/cwd")),
+            cwds: vec![PathBuf::from("/test/cwd"), PathBuf::from("/test/cwd/sub")],
             message_count: 2,
             parse_errors: vec![],
             summary: Some("Test summary".to_string()),
@@ -437,6 +443,7 @@ mod tests {
         assert_eq!(restored.semantic_turn_ranges, conv.semantic_turn_ranges);
         assert_eq!(restored.search_text_lower, conv.search_text_lower);
         assert_eq!(restored.cwd, conv.cwd);
+        assert_eq!(restored.cwds, conv.cwds);
         assert_eq!(restored.message_count, conv.message_count);
         assert_eq!(restored.summary, conv.summary);
         assert_eq!(restored.custom_title, conv.custom_title);

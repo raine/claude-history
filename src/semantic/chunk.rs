@@ -266,6 +266,7 @@ mod tests {
             model: Some("claude-sonnet-4-6".to_string()),
             total_tokens: 0,
             duration_minutes: None,
+            cwds: Vec::new(),
         }
     }
 

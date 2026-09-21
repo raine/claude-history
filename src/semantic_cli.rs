@@ -444,26 +444,19 @@ fn semantic_index_candidates(
 }
 
 fn select_conversations(conversations: &[Conversation], local: bool) -> Result<Vec<&Conversation>> {
-    let current_project_dir_name = if local {
+    let workspace = if local {
         let dir = std::env::current_dir().map_err(AppError::Io)?;
-        Some(crate::history::convert_path_to_project_dir_name(&dir))
+        Some(crate::history::Workspace::from_dir(&dir))
     } else {
         None
     };
 
     let mut selected = Vec::new();
     for conversation in conversations {
-        if let Some(ref project) = current_project_dir_name {
-            let matches = conversation
-                .path
-                .parent()
-                .and_then(|p| p.file_name())
-                .is_some_and(|name| {
-                    crate::history::is_same_project(&name.to_string_lossy(), project)
-                });
-            if !matches {
-                continue;
-            }
+        if let Some(ref workspace) = workspace
+            && !workspace.contains(conversation)
+        {
+            continue;
         }
 
         selected.push(conversation);

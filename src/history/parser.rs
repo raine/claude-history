@@ -158,6 +158,7 @@ pub fn process_conversation_reader<R: BufRead>(
     let mut preview_parts = Vec::new();
     let mut user_messages = Vec::new();
     let mut extracted_cwd: Option<PathBuf> = None;
+    let mut extracted_cwds: Vec<PathBuf> = Vec::new();
     let mut ordinals = MessageOrdinals::new();
     let mut parse_errors: Vec<ParseError> = Vec::new();
     let mut extracted_summary: Option<String> = None;
@@ -219,11 +220,16 @@ pub fn process_conversation_reader<R: BufRead>(
                             last_timestamp = Some(ts);
                         }
 
-                        // Extract cwd from the first user message that has it
-                        if extracted_cwd.is_none()
-                            && let Some(cwd_str) = cwd
-                        {
-                            extracted_cwd = Some(PathBuf::from(cwd_str));
+                        // Record every distinct cwd; the first one is the
+                        // session's home project directory.
+                        if let Some(cwd_str) = cwd {
+                            let cwd_path = PathBuf::from(cwd_str);
+                            if extracted_cwd.is_none() {
+                                extracted_cwd = Some(cwd_path.clone());
+                            }
+                            if !extracted_cwds.contains(&cwd_path) {
+                                extracted_cwds.push(cwd_path);
+                            }
                         }
 
                         let preview_text = extract_text_from_user(&message);
@@ -555,6 +561,7 @@ pub fn process_conversation_reader<R: BufRead>(
         project_name: None,
         project_path: None,
         cwd: extracted_cwd,
+        cwds: extracted_cwds,
         message_count: ordinals.count(),
         parse_errors,
         summary: extracted_summary,
