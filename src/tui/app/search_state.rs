@@ -557,8 +557,18 @@ impl App {
     }
 
     pub(super) fn toggle_workspace_filter(&mut self) {
-        if self.current_project_dir_name.is_some() {
+        if let Some(workspace) = self.workspace.as_ref() {
             self.workspace_filter = !self.workspace_filter;
+            let message = if self.workspace_filter {
+                format!(
+                    "Scope: sessions that worked in {} (stored as {})",
+                    workspace.dir.display(),
+                    workspace.project_dir_name
+                )
+            } else {
+                "Scope: all conversations".to_string()
+            };
+            self.status_message = Some((message, std::time::Instant::now()));
             self.semantic_sent_scope_signature = None;
             self.invalidate_search_generation();
             if self.list_search_mode == ListSearchMode::Semantic && !self.query.trim().is_empty() {

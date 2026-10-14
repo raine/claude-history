@@ -20,6 +20,7 @@ pub mod path;
 pub mod pi;
 pub mod pi_loader;
 mod rename;
+pub mod workspace;
 
 pub(crate) use messages::{MessageOrdinals, Placement};
 
@@ -37,6 +38,7 @@ pub(crate) use messages::{extract_skill_preview, retained_user_text};
 pub(crate) use parser::process_conversation_file;
 pub use path::{convert_path_to_project_dir_name, format_short_name_from_path, is_same_project};
 pub use rename::append_session_rename;
+pub use workspace::Workspace;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Source {
@@ -122,6 +124,10 @@ pub struct Conversation {
     pub project_path: Option<PathBuf>,
     /// The working directory extracted from the JSONL file (the actual cwd)
     pub cwd: Option<PathBuf>,
+    /// Every distinct working directory recorded in the transcript, in order of
+    /// first appearance. Claude Code records the shell's cwd on each message, so
+    /// a session that `cd`s between sibling repos lists all of them here.
+    pub cwds: Vec<PathBuf>,
     /// Number of user and assistant messages in the conversation
     pub message_count: usize,
     /// Parse errors encountered while processing this conversation file

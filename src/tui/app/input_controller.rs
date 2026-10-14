@@ -300,10 +300,30 @@ impl App {
             }
             KeyCode::Char('p') => {
                 if let AppMode::View(ref state) = self.app_mode {
-                    self.status_message = Some((
-                        state.conversation_path.display().to_string(),
-                        std::time::Instant::now(),
-                    ));
+                    let mut message = state.conversation_path.display().to_string();
+                    let cwds: Vec<String> = self
+                        .conversations
+                        .iter()
+                        .find(|conversation| conversation.path == state.conversation_path)
+                        .map(|conversation| {
+                            conversation
+                                .cwds
+                                .iter()
+                                .chain(conversation.cwd.iter())
+                                .map(|path| path.display().to_string())
+                                .fold(Vec::new(), |mut acc, path| {
+                                    if !acc.contains(&path) {
+                                        acc.push(path);
+                                    }
+                                    acc
+                                })
+                        })
+                        .unwrap_or_default();
+                    if !cwds.is_empty() {
+                        message.push_str("  ·  worked in: ");
+                        message.push_str(&cwds.join(", "));
+                    }
+                    self.status_message = Some((message, std::time::Instant::now()));
                 }
                 None
             }

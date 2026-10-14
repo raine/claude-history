@@ -37,6 +37,7 @@ fn test_conversation(path: PathBuf, custom_title: Option<String>) -> Conversatio
         model: None,
         total_tokens: 0,
         duration_minutes: None,
+        cwds: Vec::new(),
     }
 }
 
