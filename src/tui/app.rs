@@ -81,6 +81,8 @@ pub struct App {
     single_file_mode: bool,
     /// Configurable keybindings
     keys: KeyBindings,
+    /// Whether the delete key may delete conversations (`[safety] disable_delete`)
+    delete_enabled: bool,
     /// Whether workspace filter is active (only show current project's conversations)
     workspace_filter: bool,
     /// The encoded project directory name for the current workspace (for filtering)
@@ -116,6 +118,7 @@ struct AppParts {
     show_thinking: bool,
     single_file_mode: bool,
     keys: KeyBindings,
+    delete_enabled: bool,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
     excluded_projects: HashSet<String>,
@@ -150,6 +153,7 @@ impl App {
             show_timing: false,
             single_file_mode: parts.single_file_mode,
             keys: parts.keys,
+            delete_enabled: parts.delete_enabled,
             workspace_filter: parts.workspace_filter,
             current_project_dir_name: parts.current_project_dir_name,
             excluded_projects: parts.excluded_projects,
@@ -249,6 +253,7 @@ impl App {
             show_thinking,
             single_file_mode: false,
             keys,
+            delete_enabled: true,
             workspace_filter: false,
             current_project_dir_name: None,
             excluded_projects,
@@ -260,10 +265,12 @@ impl App {
     }
 
     /// Create a new app in loading state
+    #[allow(clippy::too_many_arguments)]
     pub fn new_loading_with_options(
         tool_display: ToolDisplayMode,
         show_thinking: bool,
         keys: KeyBindings,
+        delete_enabled: bool,
         workspace_filter: bool,
         current_project_dir_name: Option<String>,
         exclude_projects: Vec<String>,
@@ -285,6 +292,7 @@ impl App {
             show_thinking,
             single_file_mode: false,
             keys,
+            delete_enabled,
             workspace_filter,
             current_project_dir_name,
             excluded_projects: exclude_projects.into_iter().collect(),
@@ -340,6 +348,7 @@ impl App {
             show_thinking,
             single_file_mode: true,
             keys,
+            delete_enabled: true,
             workspace_filter: false,
             current_project_dir_name: None,
             excluded_projects: HashSet::new(),
@@ -352,6 +361,10 @@ impl App {
 
     pub fn keys(&self) -> &KeyBindings {
         &self.keys
+    }
+
+    pub fn delete_enabled(&self) -> bool {
+        self.delete_enabled
     }
 
     /// Append a batch of conversations during loading
