@@ -180,6 +180,9 @@ claude-history delete-empty --yes
 The command prints a dry run by default. Add `--yes` to delete the matching
 JSONL files and their matching session artifact directories.
 
+To make deletion impossible, set `disable_delete = true` under
+[`[safety]`](#safety-options) in the config file.
+
 ### Keyboard navigation (List mode)
 
 | Key                     | Action                           |
@@ -671,6 +674,10 @@ mode = "lexical"
 # Deprecated: use [search].mode instead
 semantic_search = false
 
+[safety]
+# Refuse every delete: the TUI delete key, --delete, and delete-empty --yes
+# disable_delete = true
+
 EOF
 ```
 
@@ -723,6 +730,15 @@ are key combinations like `"ctrl+r"`, `"alt+f"`, or `"f2"`.
 - `semantic_search` (boolean): Deprecated compatibility alias. When
   `[search].mode` is unset, `true` starts list search in semantic mode and
   `false` starts lexical mode. Press `Ctrl+T` in the TUI to switch modes.
+
+#### Safety options
+
+- `disable_delete` (boolean): When `true`, nothing deletes transcripts. The
+  delete key shows a notice instead of the confirmation and disappears from the
+  status bar and help, `--delete` exits with an error, and `delete-empty --yes`
+  is refused (the dry run still lists candidates). An unknown key in `[safety]`
+  is a config error, so a typo cannot silently leave deletion enabled
+  (default: `false`)
 
 ### Overriding config
 

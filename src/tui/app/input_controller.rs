@@ -164,7 +164,7 @@ impl App {
 
         if self.keys.delete.matches(code, modifiers) {
             if !self.single_file_mode {
-                self.dialog_mode = DialogMode::ConfirmDelete;
+                self.request_delete_confirmation();
             }
             return None;
         }
@@ -443,7 +443,7 @@ impl App {
 
         if self.keys.delete.matches(code, modifiers) {
             if self.get_selected_path().is_some() {
-                self.dialog_mode = DialogMode::ConfirmDelete;
+                self.request_delete_confirmation();
             }
             return None;
         }

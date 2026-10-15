@@ -188,6 +188,7 @@ pub fn run_with_loader(
     tool_display: ToolDisplayMode,
     show_thinking: bool,
     keys: KeyBindings,
+    delete_enabled: bool,
     workspace_filter: bool,
     current_project_dir_name: Option<String>,
     exclude_projects: Vec<String>,
@@ -205,6 +206,7 @@ pub fn run_with_loader(
         tool_display,
         show_thinking,
         keys,
+        delete_enabled,
         workspace_filter,
         current_project_dir_name,
         exclude_projects,
@@ -310,6 +312,9 @@ pub fn run_with_loader(
             poll_timeout,
             true,
             |app, action| match action {
+                // The delete key never opens the confirmation while deleting is
+                // disabled; this guards the deletion itself as well.
+                Action::Delete(_) if !app.delete_enabled() => EventLoopResult::Continue,
                 Action::Delete(ref path) => {
                     let source = app
                         .get_selected_source()
