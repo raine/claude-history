@@ -6,7 +6,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-pub const DEFAULT_CHUNK_TARGET_CHARS: usize = 2_400;
+pub const DEFAULT_CHUNK_TARGET_CHARS: usize = 1_600;
 pub const DEFAULT_CHUNK_OVERLAP_CHARS: usize = 300;
 pub const DEFAULT_CHUNK_CONTEXT_TURNS: usize = 1;
 pub const DEFAULT_EMBEDDING_BATCH_SIZE: usize = 32;
