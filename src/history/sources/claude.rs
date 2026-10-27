@@ -11,7 +11,9 @@
 //! Records are Claude's `LogEntry` wire format, which only this module
 //! decodes into events.
 
-use crate::claude::{AgentContent, ContentBlock, LogEntry, TokenUsage, UserContent};
+use crate::claude::{
+    AgentContent, ContentBlock, LogEntry, TokenUsage, UserContent, UserProvenance,
+};
 use crate::error::{AppError, Result};
 use crate::history::ParseError;
 use crate::history::Provenance;
@@ -694,9 +696,11 @@ pub(crate) struct Records {
 impl Records {
     pub(crate) fn push(&mut self, entry: LogEntry, origin: Origin) -> Option<Event> {
         self.count += 1;
+        let mut visibility = Visibility::Dialogue;
         let (timestamp, kind) = match entry {
             LogEntry::User {
                 message,
+                provenance,
                 timestamp,
                 cwd,
                 parent_tool_use_id,
@@ -710,6 +714,15 @@ impl Records {
                     UserContent::String(text) => vec![Part::Text(text)],
                     UserContent::Blocks(blocks) => parts(blocks),
                 };
+                let generated = generated_user(&provenance);
+                let before = parts.len();
+                parts.retain(|part| match part {
+                    Part::Text(text) => !generated.unwrap_or_else(|| task_notification(text)),
+                    _ => true,
+                });
+                if parts.is_empty() && before > 0 {
+                    visibility = Visibility::Injected;
+                }
                 for part in &mut parts {
                     if let Part::Text(text) = part
                         && let Some(typed) = unframed(text)
@@ -785,10 +798,51 @@ impl Records {
         Some(Event {
             origin,
             timestamp: timestamp.as_deref().and_then(parse_timestamp),
-            visibility: Visibility::Dialogue,
+            visibility,
             kind,
         })
     }
+}
+
+/// Explicit human authorship wins over conflicting origin signals, except
+/// compaction summaries, which can retain the origin of the summarized turn.
+fn generated_user(provenance: &UserProvenance) -> Option<bool> {
+    if provenance.is_compact_summary.as_bool() == Some(true) {
+        return Some(true);
+    }
+    let kind = provenance
+        .origin
+        .get("kind")
+        .and_then(serde_json::Value::as_str);
+    let turn = provenance.turn_origin.as_str();
+    if kind == Some("human") || turn == Some("human") {
+        return Some(false);
+    }
+    if matches!(
+        kind,
+        Some("task-notification" | "peer" | "coordinator" | "auto-continuation")
+    ) || matches!(turn, Some("task_notification" | "auto_continuation"))
+    {
+        return Some(true);
+    }
+    // Unrecognized provenance is not evidence of generated authorship.
+    if kind.is_some() || turn.is_some() {
+        return Some(false);
+    }
+    None
+}
+
+/// Legacy task notifications occupy a complete text part and identify a task.
+/// Inline mentions, quoted examples and incomplete wrappers remain readable.
+fn task_notification(text: &str) -> bool {
+    text.trim()
+        .strip_prefix("<task-notification>")
+        .and_then(|text| text.strip_suffix("</task-notification>"))
+        .is_some_and(|body| {
+            body.trim_start().starts_with("<task-id>")
+                && body.contains("</task-id>")
+                && !body.contains("</task-notification>")
+        })
 }
 
 /// Opens what Claude Code writes, ahead of the person's question, as the
@@ -903,6 +957,156 @@ pub(super) fn parse_timestamp(text: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn user_event(metadata: serde_json::Value, content: serde_json::Value) -> Event {
+        let mut value = metadata;
+        value["type"] = serde_json::json!("user");
+        value["message"] = serde_json::json!({"role":"user", "content":content});
+        Records::default()
+            .push(serde_json::from_value(value).unwrap(), Origin::default())
+            .unwrap()
+    }
+
+    #[test]
+    fn generated_user_provenance_filters_text_but_preserves_tool_results() {
+        use serde_json::json;
+        for metadata in [
+            json!({"origin":{"kind":"task-notification"}}),
+            json!({"origin":{"kind":"peer"}}),
+            json!({"origin":{"kind":"coordinator"}}),
+            json!({"origin":{"kind":"auto-continuation"}}),
+            json!({"turnOrigin":"task_notification"}),
+            json!({"turnOrigin":"auto_continuation"}),
+            json!({"isCompactSummary":true,"turnOrigin":"human"}),
+        ] {
+            for content in [
+                json!("generated sentinel"),
+                json!([{"type":"text","text":"generated sentinel"}]),
+            ] {
+                assert_eq!(
+                    user_event(metadata.clone(), content).visibility,
+                    Visibility::Injected
+                );
+            }
+            let event = user_event(
+                metadata,
+                json!([
+                    {"type":"text","text":"generated sentinel"},
+                    {"type":"tool_result","tool_use_id":"t1","content":"preserved output"}
+                ]),
+            );
+            assert_eq!(event.visibility, Visibility::Dialogue);
+            let EventKind::Message(message) = event.kind else {
+                panic!("message")
+            };
+            assert!(matches!(
+                message.parts.as_slice(),
+                [Part::ToolResult { .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn human_unknown_and_legacy_records_remain_readable() {
+        use serde_json::json;
+        let notification = "<task-notification>\n<task-id>t1</task-id>done</task-notification>";
+        for metadata in [
+            json!({"origin":{"kind":"human"},"isMeta":true}),
+            json!({"origin":{"kind":"human"},"turnOrigin":"task_notification"}),
+            json!({"origin":{"kind":"task-notification"},"turnOrigin":"human"}),
+            json!({"origin":{"kind":"future-origin"}}),
+        ] {
+            assert_eq!(
+                user_event(metadata, json!(notification)).visibility,
+                Visibility::Dialogue
+            );
+        }
+        for metadata in [
+            json!({}),
+            json!({"promptSource":"queued"}),
+            json!({"promptSource":"sdk"}),
+            json!({"promptSource":"system","isMeta":true}),
+            json!({"origin":42,"turnOrigin":{}}),
+        ] {
+            assert_eq!(
+                user_event(metadata, json!("human prompt")).visibility,
+                Visibility::Dialogue
+            );
+        }
+        assert_eq!(
+            user_event(json!({}), json!(notification)).visibility,
+            Visibility::Injected
+        );
+        for text in [
+            "explain <task-notification><task-id>t1</task-id></task-notification>",
+            "<task-notification><task-id>t1</task-id>",
+            "<task-notification>example</task-notification>",
+            "<task-notification><task-id>t1</task-id></task-notification> keep this",
+        ] {
+            assert_eq!(
+                user_event(json!({}), json!(text)).visibility,
+                Visibility::Dialogue
+            );
+        }
+        let event = user_event(
+            json!({}),
+            json!([
+                {"type":"text","text":notification},
+                {"type":"text","text":"also check this"}
+            ]),
+        );
+        let EventKind::Message(message) = event.kind else {
+            panic!("message")
+        };
+        assert_eq!(
+            message.parts,
+            vec![Part::Text("also check this".to_owned())]
+        );
+    }
+
+    #[test]
+    fn notification_filtering_agrees_across_views_search_and_agent_ordinals() {
+        let lines = [
+            r#"{"type":"user","timestamp":"2026-10-15T14:00:00Z","message":{"role":"user","content":"human question"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"first answer"}]}}"#,
+            r#"{"type":"user","origin":{"kind":"task-notification"},"timestamp":"2026-10-15T15:00:00Z","message":{"role":"user","content":"notification sentinel"}}"#,
+            r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"continued answer"}]}}"#,
+        ].join("\n");
+        let transcript =
+            decode_test_reader(Path::new("/test/session.jsonl"), lines.as_bytes()).unwrap();
+        assert_eq!(crate::history::view::entries(&transcript).len(), 3);
+        let indexed = crate::history::index::index(&transcript).unwrap();
+        assert!(!indexed.full_text.contains("notification sentinel"));
+        assert!(!indexed.own_text.contains("notification sentinel"));
+        assert_eq!(indexed.prompt_count, 1);
+        let agent =
+            crate::agent::transcript::AgentTranscript::from_transcript(&transcript).unwrap();
+        assert_eq!(agent.messages.len(), 3);
+        assert_eq!(
+            agent
+                .messages
+                .iter()
+                .map(|message| message.ordinal)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            indexed.semantic_turn_ranges,
+            (1..=3)
+                .map(crate::agent::refs::MessageRange::single)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            indexed
+                .semantic_turns
+                .iter()
+                .all(|text| !text.contains("notification sentinel"))
+        );
+        assert_eq!(
+            transcript.meta.updated_at,
+            parse_timestamp("2026-10-15T14:00:00Z")
+        );
+    }
 
     fn decode_with_mtime(lines: &[&str], modified: SystemTime) -> Transcript {
         let path = Path::new("/projects/-work/session.jsonl");

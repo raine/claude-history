@@ -373,7 +373,9 @@ fn decode_entry(value: &Value) -> Option<(Option<DateTime<Utc>>, EventKind)> {
             note("Model", &model, false, None)
         }
         "custom_message" => {
-            if object.get("display").and_then(Value::as_bool) == Some(false) {
+            if generated_custom_message(object)
+                || object.get("display").and_then(Value::as_bool) == Some(false)
+            {
                 return None;
             }
             let text = content_text(object.get("content"));
@@ -404,10 +406,16 @@ fn decode_message(
     };
     let usage = || object.get("usage").and_then(pi_usage);
     Some(match role {
-        "user" => (
-            at,
-            message_kind(Role::User, user_parts(object.get("content")), None, None),
-        ),
+        "user" => {
+            let mut parts = user_parts(object.get("content"));
+            parts.retain(|part| {
+                !matches!(part, Part::Text(text) if text.trim() == "Compaction completed. Continue.")
+            });
+            if parts.is_empty() {
+                return None;
+            }
+            (at, message_kind(Role::User, parts, None, None))
+        }
         "assistant" => (
             at,
             message_kind(
@@ -449,7 +457,9 @@ fn decode_message(
             ),
         ),
         "custom" | "hookMessage" => {
-            if object.get("display").and_then(Value::as_bool) == Some(false) {
+            if generated_custom_message(object)
+                || object.get("display").and_then(Value::as_bool) == Some(false)
+            {
                 return None;
             }
             let label = object
@@ -461,6 +471,20 @@ fn decode_message(
         }
         _ => return None,
     })
+}
+
+/// Extension notifications and injected setup are not human prompts.
+fn generated_custom_message(object: &Map<String, Value>) -> bool {
+    matches!(
+        object.get("customType").and_then(Value::as_str),
+        Some(
+            "suba-result"
+                | "subagent_result"
+                | "aven-prime"
+                | "ad-process:notification"
+                | "web-search-content-ready"
+        )
+    )
 }
 
 fn message_kind(
@@ -746,6 +770,108 @@ mod tests {
     use crate::agent::transcript::AgentTranscript;
     use crate::history::model::SourceKind;
     use crate::history::parser::process_conversation_file;
+
+    #[test]
+    fn extension_notifications_are_not_dialogue() {
+        for kind in [
+            "suba-result",
+            "subagent_result",
+            "aven-prime",
+            "ad-process:notification",
+            "web-search-content-ready",
+        ] {
+            assert!(decode_entry(&json!({
+                "type":"custom_message", "customType":kind, "display":true, "content":"generated"
+            })).is_none());
+            assert!(
+                decode_message(
+                    &json!({
+                        "role":"custom", "customType":kind, "display":true, "content":"generated"
+                    }),
+                    None
+                )
+                .is_none()
+            );
+        }
+        assert!(decode_entry(&json!({
+            "type":"custom_message", "customType":"unknown-extension", "display":true, "content":"keep"
+        })).is_some());
+    }
+
+    #[test]
+    fn hidden_notifications_preserve_the_active_branch_and_message_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("pi.jsonl");
+        let records = [
+            json!({"type":"session","version":3,"id":"test","cwd":"/test","timestamp":"2026-10-15T14:00:00Z"}),
+            json!({"type":"message","id":"u","parentId":null,"message":{"role":"user","content":"human question"}}),
+            json!({"type":"custom_message","id":"n","parentId":"u","customType":"suba-result","display":true,"content":"notification sentinel"}),
+            json!({"type":"message","id":"c","parentId":"n","message":{"role":"user","content":"Compaction completed. Continue."}}),
+            json!({"type":"message","id":"a","parentId":"c","message":{"role":"assistant","content":[{"type":"text","text":"visible answer"}]}}),
+        ];
+        std::fs::write(
+            &path,
+            records
+                .iter()
+                .map(Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .unwrap();
+        let indexed = process_conversation_file(path.clone(), None, None)
+            .unwrap()
+            .unwrap();
+        assert!(indexed.full_text.contains("visible answer"));
+        assert!(!indexed.full_text.contains("notification sentinel"));
+        assert!(!indexed.full_text.contains("Compaction completed"));
+        assert_eq!(indexed.prompt_count, 1);
+        assert_eq!(
+            indexed.semantic_turn_ranges,
+            vec![
+                crate::agent::refs::MessageRange::single(1),
+                crate::agent::refs::MessageRange::single(2),
+            ]
+        );
+        let agent = AgentTranscript::load(&path).unwrap();
+        assert_eq!(agent.messages.len(), 2);
+        assert_eq!(agent.messages[1].ordinal, 2);
+    }
+
+    #[test]
+    fn only_exact_compaction_continuation_text_is_removed() {
+        let continuation = "Compaction completed. Continue.";
+        for content in [
+            json!(continuation),
+            json!([{"type":"text","text":continuation}]),
+        ] {
+            assert!(decode_message(&json!({"role":"user","content":content}), None).is_none());
+        }
+        for text in [
+            "explain Compaction completed. Continue.",
+            "Compaction completed. Continue. with the tests",
+            "human prompt",
+        ] {
+            assert!(decode_message(&json!({"role":"user","content":text}), None).is_some());
+        }
+        assert!(
+            decode_message(
+                &json!({"role":"toolResult","toolCallId":"t1","content":continuation}),
+                None
+            )
+            .is_some()
+        );
+        let (_, kind) = decode_message(
+            &json!({"role":"user","content":[
+                {"type":"text","text":continuation}, {"type":"text","text":"human prompt"}
+            ]}),
+            None,
+        )
+        .unwrap();
+        let EventKind::Message(message) = kind else {
+            panic!("message")
+        };
+        assert_eq!(message.parts, vec![Part::Text("human prompt".to_owned())]);
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))

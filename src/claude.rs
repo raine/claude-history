@@ -9,6 +9,8 @@ pub enum LogEntry {
     },
     User {
         message: UserMessage,
+        #[serde(flatten)]
+        provenance: UserProvenance,
         /// ISO 8601 timestamp when this message was sent
         #[serde(default)]
         timestamp: Option<String>,
@@ -91,6 +93,17 @@ pub enum LogEntry {
     },
     #[serde(other)]
     Unknown,
+}
+
+/// Authorship metadata is optional and may evolve independently of the message.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct UserProvenance {
+    #[serde(default)]
+    pub origin: serde_json::Value,
+    #[serde(default, rename = "turnOrigin")]
+    pub turn_origin: serde_json::Value,
+    #[serde(default, rename = "isCompactSummary")]
+    pub is_compact_summary: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
