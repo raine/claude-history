@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.81 (2026-10-27)
+
+- Fix: Generated notifications and automatic continuation prompts in Claude Code
+  and Pi no longer clutter conversations, appear in search, or inflate prompt
+  counts ([#94](https://github.com/raine/claude-history/issues/94))
+
 ## v0.1.80 (2026-10-18)
 
 - The conversation list shows how many prompts you typed instead of a message
