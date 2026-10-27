@@ -10,6 +10,15 @@ const EXPORT_OPTIONS: [&str; 4] = [
 ];
 
 impl App {
+    /// Open the delete confirmation, or explain why deleting is unavailable.
+    pub(super) fn request_delete_confirmation(&mut self) {
+        if self.delete_enabled {
+            self.dialog_mode = DialogMode::ConfirmDelete;
+        } else {
+            self.set_status_message("Delete is disabled by [safety] disable_delete".to_string());
+        }
+    }
+
     pub(super) fn handle_confirm_key(&mut self, code: KeyCode) -> Option<Action> {
         match code {
             KeyCode::Char('y') | KeyCode::Char('Y') => {

@@ -428,6 +428,49 @@ fn bare_r_remains_search_input() {
 }
 
 #[test]
+fn delete_key_asks_for_confirmation_by_default() {
+    let mut app = app_with_conversation(PathBuf::from("/tmp/abc123.jsonl"), None);
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL, 10);
+
+    assert_eq!(app.dialog_mode, DialogMode::ConfirmDelete);
+}
+
+#[test]
+fn disabled_delete_key_explains_instead_of_confirming() {
+    let mut app = app_with_conversation(PathBuf::from("/tmp/abc123.jsonl"), None);
+    app.delete_enabled = false;
+
+    let action = app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL, 10);
+
+    assert!(action.is_none());
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    // The refused key must not fall through to the search input either.
+    assert_eq!(app.query(), "");
+    assert!(
+        app.status_message()
+            .is_some_and(|(message, _)| message.contains("disable_delete"))
+    );
+}
+
+#[test]
+fn disabled_delete_key_is_refused_in_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+    app.delete_enabled = false;
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::CONTROL, 10);
+
+    assert_eq!(app.dialog_mode, DialogMode::None);
+    assert!(app.status_message().is_some());
+    assert!(path.exists());
+}
+
+#[test]
 fn submit_rename_reparses_and_updates_search_index() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("abc123.jsonl");

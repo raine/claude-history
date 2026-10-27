@@ -125,6 +125,8 @@ pub struct App {
     single_file_mode: bool,
     /// Configurable keybindings
     keys: KeyBindings,
+    /// Whether the delete key may delete conversations (`[safety] disable_delete`)
+    delete_enabled: bool,
     /// Whether workspace filter is active (only show current project's conversations)
     workspace_filter: bool,
     /// Whether automated and child conversations are listed
@@ -214,6 +216,7 @@ impl App {
             show_timing: false,
             single_file_mode: parts.single_file_mode,
             keys: parts.keys,
+            delete_enabled: true,
             workspace_filter: parts.workspace_filter,
             all_kinds: parts.all_kinds,
             user_only: false,
@@ -408,6 +411,14 @@ impl App {
 
     pub fn keys(&self) -> &KeyBindings {
         &self.keys
+    }
+
+    pub fn delete_enabled(&self) -> bool {
+        self.delete_enabled
+    }
+
+    pub fn set_delete_enabled(&mut self, enabled: bool) {
+        self.delete_enabled = enabled;
     }
 
     /// Shows the cards of `snapshot`: rows come from its cards from now on

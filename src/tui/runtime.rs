@@ -507,6 +507,7 @@ pub fn run_with_loader(
     tool_display: ToolDisplayMode,
     show_thinking: bool,
     keys: KeyBindings,
+    delete_enabled: bool,
     workspace_filter: bool,
     workspace: Option<crate::history::Workspace>,
     exclude_projects: Vec<String>,
@@ -528,6 +529,7 @@ pub fn run_with_loader(
         exclude_paths,
         search_options,
     );
+    app.set_delete_enabled(delete_enabled);
     let no_history = || AppError::NoHistoryFound("selected scope".to_string());
     match &mut store {
         Some(store) => {
@@ -670,6 +672,9 @@ pub fn run_with_loader(
             ev,
             true,
             |app, action| match action {
+                // The delete key never opens the confirmation while deleting is
+                // disabled; this guards the deletion itself as well.
+                Action::Delete(_) if !app.delete_enabled() => EventLoopResult::Continue,
                 Action::Delete(ref path) => {
                     let source = app
                         .get_selected_source()

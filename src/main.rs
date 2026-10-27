@@ -75,6 +75,14 @@ fn resolve_bool_setting(
 }
 
 fn run_delete_empty_command(args: DeleteEmptyArgs) -> Result<()> {
+    // The dry run only lists candidates, so it stays available when deleting is disabled.
+    if args.yes {
+        config::load_config()?
+            .safety
+            .unwrap_or_default()
+            .ensure_delete_allowed()?;
+    }
+
     let scope = if args.local {
         history::DeleteEmptyScope::Local
     } else {
@@ -196,6 +204,7 @@ fn run() -> Result<()> {
     });
     let exclude_projects = tui_config.exclude_projects;
     let exclude_paths = tui_config.exclude_paths;
+    let safety_config = config.safety.unwrap_or_default();
 
     // Disable colors globally when --no-color is passed
     if args.no_color {
@@ -242,6 +251,7 @@ fn run() -> Result<()> {
 
     // Handle --delete flag: delete a session by UUID and exit
     if let Some(ref session_id) = args.delete {
+        safety_config.ensure_delete_allowed()?;
         let count = history::delete_session_by_uuid(session_id)?;
         if count == 1 {
             eprintln!("Deleted session {}", session_id);
@@ -450,6 +460,7 @@ fn run() -> Result<()> {
         tool_display,
         show_thinking,
         keys,
+        !safety_config.disable_delete,
         workspace_filter,
         workspace,
         exclude_projects,

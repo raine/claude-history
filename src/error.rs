@@ -32,6 +32,9 @@ pub enum AppError {
     #[error("Update error: {0}")]
     UpdateError(String),
 
+    #[error("Deleting is disabled by `disable_delete` in the [safety] section of the config file")]
+    DeleteDisabled,
+
     #[error("Agent command error: {0}")]
     Agent(#[from] crate::agent::diagnostic::AgentError),
 
