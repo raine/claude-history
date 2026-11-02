@@ -12,6 +12,7 @@ mod error;
 mod history;
 mod markdown;
 mod pager;
+mod pins;
 pub mod search;
 mod semantic;
 mod semantic_cli;

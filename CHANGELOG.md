@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New: Pin conversations with `F3` to mark them with a star in the list.
+  Pins are kept in `~/.config/claude-history/pins.json`, independent of any
+  project or workspace, and survive restarts and store rebuilds
+
 ## v0.1.83 (2026-11-04)
 
 - Fix: Unbound Ctrl and Alt shortcuts no longer insert letters into the

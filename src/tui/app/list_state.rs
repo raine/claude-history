@@ -108,6 +108,30 @@ impl App {
         self.selected = Some(new_selected);
     }
 
+    /// Toggles whether the selected conversation is pinned, persisting the
+    /// change to the user's pins file. Works the same in the list and in
+    /// the viewer, like `get_selected_path`.
+    pub(super) fn toggle_pin_selected(&mut self) {
+        let Some(path) = self.get_selected_path() else {
+            return;
+        };
+        let now_pinned = !self.pinned.contains(&path);
+        match crate::pins::set_pinned(&path, now_pinned) {
+            Ok(()) => {
+                if now_pinned {
+                    self.pinned.insert(path);
+                } else {
+                    self.pinned.remove(&path);
+                }
+                let message = if now_pinned { "Pinned" } else { "Unpinned" };
+                self.set_status_message(message.to_string());
+            }
+            Err(error) => {
+                self.set_status_message(format!("Could not save pin: {error}"));
+            }
+        }
+    }
+
     /// Path of the selected conversation: the one in the viewer while it
     /// is open, else the list's selection.
     pub(super) fn get_selected_path(&self) -> Option<PathBuf> {
