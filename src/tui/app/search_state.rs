@@ -452,6 +452,8 @@ impl App {
                 &self.excluded_paths,
                 self.all_kinds,
                 self.scope_workspace(),
+                self.pinned_only,
+                &self.pinned,
             );
             return Arc::new(
                 indices
@@ -1153,6 +1155,29 @@ impl App {
 
     pub fn user_only(&self) -> bool {
         self.user_only
+    }
+
+    /// Shows only pinned conversations, or everything again, keeping the
+    /// query and the selected session. Composes with the scope and
+    /// `all_kinds` filters and the search query exactly like they compose
+    /// with each other, rather than replacing them.
+    pub(super) fn toggle_pinned_only(&mut self) {
+        self.pinned_only = !self.pinned_only;
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = self.get_selected_path();
+        }
+        self.semantic_sent_scope_signature = None;
+        self.invalidate_search_generation();
+        self.send_index_scope();
+        if self.query.trim().is_empty() || !self.readiness.lexical {
+            self.update_filter();
+        } else {
+            self.dispatch_search();
+        }
+    }
+
+    pub fn pinned_only(&self) -> bool {
+        self.pinned_only
     }
 
     /// Whether queries match only the text the person typed: user-only is

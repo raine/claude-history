@@ -496,6 +496,10 @@ impl App {
             self.toggle_pin_selected();
             return None;
         }
+        if self.keys.pinned_only.matches(code, modifiers) {
+            self.toggle_pinned_only();
+            return None;
+        }
 
         match code {
             _ if self.keys.rename.matches(code, modifiers) => {

@@ -5,6 +5,9 @@
 - New: Pin conversations with `F3` to mark them with a star in the list.
   Pins are kept in `~/.config/claude-history/pins.json`, independent of any
   project or workspace, and survive restarts and store rebuilds
+- New: `F4` shows only pinned conversations. It ANDs with the project scope,
+  `all_kinds` and the search query rather than replacing them; pinned
+  conversations are never sorted out of their normal recency order
 
 ## v0.1.81 (2026-10-27)
 

@@ -328,6 +328,15 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         ]);
     }
 
+    if app.pinned_only() {
+        spans.extend([
+            Span::styled(keys.pinned_only.short_label(), key_style),
+            Span::styled("\u{b7}", label_style),
+            Span::styled("pinned only", Style::default().fg(rgb(th().accent)).bold()),
+            Span::raw("  "),
+        ]);
+    }
+
     if app.semantic_toggle_available() {
         let mode_style = if app.list_search_mode() == ListSearchMode::Semantic {
             Style::default().fg(rgb(th().accent)).bold()
@@ -1604,6 +1613,7 @@ fn render_help_overlay(
                 keys.user_only.help_label(),
                 "Search only your own messages (lexical)",
             ),
+            (keys.pinned_only.help_label(), "Show only pinned sessions"),
             ("Esc".into(), "Quit"),
         ];
         if semantic_available {

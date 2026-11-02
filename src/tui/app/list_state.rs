@@ -18,6 +18,8 @@ impl App {
             &self.excluded_paths,
             self.all_kinds,
             self.scope_workspace(),
+            self.pinned_only,
+            &self.pinned,
         )
     }
 
@@ -256,6 +258,7 @@ impl App {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn filter_conversation_indices<I, C>(
     indices: I,
     conversations: &[C],
@@ -263,6 +266,8 @@ pub(super) fn filter_conversation_indices<I, C>(
     excluded_paths: &[String],
     all_kinds: bool,
     workspace: Option<&Workspace>,
+    pinned_only: bool,
+    pinned: &HashSet<PathBuf>,
 ) -> Vec<usize>
 where
     I: IntoIterator<Item = usize>,
@@ -287,6 +292,7 @@ where
         .filter(|&idx| {
             workspace.is_none_or(|workspace| workspace.contains(conversations[idx].borrow()))
         })
+        .filter(|&idx| !pinned_only || pinned.contains(&conversations[idx].borrow().path))
         .collect()
 }
 
