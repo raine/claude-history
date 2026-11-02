@@ -65,6 +65,10 @@ pub struct App {
     /// Titles set from this TUI, applied to cards until a generation holds
     /// them, by path
     renamed: HashMap<PathBuf, Option<String>>,
+    /// Conversations pinned by the user, by path. Loaded once from the
+    /// pins file at startup and kept in sync with it; independent of the
+    /// store, so it survives reconcile passes and generation rebuilds.
+    pinned: HashSet<PathBuf>,
     /// Set when the session files changed and the store should reconcile
     reconcile_requested: bool,
     /// Full conversations for semantic search in generation mode, loaded
@@ -190,6 +194,7 @@ impl App {
             row_docs: Vec::new(),
             removed: HashSet::new(),
             renamed: HashMap::new(),
+            pinned: crate::pins::load_pins(),
             reconcile_requested: false,
             semantic_corpus: SemanticCorpus::default(),
             filtered: parts.filtered,
@@ -824,6 +829,11 @@ impl App {
 
     pub fn conversations(&self) -> &[Conversation] {
         &self.conversations
+    }
+
+    /// Whether the conversation at `path` is pinned.
+    pub fn is_pinned(&self, path: &std::path::Path) -> bool {
+        self.pinned.contains(path)
     }
 
     pub fn selected(&self) -> Option<usize> {

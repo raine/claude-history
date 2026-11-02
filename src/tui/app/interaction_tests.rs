@@ -626,6 +626,66 @@ fn codex_conversations_resume_but_do_not_rename() {
 }
 
 #[test]
+fn pin_key_toggles_pinned_state_and_status_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+
+    assert!(!app.is_pinned(&path));
+
+    assert!(
+        app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10)
+            .is_none()
+    );
+    assert!(app.is_pinned(&path));
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "Pinned");
+
+    assert!(
+        app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10)
+            .is_none()
+    );
+    assert!(!app.is_pinned(&path));
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "Unpinned");
+}
+
+#[test]
+fn pin_key_also_works_while_viewing_a_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+    assert!(matches!(app.app_mode(), AppMode::View(_)));
+
+    app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&path));
+
+    // Typing in the in-viewer search box must not toggle the pin, since
+    // plain characters there are an ordinary query, not shortcuts.
+    app.start_view_search();
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&path));
+}
+
+#[test]
+fn pin_does_not_consume_plain_characters_typed_into_the_search_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+
+    // The default pin binding is F3, an unmodified function key, so it
+    // never collides with typing into the fuzzy-search query box.
+    app.handle_key(KeyCode::Char('p'), KeyModifiers::NONE, 10);
+    assert!(!app.is_pinned(&path));
+    assert_eq!(app.query(), "p");
+}
+
+#[test]
 fn the_viewer_opens_subagents_and_forks_and_returns_to_their_session() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("-work");

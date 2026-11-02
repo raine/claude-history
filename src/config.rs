@@ -380,6 +380,22 @@ subagents = true
 
         assert!(keys.refresh.matches(KeyCode::Char('u'), KeyModifiers::ALT));
     }
+
+    #[test]
+    fn pin_defaults_to_f3() {
+        let keys = KeyBindings::default();
+        assert!(keys.pin.matches(KeyCode::F(3), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn applies_pin_key_config() {
+        let keys = KeyBindings::from_config(Some(KeysConfig {
+            pin: Some(parse_key_binding("alt+p").unwrap()),
+            ..Default::default()
+        }));
+
+        assert!(keys.pin.matches(KeyCode::Char('p'), KeyModifiers::ALT));
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -513,6 +529,7 @@ pub struct KeysConfig {
     pub refresh: Option<KeyBinding>,
     pub all_kinds: Option<KeyBinding>,
     pub user_only: Option<KeyBinding>,
+    pub pin: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -617,6 +634,8 @@ pub struct KeyBindings {
     pub all_kinds: KeyBinding,
     /// Searches only the user's own messages, or everything
     pub user_only: KeyBinding,
+    /// Toggles whether the selected conversation is pinned
+    pub pin: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -650,6 +669,10 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            pin: KeyBinding {
+                code: KeyCode::F(3),
+                modifiers: KeyModifiers::NONE,
+            },
         }
     }
 }
@@ -667,6 +690,7 @@ impl KeyBindings {
                 refresh: cfg.refresh.unwrap_or(defaults.refresh),
                 all_kinds: cfg.all_kinds.unwrap_or(defaults.all_kinds),
                 user_only: cfg.user_only.unwrap_or(defaults.user_only),
+                pin: cfg.pin.unwrap_or(defaults.pin),
             },
         }
     }

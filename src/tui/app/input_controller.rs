@@ -189,6 +189,10 @@ impl App {
                 self.get_selected_path().map(Action::ForkResume)
             };
         }
+        if self.keys.pin.matches(code, modifiers) {
+            self.toggle_pin_selected();
+            return None;
+        }
 
         let state = match &mut self.app_mode {
             AppMode::View(s) => s,
@@ -486,6 +490,10 @@ impl App {
         }
         if self.keys.user_only.matches(code, modifiers) {
             self.toggle_user_only();
+            return None;
+        }
+        if self.keys.pin.matches(code, modifiers) {
+            self.toggle_pin_selected();
             return None;
         }
 

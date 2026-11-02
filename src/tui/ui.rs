@@ -1573,6 +1573,7 @@ fn render_help_overlay(
             (keys.resume.help_label(), "Resume"),
             (keys.fork.help_label(), "Fork resume"),
             (keys.delete.help_label(), "Delete"),
+            (keys.pin.help_label(), "Pin/unpin"),
             ("q / Esc".into(), exit_text),
         ]
     } else {
@@ -1593,6 +1594,7 @@ fn render_help_overlay(
             (keys.fork.help_label(), "Fork resume"),
             (keys.rename.help_label(), "Rename"),
             (keys.delete.help_label(), "Delete"),
+            (keys.pin.help_label(), "Pin/unpin"),
             (keys.refresh.help_label(), "Refresh sessions"),
             (
                 keys.all_kinds.help_label(),
@@ -1914,6 +1916,13 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(rgb(th().border))
             };
 
+            // Pin marker: a fixed-width slot so rows don't shift between
+            // pinned and unpinned state.
+            let pinned = app.is_pinned(&conv.path);
+            let pin_marker = if pinned { "★ " } else { "  " };
+            let pin_style = Style::default().fg(rgb(th().accent));
+            let pin_width = UnicodeWidthStr::width(pin_marker);
+
             let semantic_metadata = app.semantic_result_metadata(conv_idx);
             let semantic_meta_part = (semantic_mode && width >= 70)
                 .then(|| semantic_metadata.map(semantic_row_metadata))
@@ -1934,7 +1943,8 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 + UnicodeWidthStr::width(timestamp.as_str());
             let indicator_len = UnicodeWidthStr::width(indicator);
             let min_padding = 3;
-            let left_budget = width.saturating_sub(indicator_len + right_len + min_padding);
+            let left_budget =
+                width.saturating_sub(indicator_len + pin_width + right_len + min_padding);
 
             // Build left part: indicator + project + optional custom title + optional summary
             let raw_project_part = conv
@@ -1977,7 +1987,13 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 .unwrap_or(0);
 
             let available_for_summary = width.saturating_sub(
-                indicator_len + project_len + custom_title_len + right_len + min_padding + 4,
+                indicator_len
+                    + pin_width
+                    + project_len
+                    + custom_title_len
+                    + right_len
+                    + min_padding
+                    + 4,
             );
 
             // Build summary part (dimmer, dynamically truncated based on available space)
@@ -1995,6 +2011,7 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
 
             // Calculate padding for right-aligned timestamp + message count
             let left_len = indicator_len
+                + pin_width
                 + project_len
                 + custom_title_len
                 + summary_part
@@ -2031,7 +2048,10 @@ fn render_list(frame: &mut Frame, app: &App, area: Rect) {
                 Style::default().fg(rgb(th().custom_title_highlight)); // Lighter gold for highlights
 
             // Build header with highlighted project name
-            let mut header_spans = vec![Span::styled(indicator, indicator_style)];
+            let mut header_spans = vec![
+                Span::styled(indicator, indicator_style),
+                Span::styled(pin_marker, pin_style),
+            ];
             header_spans.extend(highlight_query.highlight(
                 &project_part,
                 project_style,
@@ -3397,7 +3417,7 @@ mod tests {
 
         let first_row = row_text(&terminal, 0);
         assert!(
-            first_row.contains("claude-history/drop-semant…"),
+            first_row.contains("claude-history/drop-seman…"),
             "{first_row:?}"
         );
         assert!(
@@ -3471,7 +3491,7 @@ mod tests {
 
         let first_row = row_text(&terminal, 0);
         assert!(
-            first_row.contains("fork lineage alpha beta gamma delt…"),
+            first_row.contains("fork lineage alpha beta gamma de…"),
             "{first_row:?}"
         );
         assert!(

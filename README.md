@@ -244,6 +244,7 @@ JSONL files and their matching session artifact directories.
 | `Ctrl+R`                | Resume conversation              |
 | `Ctrl+F`                | Fork and resume conversation     |
 | `F2`                    | Rename selected session          |
+| `F3`                    | Pin / unpin selected session      |
 | `Ctrl+X`                | Delete conversation              |
 | `Ctrl+L`                | Refresh sessions                 |
 | `Ctrl+G`                | Show / hide exec and subagents   |
@@ -910,12 +911,13 @@ pager = true
 # Example: default_args = ["--yolo"]
 
 [keys]
-# Customize keybindings (default: ctrl+r, ctrl+f, f2, ctrl+x, ctrl+l, ctrl+g,
-# ctrl+v)
+# Customize keybindings (default: ctrl+r, ctrl+f, f2, f3, ctrl+x, ctrl+l,
+# ctrl+g, ctrl+v)
 # Supports ctrl+<key>, alt+<key>, single-character keys, and f1-f12
 # rename = "alt+r"
 # fork = "alt+f"
 # refresh = "ctrl+l"
+# pin = "alt+p"
 
 [search]
 # Search mode used by the conversation list
