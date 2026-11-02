@@ -380,6 +380,41 @@ subagents = true
 
         assert!(keys.refresh.matches(KeyCode::Char('u'), KeyModifiers::ALT));
     }
+
+    #[test]
+    fn pin_defaults_to_f3() {
+        let keys = KeyBindings::default();
+        assert!(keys.pin.matches(KeyCode::F(3), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn applies_pin_key_config() {
+        let keys = KeyBindings::from_config(Some(KeysConfig {
+            pin: Some(parse_key_binding("alt+p").unwrap()),
+            ..Default::default()
+        }));
+
+        assert!(keys.pin.matches(KeyCode::Char('p'), KeyModifiers::ALT));
+    }
+
+    #[test]
+    fn pinned_only_defaults_to_f4() {
+        let keys = KeyBindings::default();
+        assert!(keys.pinned_only.matches(KeyCode::F(4), KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn applies_pinned_only_key_config() {
+        let keys = KeyBindings::from_config(Some(KeysConfig {
+            pinned_only: Some(parse_key_binding("alt+o").unwrap()),
+            ..Default::default()
+        }));
+
+        assert!(
+            keys.pinned_only
+                .matches(KeyCode::Char('o'), KeyModifiers::ALT)
+        );
+    }
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -513,6 +548,8 @@ pub struct KeysConfig {
     pub refresh: Option<KeyBinding>,
     pub all_kinds: Option<KeyBinding>,
     pub user_only: Option<KeyBinding>,
+    pub pin: Option<KeyBinding>,
+    pub pinned_only: Option<KeyBinding>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -617,6 +654,10 @@ pub struct KeyBindings {
     pub all_kinds: KeyBinding,
     /// Searches only the user's own messages, or everything
     pub user_only: KeyBinding,
+    /// Toggles whether the selected conversation is pinned
+    pub pin: KeyBinding,
+    /// Shows only pinned conversations, or everything again
+    pub pinned_only: KeyBinding,
 }
 
 impl Default for KeyBindings {
@@ -650,6 +691,14 @@ impl Default for KeyBindings {
                 code: KeyCode::Char('v'),
                 modifiers: KeyModifiers::CONTROL,
             },
+            pin: KeyBinding {
+                code: KeyCode::F(3),
+                modifiers: KeyModifiers::NONE,
+            },
+            pinned_only: KeyBinding {
+                code: KeyCode::F(4),
+                modifiers: KeyModifiers::NONE,
+            },
         }
     }
 }
@@ -667,6 +716,8 @@ impl KeyBindings {
                 refresh: cfg.refresh.unwrap_or(defaults.refresh),
                 all_kinds: cfg.all_kinds.unwrap_or(defaults.all_kinds),
                 user_only: cfg.user_only.unwrap_or(defaults.user_only),
+                pin: cfg.pin.unwrap_or(defaults.pin),
+                pinned_only: cfg.pinned_only.unwrap_or(defaults.pinned_only),
             },
         }
     }

@@ -65,6 +65,10 @@ pub struct App {
     /// Titles set from this TUI, applied to cards until a generation holds
     /// them, by path
     renamed: HashMap<PathBuf, Option<String>>,
+    /// Conversations pinned by the user, by path. Loaded once from the
+    /// pins file at startup and kept in sync with it; independent of the
+    /// store, so it survives reconcile passes and generation rebuilds.
+    pinned: HashSet<PathBuf>,
     /// Set when the session files changed and the store should reconcile
     reconcile_requested: bool,
     /// Full conversations for semantic search in generation mode, loaded
@@ -131,6 +135,10 @@ pub struct App {
     all_kinds: bool,
     /// Whether lexical search matches only the text the person typed
     user_only: bool,
+    /// Whether the list shows only pinned conversations. ANDs with the
+    /// scope (workspace) filter and the search query, like `all_kinds` and
+    /// `user_only` do; never changes sort order
+    pinned_only: bool,
     /// The directory the project scope is anchored to
     workspace: Option<Workspace>,
     /// Exact project names hidden from list-mode display
@@ -190,6 +198,7 @@ impl App {
             row_docs: Vec::new(),
             removed: HashSet::new(),
             renamed: HashMap::new(),
+            pinned: crate::pins::load_pins(),
             reconcile_requested: false,
             semantic_corpus: SemanticCorpus::default(),
             filtered: parts.filtered,
@@ -217,6 +226,7 @@ impl App {
             workspace_filter: parts.workspace_filter,
             all_kinds: parts.all_kinds,
             user_only: false,
+            pinned_only: false,
             workspace: parts.workspace,
             excluded_projects: parts.excluded_projects,
             excluded_paths: parts.excluded_paths,
@@ -282,6 +292,8 @@ impl App {
             &[],
             search_options.all_kinds,
             None,
+            false,
+            &HashSet::new(),
         );
         let selected = if filtered.is_empty() { None } else { Some(0) };
         let (search_tx, search_rx) = spawn_search_worker();
@@ -497,12 +509,28 @@ impl App {
             self.scope_workspace(),
             |project| list_state::card_project_visible(project, &self.excluded_projects),
         );
+        let pinned_keys = self.pinned_only.then(|| self.pinned_key_hashes());
         let docs: Vec<u32> = docs
             .into_iter()
             .filter(|&doc| !self.is_removed(doc))
+            .filter(|&doc| {
+                pinned_keys
+                    .as_ref()
+                    .is_none_or(|keys| keys.contains(&snapshot.key_hash(doc)))
+            })
             .collect();
         let filtered = docs.into_iter().map(|doc| self.card_row(doc)).collect();
         self.apply_filtered(filtered);
+    }
+
+    /// `CardRow::key_hash` of every pinned conversation, to intersect
+    /// against a generation's docs; see `Snapshot::key_hash`.
+    fn pinned_key_hashes(&self) -> HashSet<u64> {
+        self.pinned
+            .iter()
+            .filter_map(|path| path.to_str())
+            .map(crate::store::generation::key_hash)
+            .collect()
     }
 
     fn is_removed(&self, doc: u32) -> bool {
@@ -670,6 +698,13 @@ impl App {
                 *in_scope &= !self.is_removed(doc as u32);
             }
         }
+        if self.pinned_only {
+            let pinned_keys = self.pinned_key_hashes();
+            let cards = index.cards();
+            for (doc, in_scope) in docs.iter_mut().enumerate() {
+                *in_scope &= pinned_keys.contains(&cards.key_hash(doc as u32));
+            }
+        }
         let _ = self
             .search_tx
             .send(SearchCommand::UseIndex(Some(IndexScope {
@@ -824,6 +859,11 @@ impl App {
 
     pub fn conversations(&self) -> &[Conversation] {
         &self.conversations
+    }
+
+    /// Whether the conversation at `path` is pinned.
+    pub fn is_pinned(&self, path: &std::path::Path) -> bool {
+        self.pinned.contains(path)
     }
 
     pub fn selected(&self) -> Option<usize> {

@@ -626,6 +626,254 @@ fn codex_conversations_resume_but_do_not_rename() {
 }
 
 #[test]
+fn pin_key_toggles_pinned_state_and_status_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+
+    assert!(!app.is_pinned(&path));
+
+    assert!(
+        app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10)
+            .is_none()
+    );
+    assert!(app.is_pinned(&path));
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "Pinned");
+
+    assert!(
+        app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10)
+            .is_none()
+    );
+    assert!(!app.is_pinned(&path));
+    let (message, _) = app.status_message.take().unwrap();
+    assert_eq!(message, "Unpinned");
+}
+
+#[test]
+fn pin_key_also_works_while_viewing_a_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+    app.selected = Some(0);
+    app.enter_view_mode(80);
+    assert!(matches!(app.app_mode(), AppMode::View(_)));
+
+    app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&path));
+
+    // Typing in the in-viewer search box must not toggle the pin, since
+    // plain characters there are an ordinary query, not shortcuts.
+    app.start_view_search();
+    app.handle_key(KeyCode::Char('x'), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&path));
+}
+
+#[test]
+fn pin_does_not_consume_plain_characters_typed_into_the_search_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path.clone(), None);
+
+    // The default pin binding is F3, an unmodified function key, so it
+    // never collides with typing into the fuzzy-search query box.
+    app.handle_key(KeyCode::Char('p'), KeyModifiers::NONE, 10);
+    assert!(!app.is_pinned(&path));
+    assert_eq!(app.query(), "p");
+}
+
+/// Index into `app.filtered()` of the row whose path is `path`.
+fn select_path(app: &mut App, path: &std::path::Path) {
+    let row = app
+        .filtered()
+        .iter()
+        .position(|&idx| app.conversations()[idx].path == path)
+        .expect("path is in the filtered list");
+    app.selected = Some(row);
+}
+
+/// Polls the background search worker until `filtered()` has
+/// `expected_len` rows, or panics after a generous timeout: the worker
+/// runs on its own thread even for the in-memory (non-generation) corpus
+/// these tests use.
+fn wait_for_filtered_len(app: &mut App, expected_len: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        app.receive_search_results();
+        if app.filtered().len() == expected_len {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "search results never settled; filtered = {:?}",
+            app.filtered()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn pinned_only_key_shows_only_pinned_conversations_and_toggles_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let pinned_path = dir.path().join("pinned.jsonl");
+    let other_path = dir.path().join("other.jsonl");
+    write_conversation(&pinned_path, None);
+    write_conversation(&other_path, None);
+    let mut app = App::new(
+        vec![
+            test_conversation(pinned_path.clone(), None),
+            test_conversation(other_path.clone(), None),
+        ],
+        ToolDisplayMode::Summary,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+    assert_eq!(app.filtered().len(), 2);
+    assert!(!app.pinned_only());
+
+    select_path(&mut app, &pinned_path);
+    app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&pinned_path));
+    assert!(!app.is_pinned(&other_path));
+
+    app.handle_key(KeyCode::F(4), KeyModifiers::NONE, 10);
+    assert!(app.pinned_only());
+    let shown: Vec<_> = app
+        .filtered()
+        .iter()
+        .map(|&idx| app.conversations()[idx].path.clone())
+        .collect();
+    assert_eq!(shown, vec![pinned_path.clone()]);
+
+    // Toggling off restores every conversation; the pin itself is untouched.
+    app.handle_key(KeyCode::F(4), KeyModifiers::NONE, 10);
+    assert!(!app.pinned_only());
+    assert_eq!(app.filtered().len(), 2);
+    assert!(app.is_pinned(&pinned_path));
+}
+
+#[test]
+fn pinned_only_with_no_pins_empties_the_list_without_a_special_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("abc123.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path, None);
+    assert_eq!(app.filtered().len(), 1);
+
+    app.handle_key(KeyCode::F(4), KeyModifiers::NONE, 10);
+
+    assert!(app.pinned_only());
+    // Reuses the ordinary empty-list rendering (same as an unmatched query
+    // or an empty workspace scope); no dedicated empty-state UI is needed.
+    assert!(app.filtered().is_empty());
+    assert_eq!(app.selected(), None);
+}
+
+#[test]
+fn pinned_only_composes_with_the_search_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let pinned_path = dir.path().join("pinned.jsonl");
+    let other_path = dir.path().join("other.jsonl");
+    write_conversation(&pinned_path, None);
+    write_conversation(&other_path, None);
+    let mut pinned_conv = test_conversation(pinned_path.clone(), None);
+    pinned_conv.full_text = "needle in the pinned haystack".into();
+    let mut other_conv = test_conversation(other_path.clone(), None);
+    other_conv.full_text = "needle in the other haystack".into();
+    let mut app = App::new(
+        vec![pinned_conv, other_conv],
+        ToolDisplayMode::Summary,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+
+    select_path(&mut app, &pinned_path);
+    app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&pinned_path));
+
+    app.set_query_for_test("needle");
+    app.dispatch_search();
+    wait_for_filtered_len(&mut app, 2);
+
+    // Pinned-only ANDs with the query: it narrows the two matches to the
+    // one that is also pinned, rather than replacing the search.
+    app.handle_key(KeyCode::F(4), KeyModifiers::NONE, 10);
+    wait_for_filtered_len(&mut app, 1);
+    let shown: Vec<_> = app
+        .filtered()
+        .iter()
+        .map(|&idx| app.conversations()[idx].path.clone())
+        .collect();
+    assert_eq!(shown, vec![pinned_path]);
+}
+
+#[test]
+fn pinned_only_composes_with_the_workspace_scope() {
+    let dir = tempfile::tempdir().unwrap();
+    let elsewhere_dir = tempfile::tempdir().unwrap();
+    let inside_pinned = dir.path().join("inside-pinned.jsonl");
+    let inside_unpinned = dir.path().join("inside-unpinned.jsonl");
+    let outside = elsewhere_dir.path().join("outside.jsonl");
+    for path in [&inside_pinned, &inside_unpinned, &outside] {
+        write_conversation(path, None);
+    }
+    // `Workspace::contains` checks `cwds`, not just the primary `cwd`.
+    let mut inside_pinned_conv = test_conversation(inside_pinned.clone(), None);
+    inside_pinned_conv.cwd = Some(dir.path().to_path_buf());
+    inside_pinned_conv.cwds = vec![dir.path().to_path_buf()];
+    let mut inside_unpinned_conv = test_conversation(inside_unpinned.clone(), None);
+    inside_unpinned_conv.cwd = Some(dir.path().to_path_buf());
+    inside_unpinned_conv.cwds = vec![dir.path().to_path_buf()];
+    let mut outside_conv = test_conversation(outside.clone(), None);
+    outside_conv.cwd = Some(elsewhere_dir.path().to_path_buf());
+    outside_conv.cwds = vec![elsewhere_dir.path().to_path_buf()];
+    let mut app = App::new(
+        vec![inside_pinned_conv, inside_unpinned_conv, outside_conv],
+        ToolDisplayMode::Summary,
+        false,
+        KeyBindings::default(),
+        vec![],
+    );
+
+    // Pin one of the two in-workspace conversations before scoping down,
+    // while every row is still selectable.
+    select_path(&mut app, &inside_pinned);
+    app.handle_key(KeyCode::F(3), KeyModifiers::NONE, 10);
+    assert!(app.is_pinned(&inside_pinned));
+
+    app.workspace = Some(crate::history::Workspace::new(dir.path()));
+    app.workspace_filter = true;
+    app.update_filter();
+    let scoped: Vec<_> = app
+        .filtered()
+        .iter()
+        .map(|&idx| app.conversations()[idx].path.clone())
+        .collect();
+    assert_eq!(
+        scoped.len(),
+        2,
+        "the workspace scope alone should admit both in-workspace sessions"
+    );
+    assert!(!scoped.contains(&outside));
+
+    // Pinned-only ANDs with the workspace scope: of the two conversations
+    // the scope admits, only the pinned one remains, and the pinned
+    // conversation outside the workspace stays excluded by the scope.
+    app.handle_key(KeyCode::F(4), KeyModifiers::NONE, 10);
+    let shown: Vec<_> = app
+        .filtered()
+        .iter()
+        .map(|&idx| app.conversations()[idx].path.clone())
+        .collect();
+    assert_eq!(shown, vec![inside_pinned]);
+}
+
+#[test]
 fn the_viewer_opens_subagents_and_forks_and_returns_to_their_session() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("-work");
