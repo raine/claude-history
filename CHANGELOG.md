@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- New: Drag to select text across lines and messages in the conversation viewer,
+  then press `y` to copy it. Press `Esc` to clear the selection
+  ([#97](https://github.com/raine/claude-history/issues/97))
+
 ## v0.1.81 (2026-10-27)
 
 - Fix: Generated notifications and automatic continuation prompts in Claude Code
