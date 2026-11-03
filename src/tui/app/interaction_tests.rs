@@ -922,3 +922,39 @@ fn list_click_in_preview_pane_selects_nothing() {
     assert!(!app.handle_list_click(preview.x + 5, layout.list.y, frame));
     assert!(app.handle_list_click(layout.list.x + 5, layout.list.y, frame));
 }
+
+/// Unbound Ctrl and Alt chords type nothing. Shift and AltGr still type, and
+/// AltGr arrives as Ctrl+Alt on Windows.
+fn press_chords_and_typed_characters(app: &mut App) {
+    for (c, modifiers) in [
+        ('s', KeyModifiers::CONTROL),
+        ('x', KeyModifiers::ALT),
+        ('A', KeyModifiers::SHIFT),
+        ('@', KeyModifiers::CONTROL | KeyModifiers::ALT),
+    ] {
+        app.handle_key(KeyCode::Char(c), modifiers, 10);
+    }
+}
+
+#[test]
+fn unbound_modifier_chords_do_not_type_into_list_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_conversation(dir.path().join("list.jsonl"), None);
+    press_chords_and_typed_characters(&mut app);
+    assert_eq!(app.query(), "A@");
+}
+
+#[test]
+fn unbound_modifier_chords_do_not_type_into_view_search() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("view.jsonl");
+    write_conversation(&path, None);
+    let mut app = app_with_conversation(path, None);
+    app.enter_view_mode(80);
+    app.handle_key(KeyCode::Char('/'), KeyModifiers::NONE, 10);
+    press_chords_and_typed_characters(&mut app);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert_eq!(state.search_query, "A@");
+}

@@ -2,6 +2,13 @@ use super::{Action, App, AppMode, DialogMode, ListSearchMode, ViewSearchMode, Vi
 use crate::search;
 use crossterm::event::{KeyCode, KeyModifiers};
 
+/// Whether a character key with these modifiers should be typed as text.
+/// AltGr arrives as Ctrl+Alt on Windows, so that combination still types.
+fn types_text(modifiers: KeyModifiers) -> bool {
+    let alt_gr = KeyModifiers::CONTROL | KeyModifiers::ALT;
+    !modifiers.intersects(alt_gr) || modifiers.contains(alt_gr)
+}
+
 impl App {
     fn cursor_left(&mut self) {
         if self.cursor_pos > 0 {
@@ -442,7 +449,7 @@ impl App {
                 self.delete_view_search_word_backwards();
                 None
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if types_text(modifiers) => {
                 self.push_view_search_char(c);
                 None
             }
@@ -646,7 +653,7 @@ impl App {
             KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
                 self.delete_word_backwards()
             }
-            KeyCode::Char(c) => {
+            KeyCode::Char(c) if types_text(modifiers) => {
                 self.insert_query_char(c);
                 true
             }
