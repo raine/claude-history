@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fix: Unbound Ctrl and Alt shortcuts no longer insert letters into the
+  conversation list or viewer search
+  ([#96](https://github.com/raine/claude-history/issues/96))
+
 ## v0.1.82 (2026-11-03)
 
 - New: Drag to select text across lines and messages in the conversation viewer,
