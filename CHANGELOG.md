@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.82 (2026-11-03)
 
 - New: Drag to select text across lines and messages in the conversation viewer,
   then press `y` to copy it. Press `Esc` to clear the selection
