@@ -255,6 +255,72 @@ fn semantic_list_click_uses_three_line_rows() {
 }
 
 #[test]
+fn text_selection_does_not_expand_tools_and_survives_scroll() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tool.jsonl");
+    write_tool_conversation(&path);
+    let mut app = app_with_tool_conversation(path);
+    let frame = Rect::new(0, 0, 120, 20);
+    let row = tool_click_row(&app, frame);
+    assert!(app.begin_text_selection(15, row, frame));
+    app.drag_text_selection(22, row, frame);
+    app.finish_text_selection(22, row, frame, 17);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert!(state.expanded_tool_outputs.is_empty());
+    assert!(state.text_selection.as_ref().unwrap().active);
+    app.scroll_mouse(1, 17);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert!(state.text_selection.as_ref().unwrap().active);
+    app.toggle_view_thinking(17);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert!(state.text_selection.is_none());
+
+    let row = tool_click_row(&app, frame);
+    app.begin_text_selection(15, row, frame);
+    app.finish_text_selection(15, row, frame, 17);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert!(!state.expanded_tool_outputs.is_empty());
+    assert!(state.text_selection.is_none());
+}
+
+#[test]
+fn text_selection_extends_beyond_viewport_and_ignores_dialogs() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.jsonl");
+    let text = (0..60).map(|i| format!("line {i}\n\n")).collect::<String>();
+    write_named_conversation(&path, &text);
+    let mut app = app_with_conversation(path, None);
+    app.enter_view_mode(80);
+    let frame = Rect::new(0, 0, 100, 12);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    let area = ui::view_layout_rects(frame, &app, state).content;
+    assert!(app.begin_text_selection(12, area.y, frame));
+    app.drag_text_selection(20, area.bottom(), frame);
+    let AppMode::View(state) = app.app_mode() else {
+        panic!()
+    };
+    assert_eq!(state.scroll_offset, 1);
+    let selection = state.text_selection.as_ref().unwrap();
+    assert_eq!(selection.anchor.line, 0);
+    assert_eq!(selection.focus.line, area.height as usize);
+    app.finish_text_selection(20, area.bottom(), frame, area.height as usize);
+    app.dialog_mode = DialogMode::Help { scroll: 0 };
+    assert!(!app.begin_text_selection(12, area.y, frame));
+    app.dialog_mode = DialogMode::None;
+    assert!(!app.begin_text_selection(12, 0, frame));
+}
+
+#[test]
 fn view_click_toggles_clickable_output() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tool.jsonl");

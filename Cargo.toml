@@ -30,6 +30,7 @@ crossterm = { version = "0.29", features = ["osc52"] }
 textwrap = "0.16"
 pulldown-cmark = "0.13"
 unicode-width = "0.2"
+unicode-segmentation = "1.12"
 arboard = "3.4"
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
 terminal-light = "1.0"

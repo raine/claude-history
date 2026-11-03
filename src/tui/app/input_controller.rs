@@ -166,6 +166,22 @@ impl App {
             return self.handle_search_typing_key(code, modifiers);
         }
 
+        if let AppMode::View(state) = &mut self.app_mode
+            && let Some(selection) = &mut state.text_selection
+        {
+            selection.dragging = false;
+        }
+
+        if code == KeyCode::Esc
+            && let AppMode::View(state) = &mut self.app_mode
+            && state.text_selection.take().is_some()
+        {
+            return None;
+        }
+        if code == KeyCode::Char('y') && modifiers.is_empty() && self.copy_text_selection() {
+            return None;
+        }
+
         if self.keys.delete.matches(code, modifiers) {
             if !self.single_file_mode
                 && !self.is_loading()

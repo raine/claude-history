@@ -27,6 +27,7 @@ mod input_controller;
 mod list_preview;
 mod list_state;
 mod search_state;
+mod text_selection;
 mod types;
 mod view_state;
 #[allow(unused_imports)]

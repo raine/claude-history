@@ -97,6 +97,7 @@ pub struct ViewState {
     pub expanded_tool_outputs: BTreeSet<ToolOutputId>,
     /// Tool output currently under the mouse cursor
     pub hovered_tool_output: Option<ToolOutputId>,
+    pub text_selection: Option<crate::tui::selection::TextSelection>,
 }
 
 /// Search mode within view
@@ -161,6 +162,7 @@ impl ViewState {
             message_nav_active: false,
             expanded_tool_outputs: BTreeSet::new(),
             hovered_tool_output: None,
+            text_selection: None,
         }
     }
 }

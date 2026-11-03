@@ -211,6 +211,7 @@ impl App {
                     message_nav_active: false,
                     expanded_tool_outputs: BTreeSet::new(),
                     hovered_tool_output: None,
+                    text_selection: None,
                 })
             }
             Err(e) => {
@@ -416,6 +417,7 @@ impl App {
             let rendered = render_conversation(&transcript, &options);
             state.total_lines = rendered.lines.len();
             state.rendered_lines = rendered.lines;
+            state.text_selection = None;
             state.message_ranges = rendered.messages;
 
             let max_scroll = state.total_lines.saturating_sub(viewport_height);

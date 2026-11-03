@@ -111,7 +111,7 @@ fn needs_fresh_frame(event: &RuntimeEvent) -> bool {
         event,
         RuntimeEvent::Input(Event::Resize(..))
             | RuntimeEvent::Input(Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(_),
+                kind: MouseEventKind::Down(_) | MouseEventKind::Up(_),
                 ..
             }))
     )
@@ -232,11 +232,7 @@ where
                     app.scroll_mouse(-3, frame_state.viewport_height);
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if app.handle_view_click(
-                        m.row,
-                        frame_state.frame_area,
-                        frame_state.viewport_height,
-                    ) {
+                    if app.begin_text_selection(m.column, m.row, frame_state.frame_area) {
                         return EventLoopResult::Break;
                     }
                     if allow_list_click_enter
@@ -246,6 +242,17 @@ where
                         return EventLoopResult::Break;
                     }
                 }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    app.drag_text_selection(m.column, m.row, frame_state.frame_area);
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    app.finish_text_selection(
+                        m.column,
+                        m.row,
+                        frame_state.frame_area,
+                        frame_state.viewport_height,
+                    );
+                }
                 MouseEventKind::Moved => {
                     app.handle_view_mouse_move(m.row, frame_state.frame_area);
                     if allow_list_click_enter {
@@ -254,6 +261,10 @@ where
                 }
                 _ => {}
             }
+            return EventLoopResult::Continue;
+        }
+        Event::Resize(..) => {
+            app.clear_text_selection();
             return EventLoopResult::Continue;
         }
         _ => return EventLoopResult::Continue,
@@ -1043,6 +1054,156 @@ pub fn bench_startup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mouse(app: &mut App, frame: &FrameState, kind: MouseEventKind, column: u16, row: u16) {
+        handle_event(
+            app,
+            frame,
+            Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: event::KeyModifiers::NONE,
+            }),
+            false,
+            |_, _| EventLoopResult::Continue,
+        );
+    }
+
+    fn view(app: &App) -> &super::super::app::ViewState {
+        let AppMode::View(state) = app.app_mode() else {
+            panic!("expected viewer")
+        };
+        state
+    }
+
+    #[test]
+    fn mouse_selection_routes_drag_release_and_clearing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("selection.jsonl");
+        std::fs::write(
+            &path,
+            r#"{"type":"user","message":{"role":"user","content":"Alpha /tmp/example.txt omega"}}"#,
+        )
+        .unwrap();
+        let mut app = App::new_single_file(
+            path,
+            ToolDisplayMode::Summary,
+            false,
+            KeyBindings::default(),
+        );
+        let frame = FrameState {
+            frame_area: Rect::new(0, 0, 100, 24),
+            viewport_height: 21,
+            content_width: 86,
+        };
+        app.check_view_resize(86, 21);
+        let state = view(&app);
+        let (line_idx, text) = state
+            .rendered_lines
+            .iter()
+            .enumerate()
+            .find_map(|(i, line)| {
+                let text: String = line.spans.iter().map(|(text, _)| text.as_str()).collect();
+                text.contains("/tmp/example.txt").then_some((i, text))
+            })
+            .unwrap();
+        let area = ui::view_layout_rects(frame.frame_area, &app, state).content;
+        let row = area.y + line_idx as u16;
+        let start =
+            unicode_width::UnicodeWidthStr::width(&text[..text.find("/tmp/example.txt").unwrap()])
+                as u16
+                + area.x;
+        let end = start + "/tmp/example.txt".len() as u16 - 1;
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            row,
+        );
+        assert!(!view(&app).message_nav_active);
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Drag(MouseButton::Left),
+            end,
+            row,
+        );
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Up(MouseButton::Left),
+            end,
+            row,
+        );
+        let state = view(&app);
+        assert_eq!(
+            state
+                .text_selection
+                .as_ref()
+                .unwrap()
+                .text(&state.rendered_lines),
+            "/tmp/example.txt"
+        );
+        assert!(!state.text_selection.as_ref().unwrap().dragging);
+        assert!(!state.message_nav_active);
+
+        let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|f| ui::render(f, &app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_ne!(buffer[(start, row)].bg, buffer[(start - 1, row)].bg);
+        let screen: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
+        assert!(screen.contains("copy selection"));
+
+        app.handle_key(KeyCode::Esc, event::KeyModifiers::NONE, 21);
+        assert!(view(&app).text_selection.is_none());
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Down(MouseButton::Left),
+            start,
+            row,
+        );
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Up(MouseButton::Left),
+            start,
+            row,
+        );
+        assert!(view(&app).message_nav_active);
+        assert!(view(&app).text_selection.is_none());
+
+        // The navigation gutter is not part of selectable text.
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Down(MouseButton::Left),
+            start + 2,
+            row,
+        );
+        mouse(
+            &mut app,
+            &frame,
+            MouseEventKind::Up(MouseButton::Left),
+            end + 2,
+            row,
+        );
+        let state = view(&app);
+        assert_eq!(
+            state
+                .text_selection
+                .as_ref()
+                .unwrap()
+                .text(&state.rendered_lines),
+            "/tmp/example.txt"
+        );
+        handle_event(&mut app, &frame, Event::Resize(100, 25), false, |_, _| {
+            EventLoopResult::Continue
+        });
+        assert!(view(&app).text_selection.is_none());
+    }
 
     #[test]
     fn content_width_keeps_timing_off_behavior() {

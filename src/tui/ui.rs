@@ -1046,6 +1046,46 @@ fn render_view_content(frame: &mut Frame, state: &ViewState, area: Rect) {
 
     let content = Paragraph::new(visible_lines);
     frame.render_widget(content, area);
+
+    if let Some(selection) = state.text_selection.as_ref().filter(|s| s.active) {
+        let gutter = if state.message_nav_active {
+            crate::tui::viewer::GUTTER_WIDTH
+        } else {
+            0
+        };
+        for (row, rendered) in state
+            .rendered_lines
+            .iter()
+            .enumerate()
+            .skip(state.scroll_offset)
+            .take(visible_height)
+        {
+            let text: String = rendered
+                .spans
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect();
+            for (columns, _) in
+                crate::tui::selection::selected_graphemes(&text, selection.columns(row))
+            {
+                for column in columns {
+                    let x = column + gutter;
+                    if x < area.width as usize {
+                        frame.buffer_mut()[(
+                            area.x + x as u16,
+                            area.y + (row - state.scroll_offset) as u16,
+                        )]
+                            .set_style(
+                                Style::default()
+                                    .fg(rgb(th().status_bar_bg))
+                                    .bg(rgb(th().accent))
+                                    .remove_modifier(Modifier::DIM),
+                            );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area: Rect) {
@@ -1092,7 +1132,14 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
         Span::raw("  "),
     ];
 
-    if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
+    if state.text_selection.as_ref().is_some_and(|s| s.active) {
+        spans.extend([
+            Span::styled("y", key_style),
+            Span::styled(" copy selection  ", label_style),
+            Span::styled("Esc", key_style),
+            Span::styled(" clear", label_style),
+        ]);
+    } else if state.search_mode == ViewSearchMode::Active && !state.search_matches.is_empty() {
         spans.extend([
             Span::styled("n", key_style),
             Span::styled("ext  ", label_style),
@@ -1564,7 +1611,9 @@ fn render_help_overlay(
             ("T".into(), "Toggle thinking"),
             ("i".into(), "Toggle timing"),
             ("e".into(), "Export to file"),
-            ("y".into(), "Copy to clipboard / message"),
+            ("Drag".into(), "Select text"),
+            ("y".into(), "Copy selection / message / menu"),
+            ("Esc".into(), "Clear text selection / back"),
             ("p".into(), "Show file path"),
             ("Y".into(), "Copy path"),
             ("I".into(), "Copy session ID"),

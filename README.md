@@ -275,7 +275,7 @@ JSONL files and their matching session artifact directories.
 | `t`            | Cycle tools: off/summary/calls/truncated/full      |
 | `T`            | Toggle thinking                                    |
 | `e`            | Export conversation to file                        |
-| `y`            | Copy to clipboard (message if selected, else menu) |
+| `y`            | Copy selected text, focused message, or open copy menu |
 | `p`            | Show file path                                     |
 | `Y`            | Copy file path to clipboard                        |
 | `I`            | Copy session ID to clipboard                       |
@@ -301,6 +301,17 @@ appears in the gutter showing which message is focused. While in this mode:
 Searching with `/` also activates message navigation, focusing the message
 containing each match as you move through results with `n`/`N`. The status bar
 shows the current match number and total matches while search is active.
+
+### Selecting text
+
+Click and drag in the transcript to select text, then press `y` to copy it.
+Press `Esc` or click again to clear the selection. A click without dragging
+still focuses a message or expands tool output.
+
+Selections can span lines and messages. Scroll while dragging, or drag beyond
+the top or bottom of the transcript to extend the selection. Copying uses the
+displayed text and line breaks, without the message-focus gutter. Resizing the
+terminal or changing the rendered content clears the selection.
 
 ### Remote clipboard
 

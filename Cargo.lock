@@ -404,6 +404,7 @@ dependencies = [
  "textwrap",
  "thiserror 2.0.18",
  "toml",
+ "unicode-segmentation",
  "unicode-width",
  "zstd",
 ]
