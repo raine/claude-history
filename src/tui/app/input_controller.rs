@@ -194,7 +194,7 @@ impl App {
                 && !self.is_loading()
                 && self.selected_allows(|can| can.delete, "Deleting")
             {
-                self.dialog_mode = DialogMode::ConfirmDelete;
+                self.request_delete_confirmation();
             }
             return None;
         }
@@ -484,7 +484,7 @@ impl App {
 
         if self.keys.delete.matches(code, modifiers) {
             if self.selected_allows(|can| can.delete, "Deleting") {
-                self.dialog_mode = DialogMode::ConfirmDelete;
+                self.request_delete_confirmation();
             }
             return None;
         }

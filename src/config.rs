@@ -23,6 +23,7 @@ pub struct ConfigFile {
     pub search: Option<SearchConfig>,
     pub agent: Option<AgentConfig>,
     pub semantic: Option<SemanticConfig>,
+    pub safety: Option<SafetyConfig>,
 }
 
 #[derive(Deserialize, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -101,9 +102,62 @@ pub struct TuiConfig {
     pub semantic_search: Option<bool>,
 }
 
+#[derive(Deserialize, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct SafetyConfig {
+    /// Refuse every delete path: the TUI delete key, `--delete`, and `delete-empty --yes`
+    #[serde(default)]
+    pub disable_delete: bool,
+}
+
+impl SafetyConfig {
+    pub fn ensure_delete_allowed(&self) -> Result<()> {
+        if self.disable_delete {
+            Err(AppError::DeleteDisabled)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_is_allowed_without_safety_table() {
+        let config: ConfigFile = toml::from_str("").unwrap();
+        assert!(
+            config
+                .safety
+                .unwrap_or_default()
+                .ensure_delete_allowed()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn safety_disable_delete_refuses_delete() {
+        let config: ConfigFile = toml::from_str(
+            r#"
+[safety]
+disable_delete = true
+"#,
+        )
+        .unwrap();
+
+        let error = config.safety.unwrap().ensure_delete_allowed().unwrap_err();
+        assert!(matches!(error, AppError::DeleteDisabled));
+    }
+
+    #[test]
+    fn safety_rejects_misspelled_options() {
+        // A typo must fail loudly rather than silently leave deletion enabled.
+        let error = toml::from_str::<ConfigFile>("[safety]\ndisable_deletes = true\n")
+            .expect_err("unknown safety option should fail");
+
+        assert!(error.to_string().contains("unknown field"));
+    }
 
     #[test]
     fn config_without_tui_defaults_to_no_excluded_projects() {

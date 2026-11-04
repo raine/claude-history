@@ -217,6 +217,7 @@ fn render_list_mode(frame: &mut Frame, app: &App) {
             false,
             false,
             app.semantic_toggle_available(),
+            app.delete_enabled(),
             app.keys(),
             *scroll,
         ),
@@ -284,9 +285,13 @@ fn render_list_status_bar(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(" fork  ", open_label),
         Span::styled(keys.rename.short_label(), edit_key),
         Span::styled(" rename  ", edit_label),
-        Span::styled(keys.delete.short_label(), edit_key),
-        Span::styled(" delete  ", edit_label),
     ];
+    if app.delete_enabled() {
+        spans.extend([
+            Span::styled(keys.delete.short_label(), edit_key),
+            Span::styled(" delete  ", edit_label),
+        ]);
+    }
 
     // Scope toggle (only when project context exists)
     if app.has_project_context() {
@@ -596,6 +601,7 @@ fn render_view_mode(frame: &mut Frame, app: &App, state: &ViewState) {
                 true,
                 app.is_single_file_mode(),
                 false,
+                app.delete_enabled(),
                 app.keys(),
                 *scroll,
             );
@@ -1170,8 +1176,14 @@ fn render_view_status_bar(frame: &mut Frame, app: &App, state: &ViewState, area:
             Span::styled(" resume  ", label_style),
             Span::styled(app.keys().fork.short_label(), key_style),
             Span::styled(" fork  ", label_style),
-            Span::styled(app.keys().delete.short_label(), key_style),
-            Span::styled(" del  ", label_style),
+        ]);
+        if app.delete_enabled() {
+            spans.extend([
+                Span::styled(app.keys().delete.short_label(), key_style),
+                Span::styled(" del  ", label_style),
+            ]);
+        }
+        spans.extend([
             Span::styled("q", key_style),
             Span::styled("uit", label_style),
         ]);
@@ -1586,6 +1598,7 @@ fn render_help_overlay(
     is_view_mode: bool,
     is_single_file_mode: bool,
     semantic_available: bool,
+    delete_enabled: bool,
     keys: &KeyBindings,
     scroll: usize,
 ) {
@@ -1595,7 +1608,7 @@ fn render_help_overlay(
         "Back"
     };
 
-    let shortcuts: Vec<(String, &str)> = if is_view_mode {
+    let mut shortcuts: Vec<(String, &str)> = if is_view_mode {
         vec![
             ("j / ↓".into(), "Scroll down"),
             ("k / ↑".into(), "Scroll up"),
@@ -1659,6 +1672,9 @@ fn render_help_overlay(
         }
         shortcuts
     };
+    if !delete_enabled {
+        shortcuts.retain(|(_, action)| *action != "Delete");
+    }
 
     let title = " Shortcuts ";
 
@@ -3139,7 +3155,7 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
                 .draw(|frame| {
-                    render_help_overlay(frame, true, false, false, &KeyBindings::default(), 0)
+                    render_help_overlay(frame, true, false, false, true, &KeyBindings::default(), 0)
                 })
                 .unwrap();
         }
@@ -3152,7 +3168,15 @@ mod tests {
             let mut terminal = Terminal::new(backend).unwrap();
             terminal
                 .draw(|frame| {
-                    render_help_overlay(frame, false, false, false, &KeyBindings::default(), 0)
+                    render_help_overlay(
+                        frame,
+                        false,
+                        false,
+                        false,
+                        true,
+                        &KeyBindings::default(),
+                        0,
+                    )
                 })
                 .unwrap();
         }
@@ -4191,7 +4215,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_help_overlay(frame, false, false, false, &KeyBindings::default(), 0)
+                render_help_overlay(frame, false, false, false, true, &KeyBindings::default(), 0)
             })
             .unwrap();
         let unavailable = terminal_contents(&terminal);
@@ -4200,7 +4224,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_help_overlay(frame, false, false, true, &KeyBindings::default(), 0)
+                render_help_overlay(frame, false, false, true, true, &KeyBindings::default(), 0)
             })
             .unwrap();
         let available = terminal_contents(&terminal);
@@ -4216,12 +4240,38 @@ mod tests {
     }
 
     #[test]
+    fn delete_shortcut_appears_only_when_delete_enabled() {
+        for is_view_mode in [false, true] {
+            for delete_enabled in [false, true] {
+                let backend = TestBackend::new(70, 30);
+                let mut terminal = Terminal::new(backend).unwrap();
+                terminal
+                    .draw(|frame| {
+                        render_help_overlay(
+                            frame,
+                            is_view_mode,
+                            false,
+                            false,
+                            delete_enabled,
+                            &KeyBindings::default(),
+                            0,
+                        )
+                    })
+                    .unwrap();
+                let contents = terminal_contents(&terminal);
+
+                assert_eq!(contents.contains("Ctrl+X"), delete_enabled, "{contents:?}");
+            }
+        }
+    }
+
+    #[test]
     fn help_overlay_indicates_hidden_rows() {
         let backend = TestBackend::new(60, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_help_overlay(frame, true, false, false, &KeyBindings::default(), 0)
+                render_help_overlay(frame, true, false, false, true, &KeyBindings::default(), 0)
             })
             .unwrap();
 
@@ -4236,7 +4286,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                render_help_overlay(frame, true, false, false, &KeyBindings::default(), 10)
+                render_help_overlay(frame, true, false, false, true, &KeyBindings::default(), 10)
             })
             .unwrap();
 
