@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.83 (2026-11-04)
 
 - Fix: Unbound Ctrl and Alt shortcuts no longer insert letters into the
   conversation list or viewer search
