@@ -36,8 +36,8 @@ syntect = { version = "5.2", default-features = false, features = ["default-fanc
 terminal-light = "1.0"
 tempfile = "3"
 indicatif = "0.17"
-fastembed = { version = "6.0", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
-ort = { version = "=2.0.0-rc.13", default-features = false }
+fastembed = { version = "7.7", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
+ort = { version = "=2.0.0-rc.15", default-features = false }
 bytemuck = { version = "1.25.2", features = ["derive"] }
 memmap2 = "0.9"
 fst = "0.4"
