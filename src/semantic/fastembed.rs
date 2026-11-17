@@ -74,9 +74,10 @@ impl FastembedEmbedder {
                 "the embedding model is not loaded in tests".into(),
             ));
         }
-        init_onnx_runtime(priority)?;
+        let environment = init_onnx_runtime(priority)?;
         let model = TextEmbedding::try_new(
             TextInitOptions::new(EmbeddingModel::SnowflakeArcticEmbedXS)
+                .with_environment(environment)
                 .with_cache_dir(cache_dir.clone())
                 .with_show_download_progress(show_download_progress)
                 .with_intra_threads(priority.threads()),
@@ -162,15 +163,19 @@ pub fn prefixed_passages(passages: &[&str]) -> Vec<String> {
 
 /// Sets up the ONNX Runtime environment, once per process, for embedders of
 /// `priority`; later embedders share it.
-fn init_onnx_runtime(priority: EmbedPriority) -> Result<()> {
-    static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+fn init_onnx_runtime(priority: EmbedPriority) -> Result<ort::environment::Environment> {
+    // `ort` holds the environment weakly, so this handle keeps it alive.
+    static INIT: OnceLock<std::result::Result<ort::environment::Environment, String>> =
+        OnceLock::new();
     match INIT.get_or_init(|| initialize_onnx_runtime(priority)) {
-        Ok(()) => Ok(()),
+        Ok(environment) => Ok(environment.clone()),
         Err(message) => Err(AppError::ConfigError(message.clone())),
     }
 }
 
-fn initialize_onnx_runtime(priority: EmbedPriority) -> std::result::Result<(), String> {
+fn initialize_onnx_runtime(
+    priority: EmbedPriority,
+) -> std::result::Result<ort::environment::Environment, String> {
     #[cfg(feature = "release-dynamic-ort")]
     let builder = bundled_onnx_runtime()?;
     #[cfg(not(feature = "release-dynamic-ort"))]
@@ -183,12 +188,9 @@ fn initialize_onnx_runtime(priority: EmbedPriority) -> std::result::Result<(), S
     } else {
         builder
     };
-    if !builder.commit() {
-        return Err(
-            "Failed to initialize ONNX Runtime: an environment is already configured".to_string(),
-        );
-    }
-    Ok(())
+    builder
+        .build()
+        .map_err(|error| format!("Failed to initialize ONNX Runtime: {error}"))
 }
 
 /// A pool of `threads` inference threads at background priority, which
