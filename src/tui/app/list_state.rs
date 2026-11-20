@@ -18,6 +18,8 @@ impl App {
             &self.excluded_paths,
             self.all_kinds,
             self.scope_workspace(),
+            self.pinned_only,
+            &self.pinned,
         )
     }
 
@@ -106,6 +108,30 @@ impl App {
             selected.saturating_sub((-delta) as usize)
         };
         self.selected = Some(new_selected);
+    }
+
+    /// Toggles whether the selected conversation is pinned, persisting the
+    /// change to the user's pins file. Works the same in the list and in
+    /// the viewer, like `get_selected_path`.
+    pub(super) fn toggle_pin_selected(&mut self) {
+        let Some(path) = self.get_selected_path() else {
+            return;
+        };
+        let now_pinned = !self.pinned.contains(&path);
+        match crate::pins::set_pinned(&path, now_pinned) {
+            Ok(()) => {
+                if now_pinned {
+                    self.pinned.insert(path);
+                } else {
+                    self.pinned.remove(&path);
+                }
+                let message = if now_pinned { "Pinned" } else { "Unpinned" };
+                self.set_status_message(message.to_string());
+            }
+            Err(error) => {
+                self.set_status_message(format!("Could not save pin: {error}"));
+            }
+        }
     }
 
     /// Path of the selected conversation: the one in the viewer while it
@@ -232,6 +258,7 @@ impl App {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn filter_conversation_indices<I, C>(
     indices: I,
     conversations: &[C],
@@ -239,6 +266,8 @@ pub(super) fn filter_conversation_indices<I, C>(
     excluded_paths: &[String],
     all_kinds: bool,
     workspace: Option<&Workspace>,
+    pinned_only: bool,
+    pinned: &HashSet<PathBuf>,
 ) -> Vec<usize>
 where
     I: IntoIterator<Item = usize>,
@@ -263,6 +292,7 @@ where
         .filter(|&idx| {
             workspace.is_none_or(|workspace| workspace.contains(conversations[idx].borrow()))
         })
+        .filter(|&idx| !pinned_only || pinned.contains(&conversations[idx].borrow().path))
         .collect()
 }
 
